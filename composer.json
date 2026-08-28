@@ -1,0 +1,24 @@
+{
+    "name": "yydick/tui",
+    "type": "project",
+    "require": {
+        "php": ">=8.3",
+        "php-tui/php-tui": "^0.2",
+        "scrivo/highlight.php": "^9.18",
+        "ext-swoole": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "repositories": {
+        "packagist": {
+            "type": "composer",
+            "url": "https://mirrors.cloud.tencent.com/composer/"
+        }
+    }
+}

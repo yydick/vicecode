@@ -1,0 +1,9 @@
+# Composer 依赖（由 composer.lock 重建，不入库）
+/vendor/
+
+# pty 验收失败时转储的原始输出
+tests/*.log
+
+# 本地覆盖用环境变量（若后续新增）
+.env
+.env.local
