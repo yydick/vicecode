@@ -60,6 +60,10 @@ class App
     /** 侧栏面板（tab 行 + Explorer 树 / GIT / Search） */
     public SidebarPanel $sidebar;
 
+    /** 布局矩形缓存（见 areas()）：key 为视口 x:y:w:h */
+    private array $areaCache = [];
+    private string $areaKey = '';
+
     private Translator $i18n;
     /** 图标配置（config/icons.php），可定制；缺省回退到空串（只用文字标签） */
     private array $icons = [];
@@ -182,10 +186,29 @@ class App
         return $this->i18n->t($key, $params);
     }
 
-    /** 六个面板的矩形（命中测试与渲染共用），约束的唯一真身在 LayoutFactory。 */
+    /**
+     * 六个面板的矩形（命中测试与渲染共用），约束的唯一真身在 LayoutFactory。
+     *
+     * 同一帧内 handle() 与 render() 会各调一次，原来算两遍；这里按视口尺寸缓存，
+     * 窗口 resize 时 key 自然失效、重新计算，对 bin/tui.php 零改动。
+     *
+     * 注意：返回的是缓存的那批 Area，调用方只读不写（php-tui 的 Area 属性并非 readonly，
+     * 改了会污染后续帧）。
+     */
     public function areas(Area $vp): array
     {
-        return LayoutFactory::split($vp);
+        $key = sprintf(
+            '%d:%d:%d:%d',
+            $vp->position->x,
+            $vp->position->y,
+            $vp->width,
+            $vp->height
+        );
+        if ($key !== $this->areaKey) {
+            $this->areaKey = $key;
+            $this->areaCache = LayoutFactory::split($vp);
+        }
+        return $this->areaCache;
     }
 
     private function borderStyle(bool $focused): Style
