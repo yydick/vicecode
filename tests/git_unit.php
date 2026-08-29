@@ -103,6 +103,9 @@ use PhpTui\Tui\Display\Area;
 use PhpTui\Tui\Extension\Core\CoreExtension;
 use PhpTui\Tui\Widget\WidgetRenderer\AggregateWidgetRenderer;
 use PhpTui\Tui\Display\Buffer as TuiBuffer;
+use PhpTui\Term\Event\CharKeyEvent;
+use PhpTui\Term\Event\CodedKeyEvent;
+use PhpTui\Term\KeyCode;
 
 $vp = Area::fromDimensions(120, 40);
 $ext = new CoreExtension();
@@ -137,6 +140,89 @@ $renderer->render($renderer, $app->render($vp), $buffer3, $buffer3->area());
 $text3 = implode("\n", $buffer3->toLines());
 check(str_contains($text3, '不是 git 仓库'), '非仓库显示占位提示');
 
+// GIT 操作提示行渲染（rowsH 足够时显示）
+$app->git->setInRepo(true);
+$app->git->subView = 0;
+$app->git->status = [new GitFileStatus('src/App.php', 'M', '')];
+$app->sidebar->tabIndex = 1;
+$buffer4 = TuiBuffer::empty($vp);
+$renderer->render($renderer, $app->render($vp), $buffer4, $buffer4->area());
+$text4 = implode("\n", $buffer4->toLines());
+check(str_contains($text4, 'Commit'), 'GIT tab 渲染 Commit 按钮');
+check(str_contains($text4, '提交信息'), 'GIT tab 渲染提交信息输入框（占位）');
+
+// ─────────────── 7) R5 可视化交互（图标 + 输入框 + 下拉按钮） ───────────────
+echo "== R5 可视化交互 ==\n";
+use PhpTui\Term\Event\MouseEvent;
+use PhpTui\Term\MouseEventKind;
+use PhpTui\Term\MouseButton;
+
+$app2 = new App();
+$app2->sidebar->tabIndex = 1;
+$app2->git->setInRepo(true);
+$app2->git->status = [new GitFileStatus('src/App.php', 'M', '')];
+$app2->git->subView = 0;
+
+// a) 键盘：输入提交信息；Enter 提交（空消息不提交，且不触发 git）
+$app2->handle(CharKeyEvent::new('f', 0), $vp);
+$app2->handle(CharKeyEvent::new('i', 0), $vp);
+$app2->handle(CharKeyEvent::new('x', 0), $vp);
+check($app2->git->commitMsg === 'fix', 'GIT tab 键入进提交信息输入框');
+$app2->git->commitMsg = '';
+$app2->handle(CodedKeyEvent::new(KeyCode::Enter, 0), $vp);
+check(str_contains($app2->message, '提交信息'), '空消息 Enter 提交被拒（提示）');
+
+// b) 鼠标点 Commit ▾ 展开下拉；菜单含四项
+$sb = $app2->areas($vp)['sidebar'];
+$arrowCol = $sb->position->x + 1 + max(0, ($sb->width - 2) - 1);
+$arrowRow = $sb->position->y + 1 + 2 + 3; // 上边框+tab/分隔偏移+GIT_COMMIT_ROW
+$app2->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $arrowCol, $arrowRow, 0), $vp);
+check($app2->git->dropdownOpen, '点 Commit ▾ 展开下拉菜单');
+$bufferD = TuiBuffer::empty($vp);
+$renderer->render($renderer, $app2->render($vp), $bufferD, $bufferD->area());
+$textD = implode("\n", $bufferD->toLines());
+check(str_contains($textD, '提交和推送') && str_contains($textD, '提交和同步'), '下拉菜单含 提交/提交变更/提交和推送/提交和同步');
+
+// c) 点菜单项「提交」（空消息）触发派发并关闭下拉
+$menuRow = $sb->position->y + 1 + 2 + 4; // 偏移 + GIT_HEADER_ROW（下拉首项起点）
+$app2->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $arrowCol, $menuRow, 0), $vp);
+check(!$app2->git->dropdownOpen, '点菜单项后下拉关闭');
+check(str_contains($app2->message, '提交信息'), '点「提交」空消息不提交（提示）');
+
+// d) 点列表行文件名 = 打开变更(diff)，不崩
+$app2->git->status = [new GitFileStatus('src/App.php', 'M', '')];
+$app2->git->selIdx = 0;
+$itemRow = $sb->position->y + 1 + 2 + 5; // 偏移 + GIT_FIRST_ROW
+$innerX0 = $sb->position->x + 1;
+$nameCol = $sb->position->x + 1 + 11; // 文件名区域（rc=11，避开行首 ▦ + - ✕）
+$app2->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $nameCol, $itemRow, 0), $vp);
+check(true, '点列表文件名打开变更(diff) 未崩溃');
+
+// e) 行首 ▦ 图标 = 打开文件（进编辑器，非 diff）
+$app2->git->status = [new GitFileStatus('src/App.php', 'M', '')];
+$app2->git->selIdx = 0;
+$openCol = $innerX0 + 0; // rc=0 → ▦
+$app2->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $openCol, $itemRow, 0), $vp);
+check($app2->focusPanel() === 'editor' && ($app2->buffer !== null && $app2->buffer->path === 'src/App.php'),
+    '点 ▦ 图标在编辑器打开文件');
+
+// f) 行首 ✕ 图标 = 丢弃工作区改动，弹 y/n 确认（不直接执行，不可逆需二次确认）
+$app2->sidebar->tabIndex = 1;
+$app2->git->status = [new GitFileStatus('src/App.php', 'M', '')];
+$app2->git->selIdx = 0;
+$app2->git->commitMsg = '';
+$discardCol = $innerX0 + 6; // rc=6 → ✕
+$app2->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $discardCol, $itemRow, 0), $vp);
+check($app2->confirm !== null && ($app2->confirm['kind'] ?? '') === 'discard', '点 ✕ 弹丢弃确认框（不可逆，未直接执行）');
+$statusBuf = TuiBuffer::empty($vp);
+$renderer->render($renderer, $app2->render($vp), $statusBuf, $statusBuf->area());
+$statusTxt = implode("\n", $statusBuf->toLines());
+check(str_contains($statusTxt, '丢弃'), '确认框提示「丢弃工作区改动」');
+// 确认后真正丢弃：用不存在的路径冒烟，验证派发到 discard 且不直接改仓库
+$app2->confirm = ['kind' => 'discard', 'path' => '/nonexistent/path/xyz.php'];
+$app2->handle(CharKeyEvent::new('y', 0), $vp);
+check($app2->confirm === null, 'y 确认后关闭确认框（丢弃已派发）');
+
 echo $failed ? "\nM3 单测 FAIL\n" : "\nM3 单测全部 PASS\n";
 
 // ─────────────── 6) 异步刷新真跑 git（协程内，非 tty） ───────────────
@@ -150,14 +236,15 @@ echo "== 异步刷新（真实 git 仓库） ==\n";
     check($app->git->branch !== '' && $app->git->branch !== '(none)', '分支名非空: ' . $app->git->branch);
     check(is_array($app->git->status), 'status 已解析为数组');
     check(is_array($app->git->log), 'log 已解析为数组');
-    // 本仓库当前有改动（本测试文件自身是 untracked），应能解析出至少 1 条 ? 状态
-    $hasUntracked = false;
+    // 本仓库当前有改动（已跟踪文件被修改），应能解析出至少 1 条状态；其中应有 modified
+    check(count($app->git->status) >= 1, 'status 解析到至少 1 条改动');
+    $hasModified = false;
     foreach ($app->git->status as $s) {
-        if ($s->category() === GitClient::STATUS_UNTRACKED) {
-            $hasUntracked = true;
+        if (in_array($s->category(), [GitClient::STATUS_MODIFIED, GitClient::STATUS_STAGED], true)) {
+            $hasModified = true;
         }
     }
-    check($hasUntracked, 'status 解析到未跟踪文件（本测试文件自身 untracked）');
+    check($hasModified, 'status 含已修改/已暂存条目（本仓库有改动）');
 });
 
 echo $failed ? "\nM3 单测 FAIL\n" : "\nM3 单测全部 PASS\n";

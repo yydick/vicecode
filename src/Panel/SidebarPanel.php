@@ -7,6 +7,7 @@ use App\App;
 use App\Explorer\FileTree;
 use App\Explorer\TreeNode;
 use App\Git\GitClient;
+use App\Git\GitModel;
 use App\Text\DisplayWidth;
 use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\KeyCode;
@@ -44,6 +45,15 @@ final class SidebarPanel
     public const TABS = ['explorer', 'git', 'search'];
 
     private const DOUBLE_CLICK_MS = 400;
+
+    // GIT tab 内部分区行（inner 行号，0-based，相对 gitContent 起始）
+    private const GIT_INPUT_ROW = 2;   // 提交信息输入框
+    private const GIT_COMMIT_ROW = 3;  // Commit ▾ 按钮
+    private const GIT_HEADER_ROW = 4;  // 变更/日志 标题行（带 +/- 或 ⟳ 图标）
+    private const GIT_FIRST_ROW = 5;   // 首条变更/日志
+    // gitContent 之前的固定两行：tab 行 + 分隔线（SidebarPanel::content 总是先渲染），
+    // 故 gitContent 的实际屏幕行 = sidebar 顶 + 1(上边框) + 此偏移 + 行常量。
+    private const GIT_CONTENT_OFFSET = 2;
 
     private FileTree $tree;
 
@@ -147,9 +157,11 @@ final class SidebarPanel
     }
 
     /**
-     * GIT tab 内容（M3）：status 子视图（文件 + 状态着色）/ log 子视图（提交列表）。
-     * 窄侧栏放不下两者，用 [L] 切换子视图；选中行 REVERSED。
-     * 列表可视区按 selIdx 自动滚动（与 Explorer 同约定，content() 非纯函数）。
+     * GIT tab 内容（M3/R5，VSCode 风格可视化）：
+     *   行0 分支头 · 行1 分隔 · 行2 提交信息输入框 · 行3 Commit▾ 按钮 · 行4 变更/日志标题(+/- 或 ⟳)
+     *   · 行5+ 变更/日志列表（每行带 [+][-] 图标）。
+     * 下拉展开时（行3 的 ▾）行4 起被菜单覆盖。
+     * 选中行 REVERSED；列表可视区按 selIdx 自动滚动（content() 非纯函数，与 Explorer 同约定）。
      * @param list<Line> $lines
      */
     private function gitContent(Area $sidebar, array &$lines): void
@@ -164,25 +176,57 @@ final class SidebarPanel
             return;
         }
 
-        // 头部：分支 + 子视图标题
+        // 行0：分支 + 子视图标题
         $viewTitle = $git->subView === 0
             ? $this->shell->t('git.view_status', ['n' => count($git->status)])
             : $this->shell->t('git.view_log', ['n' => count($git->log)]);
-        $header = '⎇ ' . $git->branch . '  ' . $viewTitle;
         $lines[] = Line::fromSpans(Span::styled(
-            DisplayWidth::mbCutDisp($header, $innerW),
+            DisplayWidth::mbCutDisp('⎇ ' . $git->branch . '  ' . $viewTitle, $innerW),
             Style::default()->fg(AnsiColor::Cyan)));
         $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), Style::default()->fg(AnsiColor::Gray)));
 
-        $rowsH = max(0, $sidebar->height - 4);
-        if ($rowsH <= 0) {
+        // 行2：提交信息输入框（默认聚焦，键入即进 commitMsg；空时显占位）
+        $msg = $git->commitMsg;
+        $inputText = $msg === '' ? $this->shell->t('git.msg_placeholder') : $msg;
+        $inputStyle = $msg === '' ? Style::default()->fg(AnsiColor::DarkGray) : Style::default();
+        $lines[] = Line::fromSpans(Span::styled(
+            DisplayWidth::mbCutDisp('> ' . $inputText . '▏', $innerW), $inputStyle));
+
+        // 行3：Commit ▾ 按钮（REVERSED 表示可点击；▾ 展开下拉）
+        $arrow = $git->dropdownOpen ? '▴' : '▾';
+        $btn = DisplayWidth::mbPadDisp(' Commit ' . $arrow, $innerW);
+        $lines[] = Line::fromSpans(Span::styled($btn, Style::default()->addModifier(Modifier::REVERSED)));
+
+        // 下拉菜单：覆盖从标题行起，点击项触发对应动作
+        if ($git->dropdownOpen) {
+            $i = 0;
+            foreach (GitModel::DROPDOWN as $label) {
+                $text = ($i === 0 ? '● ' : '  ') . $label;
+                $lines[] = Line::fromSpans(Span::styled(
+                    DisplayWidth::mbCutDisp($text, $innerW),
+                    $i === 0 ? Style::default()->fg(AnsiColor::Green) : Style::default()));
+                $i++;
+            }
             return;
         }
 
-        if ($git->loading && $git->subView === 0 && $git->status === []) {
-            $lines[] = Line::fromSpans(Span::styled(
-                DisplayWidth::mbCutDisp($this->shell->t('git.loading'), $innerW),
-                Style::default()->fg(AnsiColor::DarkGray)));
+        // 行4：变更/日志 标题（带 +/- 或 ⟳ 图标）
+        if ($git->subView === 0) {
+            $title = $this->shell->t('git.changes', ['n' => count($git->status)]);
+            $head = DisplayWidth::mbCutDisp($title, max(0, $innerW - 5))
+                . '  ' . str_repeat(' ', max(0, $innerW - mb_strwidth($title) - 5)) . '+ -';
+            $lines[] = Line::fromSpans(Span::styled($head, Style::default()->fg(AnsiColor::Yellow)));
+        } else {
+            $title = $this->shell->t('git.log_title', ['n' => count($git->log)]);
+            $head = DisplayWidth::mbCutDisp($title, max(0, $innerW - 4))
+                . '  ' . str_repeat(' ', max(0, $innerW - mb_strwidth($title) - 4)) . '⟳';
+            $lines[] = Line::fromSpans(Span::styled($head, Style::default()->fg(AnsiColor::Yellow)));
+        }
+
+        // 行5+：变更/日志列表
+        $innerH = max(0, $sidebar->height - 2);
+        $itemRows = max(0, $innerH - self::GIT_FIRST_ROW);
+        if ($itemRows <= 0) {
             return;
         }
 
@@ -194,15 +238,17 @@ final class SidebarPanel
                     Style::default()->fg(AnsiColor::Green)));
                 return;
             }
-            $this->clampGitOffset(count($items), $rowsH);
-            for ($i = $this->gitOffset; $i < min($this->gitOffset + $rowsH, count($items)); $i++) {
+            $this->clampGitOffset(count($items), $itemRows);
+            for ($i = $this->gitOffset; $i < min($this->gitOffset + $itemRows, count($items)); $i++) {
                 $f = $items[$i];
                 $sel = $i === $git->selIdx;
                 $text = ' ' . $f->badge() . ' ' . $f->displayPath();
                 $style = $sel
                     ? Style::default()->addModifier(Modifier::REVERSED)
                     : Style::default()->fg($this->gitColor($f->category()));
-                $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($text, $innerW), $style));
+                // 行首图标：▦=打开文件，+ =暂存，- =取消暂存，✕ =丢弃工作区改动（不可逆）；点文件名=开 diff
+                $line = '▦ + - ✕ ' . $text;
+                $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($line, $innerW), $style));
             }
         } else {
             $items = $git->log;
@@ -212,8 +258,8 @@ final class SidebarPanel
                     Style::default()->fg(AnsiColor::DarkGray)));
                 return;
             }
-            $this->clampGitOffset(count($items), $rowsH);
-            for ($i = $this->gitOffset; $i < min($this->gitOffset + $rowsH, count($items)); $i++) {
+            $this->clampGitOffset(count($items), $itemRows);
+            for ($i = $this->gitOffset; $i < min($this->gitOffset + $itemRows, count($items)); $i++) {
                 $c = $items[$i];
                 $sel = $i === $git->selIdx;
                 $text = $c->hash . ' ' . $c->subject;
@@ -257,6 +303,118 @@ final class SidebarPanel
         }
     }
 
+    /** GIT tab 各可点击元素的屏幕坐标（渲染与命中测试共用，保证一致） */
+    private function gitRects(Area $sb): array
+    {
+        $innerX = $sb->position->x + 1;
+        $innerW = max(0, $sb->width - 2);
+        $y = static fn (int $row): int => $sb->position->y + 1 + self::GIT_CONTENT_OFFSET + $row;
+        return [
+            'innerX' => $innerX,
+            'innerW' => $innerW,
+            'inputY' => $y(self::GIT_INPUT_ROW),
+            'commitY' => $y(self::GIT_COMMIT_ROW),
+            'commitArrowX' => $innerX + max(0, $innerW - 1),
+            'headerY' => $y(self::GIT_HEADER_ROW),
+            'headerPlusX' => $innerX + max(0, $innerW - 3),   // 标题行 '+' 在倒数第 3 列
+            'headerMinusX' => $innerX + max(0, $innerW - 1),  // 标题行 '-'/'⟳' 在末列
+            'firstY' => $y(self::GIT_FIRST_ROW),
+            'itemOpenX' => $innerX + 0,                      // 列表行 ▦ 在 inner 列 0（打开文件）
+            'itemPlusX' => $innerX + 2,                      // 列表行 + 在 inner 列 2（暂存）
+            'itemMinusX' => $innerX + 4,                     // 列表行 - 在 inner 列 4（取消暂存）
+            'itemDiscardX' => $innerX + 6,                   // 列表行 ✕ 在 inner 列 6（丢弃工作区改动）
+            'itemNameX' => $innerX + 8,                     // 列表行 文件名起始列（点此=开 diff）
+            'menuY0' => $y(self::GIT_HEADER_ROW),           // 下拉覆盖从标题行起
+        ];
+    }
+
+    /**
+     * GIT tab 鼠标点击分发（R5 可视化）：
+     *   - 下拉展开时：点菜单项触发动作，点别处关闭；
+     *   - 输入框行：默认聚焦，无需处理；
+     *   - Commit 行：点 ▾ 切换下拉，点主区 = 提交；
+     *   - 标题行：changes 的 +/- = 全部暂存/取消全部暂存，日志的 ⟳ = 刷新，点标题文字切子视图；
+     *   - 列表行：+/- = 暂存/取消暂存该文件，点文件名 = 打开变更(diff)。
+     * @param array<string,Area> $areas
+     */
+    private function gitClick(Position $pos, array $areas): bool
+    {
+        $git = $this->shell->git;
+        $r = $this->gitRects($areas['sidebar']);
+        $col = $pos->x;
+        $row = $pos->y;
+
+        // 下拉展开：菜单项命中或点别处关闭
+        if ($git->dropdownOpen) {
+            if ($row >= $r['menuY0'] && $row < $r['menuY0'] + count(GitModel::DROPDOWN)) {
+                $keys = array_keys(GitModel::DROPDOWN);
+                $git->runDropdown($keys[$row - $r['menuY0']]);
+            } else {
+                $git->dropdownOpen = false;
+            }
+            return true;
+        }
+
+        if ($row === $r['inputY']) {
+            return true; // 输入框默认聚焦，点击即聚焦
+        }
+
+        if ($row === $r['commitY']) {
+            if ($col >= $r['commitArrowX'] - 1) {
+                $git->dropdownOpen = true;
+            } else {
+                $git->commit($git->commitMsg);
+            }
+            return true;
+        }
+
+        if ($row === $r['headerY']) {
+            if ($git->subView === 0) {
+                if ($col >= $r['headerMinusX'] - 1) {
+                    $git->unstageAll();
+                } elseif ($col >= $r['headerPlusX'] - 1) {
+                    $git->stageAll();
+                } else {
+                    $git->toggleSubView();
+                }
+            } else {
+                if ($col >= $r['headerMinusX'] - 1) {
+                    $git->refresh();
+                } else {
+                    $git->toggleSubView();
+                }
+            }
+            return true;
+        }
+
+        if ($row >= $r['firstY']) {
+            $idx = ($row - $r['firstY']) + $this->gitOffset;
+            $items = $git->subView === 0 ? $git->status : $git->log;
+            if (!isset($items[$idx])) {
+                return true;
+            }
+            $git->selIdx = $idx;
+            if ($git->subView === 0) {
+                // 行首图标：▦ 打开文件 / + 暂存 / - 取消暂存 / ✕ 丢弃（不可逆，弹确认）；其余=开 diff
+                $rc = $col - $r['innerX'];
+                if ($rc <= 1) {
+                    $git->openFileSelected();          // ▦ 在列 0~1
+                } elseif ($rc >= 2 && $rc <= 3) {
+                    $git->stageSelected();             // + 在列 2~3
+                } elseif ($rc >= 4 && $rc <= 5) {
+                    $git->unstageSelected();           // - 在列 4~5
+                } elseif ($rc >= 6 && $rc <= 7) {
+                    $git->requestDiscardSelected();    // ✕ 在列 6~7（弹确认）
+                } else {
+                    $git->openDiff();                  // 文件名 = 打开变更(diff)
+                }
+            }
+            return true;
+        }
+
+        return true;
+    }
+
     // ── 事件 ────────────────────────────────────────
 
     /**
@@ -279,6 +437,11 @@ final class SidebarPanel
                 $this->shell->git->refresh();
             }
             return true;
+        }
+
+        // GIT tab：交给 gitClick 处理（输入框/Commit 按钮/下拉/标题 +/-/列表项）
+        if ($this->tabIndex === 1) {
+            return $this->gitClick($pos, $areas);
         }
 
         // 树条目（inner 第 2 行起）
@@ -340,7 +503,7 @@ final class SidebarPanel
         }
     }
 
-    /** GIT tab 按键（M3）：↑/↓ 移动、Enter 看 diff、L 切 status/log、R 刷新 */
+    /** GIT tab 按键（M3/R5）：↑/↓ 移动、Enter 提交、Backspace 删字、Esc 关下拉 */
     private function gitKey(CodedKeyEvent $e): bool
     {
         $git = $this->shell->git;
@@ -352,8 +515,17 @@ final class SidebarPanel
                 $git->moveSelection(1);
                 return true;
             case KeyCode::Enter:
-                $git->openDiff();
+                $git->commit($git->commitMsg);   // 提交（空 message 会提示）
                 return true;
+            case KeyCode::Backspace:
+                $git->commitMsg = mb_substr($git->commitMsg, 0, max(0, mb_strlen($git->commitMsg) - 1));
+                return true;
+            case KeyCode::Esc:
+                if ($git->dropdownOpen) {
+                    $git->dropdownOpen = false;
+                    return true;
+                }
+                return false;
             default:
                 return false;
         }

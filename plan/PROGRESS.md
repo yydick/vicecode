@@ -1,6 +1,6 @@
 # 进度总结（PROGRESS）
 
-> 最后更新：2026-08-27
+> 最后更新：2026-08-30
 > 配套文档：`plan/PLAN.md`（总计划）、`plan/MILESTONES.md`（M0–M7 里程碑）
 > 详细坑与 API 见记忆 `project_php_tui_facts.md`
 
@@ -126,12 +126,21 @@ Terminal 面板从占位变成真正能跑命令的终端。R1–R7 全做。
 - **R2 git log 展示** ✅：`git log --pretty=format:%h|%an|%ar|%s` 解析，`[L]` 在 status/log 子视图间切换，可滚动。
 - **R3 分支显示在状态栏** ✅：`git rev-parse --abbrev-ref HEAD` 进 `StatusBarPanel`（`状态.branch`）。
 - **R4 git diff 查看** ✅：GIT tab 选中文件 `Enter` → `git diff [--cached] -- <path>` 载入编辑器只读 Buffer 查看（复用编辑器渲染）。
-- 交互：GIT tab 内 `↑/↓` 移动、`Enter` 看 diff、`L` 切 status/log、`R` 刷新；切到 GIT tab 自动触发异步刷新。
+- **R5 基础操作 stage/commit/push** ✅（**可视化重做，弃用字母快捷键**）：用户反馈不喜欢 `a/s/c/p` 字符说明，且 `p` 会导致键位"漏"到终端。改为 VSCode 风格：
+  - 顶部**提交信息输入框**（聚焦 GIT tab 时键入即进 `commitMsg`；空时显占位 `提交信息`）；
+  - **`Commit ▾` 按钮**（REVERSED 高亮），右侧 `▾` 展开下拉菜单，含四项：**提交**(commit) / **提交变更**(commitAll) / **提交和推送**(commitAndPush) / **提交和同步**(commitAndSync)；
+  - 变更标题行右侧 ` + - ` 图标：点击 `+`=`stage all`（`git add -A`）、`-`=`clear all changed`（`git restore --staged .`，**安全、可恢复**）；
+  - 每条变更行首四个图标：`▦`=在编辑器打开文件、`+`=stage 选中、`-`=unstage 选中（`git restore --staged -- <path>`，**安全、可恢复**）、`✕`=discard 工作区改动（`git restore -- <path>`，**不可逆**，弹 y/n 确认框防误触；未跟踪文件走 `git clean -f -- <path>`）；点击文件名=`打开 diff`（对比视图，只读）。
+  - 键盘等价于图标：`+`/`=`=stage 选中、`-`=unstage 选中、`Enter`=提交、`Backspace`=删 commitMsg 末字符、`Esc`=关下拉。
+  - 所有操作为协程异步；下拉四项各自调 `doCommit`/`pushNow`/`syncNow`（pull --rebase + push），完成后刷新状态/分支并写状态栏消息。
+  - **已删除**旧的通用单行输入提示（App::$prompt / openPrompt / closePrompt）与 `c` 字母提交模态弹窗——用户明确要"输入框+按钮"而非模态。
+- 交互：GIT tab 内 `↑/↓` 移动、`Enter` 看 diff或提交、`L` 切 status/log、`R` 刷新；切到 GIT tab 自动触发异步刷新。
+
+**关键修复（2026-08-30）**：`GitClient::exec` 原本在协程内走 `Swoole\Coroutine\System::exec`，但该函数依赖 `SWOOLE_HOOK_PROC`，而 bin/tui.php 刻意关闭了该 HOOK（否则 `proc_close` 返回值被改写、headless 测不动 runner）。结果真实 pty 下 `System::exec` 返回 false → `refresh()` 全失败、`branch` 永远空、GIT 面板退化成"不是 git 仓库"占位，且**headless 单测全绿却 pty 漏判**（单测跑在协程外走 `@exec` 回退分支才过）。已统一改为原生 `cd <cwd> && git ... 2>&1` 的 `@exec`，协程内由独立 `\go` 子协程承载、不卡主循环。这是典型的 headless≠pty 落差，务必双跑验收。
 
 **新增文件**：`src/Git/{GitClient,GitFileStatus,GitCommit,GitModel}.php`；`Buffer::fromString`（虚拟只读文档）；`EditorPanel::openVirtual`。
-**验收**：`tests/git_unit.php`（解析单测 + 注入数据渲染 + 协程内真实 git 异步刷新，全 PASS）；`tests/pty_git.php`（真实 pty 点 GIT tab→看分支/状态→Enter 看 diff→Ctrl+Q 干净退出，exit=0）。m0/m1/m2 回归全绿（m0 一处断言前提是旧 GIT tab 无内容，已改为切回 Explorer tab 再验证树导航）。
+**验收**：`tests/git_unit.php`（解析 + 渲染 + 键入/空消息拒绝 + 下拉/菜单命中 + ▦开文件/✕丢弃确认 + 真实异步刷新，全 PASS）；`tests/pty_git.php`（真实 pty 点 GIT tab→看分支 master/状态→键入提交信息→点 Commit▾ 展开四项下拉→点「提交」空消息被拒→点文件名开 diff→点 ▦ 开文件→点 ✕ 弹丢弃确认→n 取消→Ctrl+Q 退出，exit=0）。m0/m1/m1_edge/m2/m2_probe_runner/editor_render_check/diff_invariant2/coroutine_channel_test/pty_run 回归全绿。
 
-**待做（M3 出口标准里 R5/R6，P1/P2）**：
-- **R5 基础操作 stage/commit/push**：需通用输入提示框（commit message 输入），尚未实现。
+**待做（M3 出口标准里 R6，P2）**：
 - **R6 分支切换**：列出本地分支并可 `checkout/switch`，尚未实现。
 

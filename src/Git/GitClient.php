@@ -93,21 +93,20 @@ final class GitClient
 
     /**
      * 执行 git 子命令，返回 ['code'=>int,'output'=>string]。
-     * 协程内用 System::exec（不阻塞 reactor）；非协程回退 proc_open 同步。
+     *
+     * 统一走原生 exec（切到仓库目录再跑，2>&1 合并错误输出）：
+     *  - 本工程在 bin/tui.php 刻意关闭 SWOOLE_HOOK_PROC（否则 proc_close 返回值被改写、
+     *    headless 测试驱动不了 runner），而 Coroutine\System::exec 依赖该 HOOK，
+     *    关掉后会返回 false → refresh 全失败、branch 永远空。故不依赖 System::exec。
+     *  - 在协程内（M5 异步刷新）这是阻塞调用，但 refresh() 自身跑在独立 \go 子协程里，
+     *    只阻塞该子协程、不卡主循环；git 命令很快，UI 无感。
+     *  - 非协程（单测）直接同步跑，行为一致。
      *
      * @param string[] $args
      */
     public static function exec(string $cwd, array $args): array
     {
         $cmd = 'git ' . implode(' ', array_map('escapeshellarg', $args));
-        if (\Swoole\Coroutine::getCid() > -1) {
-            $r = \Swoole\Coroutine\System::exec($cmd);
-            if ($r === false) {
-                return ['code' => -1, 'output' => ''];
-            }
-            return ['code' => (int) ($r['code'] ?? -1), 'output' => (string) ($r['output'] ?? '')];
-        }
-        // 非协程回退：切到仓库目录再执行
         $full = 'cd ' . escapeshellarg($cwd) . ' && ' . $cmd . ' 2>&1';
         $out = @exec($full, $lines, $code);
         unset($out);

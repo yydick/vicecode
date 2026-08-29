@@ -29,6 +29,9 @@ final class StatusBarPanel
         // 未保存确认进行中：整条状态栏改为确认提示
         if ($this->shell->confirm !== null) {
             $kind = $this->shell->confirm['kind'] ?? 'quit';
+            if ($kind === 'discard') {
+                return ' ' . $this->shell->t('confirm.discard', ['path' => $this->shell->confirm['path'] ?? '']);
+            }
             return ' ' . ($kind === 'close'
                 ? $this->shell->t('confirm.close_dirty')
                 : $this->shell->t('confirm.quit_dirty'));

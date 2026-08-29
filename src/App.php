@@ -179,6 +179,12 @@ class App
         $this->lifecycle->requestClose($path);
     }
 
+    /** 请求丢弃某文件工作区改动（不可逆，先弹 y/n 确认；GIT 面板 discard 图标走这里） */
+    public function requestDiscard(string $path): void
+    {
+        $this->lifecycle->requestDiscard($path);
+    }
+
     /** 设置状态栏瞬时消息（供面板回写，如终端中断命令后提示「已中断」） */
     public function setMessage(string $msg): void
     {
@@ -373,17 +379,26 @@ class App
                 }
                 return;
             }
-            // GIT tab 专用字符键（focus=sidebar 且当前在 GIT tab）
+            // GIT tab 交互（focus=sidebar 且当前在 GIT tab）：可视化图标 + 输入框 + 按钮，
+            // 不再用字母快捷键。默认输入进提交信息框；+/- 暂存/取消暂存选中；Enter 提交。
             if ($this->focusPanel() === 'sidebar' && $this->sidebar->tabIndex === 1) {
-                $ch = strtolower($event->char);
-                if ($ch === 'l') {
-                    $this->git->toggleSubView();
+                if ($event instanceof CodedKeyEvent) {
+                    return; // GIT 的 Coded 键（Backspace/Enter/Esc/方向）由下面统一分支处理
+                }
+                $ch = $event->char;
+                if ($ch === '+' || $ch === '=') {   // = 常为 Shift++，统一当 +
+                    $this->git->stageSelected();
                     return;
                 }
-                if ($ch === 'r') {
-                    $this->git->refresh();
+                if ($ch === '-') {
+                    $this->git->unstageSelected();
                     return;
                 }
+                // 其余可打印字符进提交信息输入框
+                if (strlen($ch) === 1 && ord($ch) >= 32 && !($event->modifiers & KeyModifiers::CONTROL)) {
+                    $this->git->commitMsg .= $ch;
+                }
+                return;
             }
             if (strtolower($event->char) === 'q') {
                 $this->lifecycle->requestQuit();

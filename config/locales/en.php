@@ -45,6 +45,7 @@ return [
 
     'confirm.quit_dirty'  => 'Unsaved changes: y quit / n cancel',
     'confirm.close_dirty' => 'File not saved: y close & discard / n cancel',
+    'confirm.discard'     => 'Discard working changes (IRREVERSIBLE!): y discard / n cancel: {path}',
 
     // 终端（M2）
     'term.running'       => 'running',
@@ -62,6 +63,21 @@ return [
     'git.clean'          => '(working tree clean)',
     'git.no_log'         => '(no commit history)',
     'git.no_diff'        => 'no diff for this file',
+    'git.commit_title'   => 'Commit message',
+    'git.msg_placeholder'=> 'Type commit message…',
+    'git.changes'        => 'Changes {n}',
+    'git.log_title'      => 'Log {n}',
+    'git.stage_all'      => 'Staged all changes',
+    'git.stage_file'     => 'Staged: {path}',
+    'git.unstage_file'   => 'Unstaged: {path}',
+    'git.unstage_all'    => 'Unstaged all',
+    'git.discard_file'   => 'Discarded working changes: {path}',
+    'git.committed'      => 'Committed',
+    'git.commit_empty'   => 'Empty message, aborted',
+    'git.push_done'      => 'Pushed',
+    'git.push_fail'      => 'Push failed: {msg}',
+    'git.op_fail'        => 'Operation failed: {msg}',
+    'git.hint'           => '[a]stage all [s]stage [c]commit [p]push [L]log [Enter]diff [R]refresh',
     'search.placeholder' => 'search (M4)',
     'search.prompt'      => ' > ',
 ];

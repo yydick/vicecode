@@ -49,6 +49,12 @@ final class Lifecycle
         $this->close($path);
     }
 
+    /** 请求丢弃某文件工作区改动（不可逆）：先弹 y/n 确认 */
+    public function requestDiscard(string $path): void
+    {
+        $this->shell->confirm = ['kind' => 'discard', 'path' => $path];
+    }
+
     /**
      * 确认进行中：只响应 y / n / Esc（Ctrl+Q 视为确认，与退出热键一致）。
      * 其余输入一律吞掉，避免在弹确认时误操作到下层面板。
@@ -78,6 +84,10 @@ final class Lifecycle
         $kind = $this->shell->confirm['kind'] ?? 'quit';
         $path = $this->shell->confirm['path'] ?? null;
         $this->shell->confirm = null;
+        if ($kind === 'discard' && $path !== null) {
+            $this->shell->git->discard($path);
+            return;
+        }
         if ($kind === 'close' && $path !== null) {
             $this->close($path);
         } else {

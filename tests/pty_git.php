@@ -2,8 +2,11 @@
 declare(strict_types=1);
 
 /**
- * M3 真实 pty 驱动：点击切到 GIT tab → 异步刷新 → 看分支/状态 → Enter 看 diff → q 退出。
- * 断言：exit=0、无致命错误、屏幕含分支名与状态行、diff 可载入编辑器（不崩）。
+ * M3/R5 真实 pty 驱动（可视化图标 + 输入框 + 按钮）：
+ *   点 GIT tab → 异步刷新 → 看分支/变更 → 键入提交信息 → 点 Commit▾ 展开下拉
+ *   → 点「提交」(空消息，不建提交) → 点列表文件名打开 diff → Ctrl+Q 干净退出。
+ * 点击坐标用探针 App 的布局精确算出（0-based→SGR 1-based），不靠猜。
+ * 全程不创建提交 / 不改仓库（空消息提交被拒；diff 只读）。
  *
  * 运行：php tests/pty_git.php
  */
@@ -47,6 +50,37 @@ function check(bool $cond, string $msg): void
     }
 }
 
+// 探针：用同尺寸布局算出 GIT tab 各元素屏幕坐标
+require __DIR__ . '/../vendor/autoload.php';
+use App\App;
+use PhpTui\Tui\Display\Area;
+$probe = new App();
+$sb = $probe->areas(Area::fromDimensions(120, 40))['sidebar'];
+$sbX = $sb->position->x;
+$sbY = $sb->position->y;
+$innerW = $sb->width - 2;
+// GIT tab 段中点（tab 行 y=1 0-based）
+$tabCol = $sbX + 1 + intdiv($innerW, 3) + 1;
+$tabRow = $sbY + 1;
+// Commit ▾ 箭头（行 GIT_COMMIT_ROW=3；箭头在末 inner 列；含 tab/分隔 偏移 +2）
+$arrowCol = $sbX + 1 + ($innerW - 1);
+$arrowRow = $sbY + 1 + 2 + 3;
+// 下拉首项的行（menuY0 = header row = 4，含偏移 +2）
+$menuRow = $sbY + 1 + 2 + 4;
+// 列表首行（GIT_FIRST_ROW=5，含偏移 +2）的文件名列
+$itemRow = $sbY + 1 + 2 + 5;
+$nameCol = $sbX + 12; // rc=11，文件名区域（避开行首 ▦ + - ✕）
+// 行首 ▦ 打开文件（rc=0 → innerX+0），✕ 丢弃（rc=6 → innerX+6）
+$openCol = $sbX + 1;
+$discardCol = $sbX + 1 + 6;
+// SGR 1-based
+$tc = $tabCol + 1; $tr = $tabRow + 1;
+$ac = $arrowCol + 1; $ar = $arrowRow + 1;
+$mr = $menuRow + 1;
+$ic = $nameCol + 1; $ir = $itemRow + 1;
+$oc = $openCol + 1; $or = $itemRow + 1;
+$dc = $discardCol + 1; $dr = $itemRow + 1;
+
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
 $proc = proc_open([PHP_BINARY, 'bin/tui.php'], $descs, $pipes, null, $env);
 if ($proc === false) {
@@ -57,35 +91,70 @@ stream_set_blocking($pipes[0], false);
 stream_set_blocking($pipes[1], false);
 usleep(300000);
 
-// 侧栏 GIT tab：120x40 下 sidebar 占左侧 ~30 列，tab 行在屏幕 y=1（0-based），
-// 第 2 段（GIT）inner 列约 [9,18)。SGR 坐标 1-based。
-$COL = 12;
-$ROW = 2;
-fwrite($pipes[0], "\x1b[<0;{$COL};{$ROW}M");
-fwrite($pipes[0], "\x1b[<0;{$COL};{$ROW}m");
-usleep(900000); // 等异步 git status/log/branch 刷新
-
-// 切到 log 子视图（l）再切回状态（l），强制在刷新完成后多渲几帧，确保读到含分支的帧
-fwrite($pipes[0], 'l');
-usleep(200000);
-fwrite($pipes[0], 'l');
-usleep(300000);
+// 点 GIT tab → 触发异步刷新
+fwrite($pipes[0], "\x1b[<0;{$tc};{$tr}M");
+fwrite($pipes[0], "\x1b[<0;{$tc};{$tr}m");
+usleep(900000);
 
 $out = normalize($readPty($pipes[1], 8192));
 check(str_contains($out, 'master'), '屏幕含当前分支 master');
-check(str_contains($out, '状态'), 'GIT tab 显示「状态」子视图');
-check(str_contains($out, '⎇') || str_contains($out, 'branch') || str_contains($out, '分支'), '状态栏/侧栏显示分支信息');
+check(str_contains($out, '变更') || str_contains($out, '状态'), 'GIT tab 显示变更/状态');
+check(str_contains($out, 'commit'), 'GIT tab 渲染 Commit 按钮');
+check(str_contains($out, '提交信息'), 'GIT tab 渲染提交信息输入框（占位）');
 
-// Down 移动 git 选中 + Enter 看 diff（不崩即可；可能无 diff 安全跳过）
-fwrite($pipes[0], "\x1b[B");
-usleep(200000);
-fwrite($pipes[0], "\r");
+// 键入提交信息（focus=sidebar GIT tab 时键入进 commitMsg）
+fwrite($pipes[0], 'hellomsg');
 usleep(400000);
+$outTyped = normalize($readPty($pipes[1], 16384));
+check(str_contains($outTyped, 'hellomsg'), '键入进提交信息输入框（捕获 hellomsg）');
+// 清空消息，避免后续提交真的建提交
+for ($i = 0; $i < 10; $i++) {
+    fwrite($pipes[0], "\x1b\x7f"); // Backspace（ESC + DEL 序列）
+    usleep(30000);
+}
+usleep(150000);
 
-$out2 = normalize($readPty($pipes[1], 8192));
-check(true, '切换子视图 / 移动 / 看 diff 未崩溃');
+// 点 Commit ▾ 展开下拉
+fwrite($pipes[0], "\x1b[<0;{$ac};{$ar}M");
+fwrite($pipes[0], "\x1b[<0;{$ac};{$ar}m");
+usleep(250000);
+$outDrop = normalize($readPty($pipes[1], 8192));
+check(str_contains($outDrop, '提交和推送') && str_contains($outDrop, '提交和同步'), 'Commit▾ 展开下拉（含 提交/提交变更/提交和推送/提交和同步）');
 
-// 干净退出：用 Ctrl+Q（任何面板都能退，避免焦点在编辑器时 q 变成输入）
+// 点首项「提交」（空消息，不建提交）
+fwrite($pipes[0], "\x1b[<0;{$ac};{$mr}M");
+fwrite($pipes[0], "\x1b[<0;{$ac};{$mr}m");
+usleep(250000);
+$outCommit = normalize($readPty($pipes[1], 8192));
+check(str_contains($outCommit, '提交信息'), '点「提交」空消息被拒（提示，未建提交）');
+
+// 点列表文件名 = 打开变更(diff)，只读，不崩
+fwrite($pipes[0], "\x1b[<0;{$ic};{$ir}M");
+fwrite($pipes[0], "\x1b[<0;{$ic};{$ir}m");
+usleep(400000);
+$outDiff = normalize($readPty($pipes[1], 8192));
+check(true, '点列表文件名打开 diff 未崩溃');
+
+// 点行首 ▦ = 在编辑器打开文件（焦点切到 editor）
+fwrite($pipes[0], "\x1b[<0;{$oc};{$or}M");
+fwrite($pipes[0], "\x1b[<0;{$oc};{$or}m");
+usleep(400000);
+$outOpen = normalize($readPty($pipes[1], 8192));
+check(str_contains($outOpen, 'editor'), '点 ▦ 在编辑器打开文件（焦点=EDITOR）');
+
+// 点行首 ✕ = 丢弃工作区改动，弹 y/n 确认框（不可逆，这里只取消、绝不确认 y）
+fwrite($pipes[0], "\x1b[<0;{$dc};{$dr}M");
+fwrite($pipes[0], "\x1b[<0;{$dc};{$dr}m");
+usleep(250000);
+$outDiscard = normalize($readPty($pipes[1], 8192));
+check(str_contains($outDiscard, '丢弃'), '点 ✕ 弹「丢弃工作区改动」确认框');
+// 取消（n）：确认框消失，且不改仓库
+fwrite($pipes[0], 'n');
+usleep(200000);
+$outCancel = normalize($readPty($pipes[1], 8192));
+check(!str_contains($outCancel, '丢弃工作区改动'), 'n 取消后确认框关闭（未丢弃）');
+
+// 干净退出
 fwrite($pipes[0], "\x11");
 usleep(300000);
 $status = proc_get_status($proc);
