@@ -74,16 +74,6 @@ function pump(App $app, float $maxSec = 10.0): void
     }
 }
 
-/** 取 App 私有的 termBuf（供断言行内容与 stderr 标记）。 */
-function termBufOf(App $app): TerminalBuffer
-{
-    $p = new ReflectionProperty(App::class, 'termBuf');
-    $p->setAccessible(true);
-    $buf = $p->getValue($app);
-    assert($buf instanceof TerminalBuffer);
-    return $buf;
-}
-
 // ─────────────────── 1) TerminalBuffer ───────────────────
 echo "== TerminalBuffer ==\n";
 $b = new TerminalBuffer();
@@ -168,21 +158,21 @@ check(str_contains($text, '$'), '输入行提示符渲染');
 
 // R1 输入行
 typeTerm($app, $vp, 'echo hello-m2');
-check($app->termInput === 'echo hello-m2', 'R1 可打印字符进输入行');
-check($app->termPos === 13, 'R1 光标跟随输入');
+check($app->terminal->input === 'echo hello-m2', 'R1 可打印字符进输入行');
+check($app->terminal->pos === 13, 'R1 光标跟随输入');
 $app->handle(CharKeyEvent::new('q', 0), $vp);
-check(!$app->quit && $app->termInput === 'echo hello-m2q', 'R1 terminal 聚焦时 q 进输入行而非退出');
+check(!$app->quit && $app->terminal->input === 'echo hello-m2q', 'R1 terminal 聚焦时 q 进输入行而非退出');
 $app->handle(CharKeyEvent::new("\x7f", 0), $vp);
-check($app->termInput === 'echo hello-m2', 'R1 Backspace 删除光标前字符');
+check($app->terminal->input === 'echo hello-m2', 'R1 Backspace 删除光标前字符');
 $app->handle(CodedKeyEvent::new(KeyCode::Left, 0), $vp);
-check($app->termPos === 12, 'R1 Left 移动光标');
+check($app->terminal->pos === 12, 'R1 Left 移动光标');
 $app->handle(CodedKeyEvent::new(KeyCode::End, 0), $vp);
-check($app->termPos === 13, 'R1 End 回到行尾');
+check($app->terminal->pos === 13, 'R1 End 回到行尾');
 
 // R2/R3 提交 → 执行 → 输出渲染
 $app->handle(CharKeyEvent::new("\r", 0), $vp);
 check($app->termRunning(), 'R2 回车提交后命令在跑');
-check($app->termInput === '', 'R1 提交后输入行清空');
+check($app->terminal->input === '', 'R1 提交后输入行清空');
 pump($app);
 check(!$app->termRunning(), 'R2 命令结束');
 $text = renderApp($app, $vp);
@@ -196,35 +186,35 @@ pump($app);
 $text = renderApp($app, $vp);
 check(str_contains($text, 'boom'), 'R3 stderr 内容进入输出');
 check(str_contains($text, '退出码 3'), 'R5 非零退出码提示');
-$rows = termBufOf($app)->all();
+$rows = $app->terminal->buffer()->all();
 $errRows = array_values(array_filter($rows, static fn(array $r): bool => $r['err']));
 check($errRows !== [] && $errRows[0]['text'] === 'boom', 'R5 stderr 行带 err 标记（渲染层据此着红）');
 
 // R4 历史召回
 $app->handle(CodedKeyEvent::new(KeyCode::Up, 0), $vp);
-check($app->termInput === 'echo boom >&2; exit 3', 'R4 ↑ 召回上一条');
+check($app->terminal->input === 'echo boom >&2; exit 3', 'R4 ↑ 召回上一条');
 $app->handle(CodedKeyEvent::new(KeyCode::Up, 0), $vp);
-check($app->termInput === 'echo hello-m2', 'R4 再 ↑ 召回更早一条');
+check($app->terminal->input === 'echo hello-m2', 'R4 再 ↑ 召回更早一条');
 $app->handle(CodedKeyEvent::new(KeyCode::Down, 0), $vp);
-check($app->termInput === 'echo boom >&2; exit 3', 'R4 ↓ 返回较新一条');
+check($app->terminal->input === 'echo boom >&2; exit 3', 'R4 ↓ 返回较新一条');
 $app->handle(CodedKeyEvent::new(KeyCode::Down, 0), $vp);
-check($app->termInput === '' && $app->termHistIdx === -1, 'R4 ↓ 到底回到空输入');
+check($app->terminal->input === '' && $app->terminal->histIdx === -1, 'R4 ↓ 到底回到空输入');
 
 // R6 滚轮翻页
 typeTerm($app, $vp, 'seq 1 100');
 $app->handle(CharKeyEvent::new("\r", 0), $vp);
 pump($app);
-check(termBufOf($app)->count() >= 100, 'R6 命令产出足量输出行');
+check($app->terminal->buffer()->count() >= 100, 'R6 命令产出足量输出行');
 $app->handle(MouseEvent::new(MouseEventKind::ScrollUp, MouseButton::Left, 0, 0, 0), $vp);
-check(!$app->termFollow, 'R6 滚轮上滚退出 follow 模式');
+check(!$app->terminal->follow, 'R6 滚轮上滚退出 follow 模式');
 $app->handle(MouseEvent::new(MouseEventKind::ScrollDown, MouseButton::Left, 0, 0, 0), $vp);
-check($app->termScroll >= 0, 'R6 滚轮下滚不越界');
+check($app->terminal->scroll >= 0, 'R6 滚轮下滚不越界');
 $app->handle(CodedKeyEvent::new(KeyCode::PageUp, 0), $vp);
-check($app->termScroll === 0, 'R6 PageUp 翻到顶部（钳制 ≥0）');
+check($app->terminal->scroll === 0, 'R6 PageUp 翻到顶部（钳制 ≥0）');
 
 // Ctrl+L 清屏
 $app->handle(CharKeyEvent::new('l', KeyModifiers::CONTROL), $vp);
-check(termBufOf($app)->count() === 0, 'Ctrl+L 清空输出');
+check($app->terminal->buffer()->count() === 0, 'Ctrl+L 清空输出');
 
 // 真实终端里回车是 CodedKeyEvent(Enter) 而不是 CharKeyEvent("\r")。
 // 只在 CharKeyEvent 上挂提交逻辑的话，headless 全绿但 pty 下提交不了命令——
@@ -270,7 +260,7 @@ pump($app);
 
 typeTerm($app, $vp, 'abc');
 $app->handle(CodedKeyEvent::new(KeyCode::Esc, 0), $vp);
-check(!$app->quit && $app->termInput === '', 'Esc 在有输入时清空输入');
+check(!$app->quit && $app->terminal->input === '', 'Esc 在有输入时清空输入');
 $app->handle(CodedKeyEvent::new(KeyCode::Esc, 0), $vp);
 check($app->quit, 'Esc 在空输入时退出（保持原有手感）');
 

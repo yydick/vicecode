@@ -11,8 +11,7 @@ use App\Core\Config;
 use App\Core\LayoutFactory;
 use App\I18n\Translator;
 use App\Panel\AiPanel;
-use App\Terminal\CommandRunner;
-use App\Terminal\TerminalBuffer;
+use App\Panel\TerminalPanel;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
 use PhpTui\Term\Event\CharKeyEvent;
@@ -93,22 +92,8 @@ class App
     /** AI 面板（消息流 + 输入框，M5 接真实 LLM） */
     public AiPanel $ai;
 
-    // ── Terminal（M2 命令运行器） ──
-    /** 命令在独立子进程跑，主循环每轮 pollTerminal() 排空管道，故不阻塞渲染 */
-    private CommandRunner $termRunner;
-    private TerminalBuffer $termBuf;
-    public string $termInput = '';
-    /** 输入光标，字符单位（mb_* 处理多字节） */
-    public int $termPos = 0;
-    public int $termScroll = 0;
-    /** true=视口贴住输出末尾（新输出自动滚到可见） */
-    public bool $termFollow = true;
-    /** @var string[] 命令历史 */
-    public array $termHist = [];
-    /** -1=正在编辑新行，否则为 termHist 下标 */
-    public int $termHistIdx = -1;
-    /** 命令的工作目录（启动时固定，避免 cd 影响后续命令） */
-    private string $termCwd;
+    /** 终端面板（M2 命令运行器） */
+    public TerminalPanel $terminal;
 
     public function __construct()
     {
@@ -116,9 +101,7 @@ class App
         $this->icons = Config::loadPhp(__DIR__ . '/../config/icons.php');
         $this->tree = new FileTree(getcwd() ?: '.');
         $this->ai = new AiPanel($this);
-        $this->termRunner = new CommandRunner();
-        $this->termBuf = new TerminalBuffer();
-        $this->termCwd = getcwd() ?: '.';
+        $this->terminal = new TerminalPanel($this);
         if (!empty($this->tree->roots)) {
             $this->selectedPath = $this->tree->roots[0]->path;
         }
@@ -138,6 +121,12 @@ class App
     public function locale(): string
     {
         return $this->i18n->locale();
+    }
+
+    /** 设置状态栏瞬时消息（供面板回写，如终端中断命令后提示「已中断」） */
+    public function setMessage(string $msg): void
+    {
+        $this->message = $msg;
     }
 
     /** 取翻译文案（供各面板使用，避免面板各自持有 Translator） */
@@ -189,14 +178,14 @@ class App
 
         // ── Terminal（M2 命令运行器） ──
         $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
-        if ($this->termRunner->isRunning()) {
+        if ($this->terminal->isRunning()) {
             $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' · ' . $this->i18n->t('term.running') . ' ';
         }
         $terminal = BlockWidget::default()
             ->borders(Borders::ALL)
             ->borderStyle($this->borderStyle($focus === 'terminal'))
             ->titles(Title::fromString($termTitle))
-            ->widget($this->terminalContent($a['terminal'], $focus === 'terminal'));
+            ->widget($this->terminal->content($a['terminal'], $focus === 'terminal'));
 
         $center = GridWidget::default()
             ->direction(Direction::Vertical)
@@ -261,220 +250,16 @@ class App
     /**
      * 主循环每轮调用：排空命令管道。返回是否有新内容（供主循环决定是否重绘）。
      */
+    /** 主循环每轮调用：排空命令管道（bin/tui.php 依赖此签名） */
     public function pollTerminal(): bool
     {
-        if (!$this->termRunner->isRunning()) {
-            return false;
-        }
-        $got = $this->termRunner->poll(function (string $bytes, bool $isErr): void {
-            $this->termBuf->append($bytes, $isErr);
-        });
-        if (!$this->termRunner->isRunning()) {
-            // 命令结束：结算未终止的半行，并把视口拉回底部看结果
-            $this->termBuf->flushTail();
-            $this->termFollow = true;
-            $got = true;
-        }
-        return $got;
+        return $this->terminal->poll();
     }
 
+    /** 是否有命令在跑（bin/tui.php 依赖此签名） */
     public function termRunning(): bool
     {
-        return $this->termRunner->isRunning();
-    }
-
-    /** 终端面板内容：末行固定为命令输入行，其上是输出视口 */
-    private function terminalContent(Area $terminal, bool $focused): Widget
-    {
-        $inner = $terminal->inner(new Margin(1, 1));
-        $W = max(0, $inner->width);
-        $H = max(0, $inner->height);
-        $outH = max(0, $H - 1);     // 末行留给输入行
-
-        $rows = $this->termBuf->all();
-        $status = $this->termStatusRow();
-        if ($status !== null) {
-            $rows[] = $status;
-        }
-        if ($rows === []) {
-            $rows[] = ['text' => $this->i18n->t('term.empty'), 'err' => false, 'kind' => 'hint'];
-        }
-
-        // 视口：follow 时贴住末尾，否则用 termScroll（并回写钳制后的值）
-        $maxOff = max(0, count($rows) - $outH);
-        $off = $this->termFollow ? $maxOff : min(max(0, $this->termScroll), $maxOff);
-        $this->termScroll = $off;
-
-        $lines = [];
-        foreach (array_slice($rows, $off, $outH) as $row) {
-            $kind = $row['kind'] ?? ($row['err'] ? 'err' : 'out');
-            $style = match ($kind) {
-                'err' => Style::default()->fg(AnsiColor::Red),
-                'killed' => Style::default()->fg(AnsiColor::Yellow),
-                'hint' => Style::default()->fg(AnsiColor::DarkGray),
-                default => Style::default(),
-            };
-            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($row['text'], $W), $style));
-        }
-        // 输出不足一屏时补空行，把输入行顶到面板底部
-        while (count($lines) < $outH) {
-            $lines[] = Line::fromSpans(Span::styled('', Style::default()));
-        }
-        $lines[] = $this->termInputLine($W, $focused);
-
-        return ParagraphWidget::fromLines(...$lines);
-    }
-
-    /** 命令结束后的状态行（退出码 / 被中断）；无已结束命令返回 null */
-    private function termStatusRow(): ?array
-    {
-        if ($this->termRunner->isRunning()) {
-            return null;
-        }
-        $code = $this->termRunner->exitCode();
-        if ($code === null) {
-            return null;
-        }
-        if ($this->termRunner->termSig() !== 0) {
-            return ['text' => $this->i18n->t('term.killed'), 'err' => false, 'kind' => 'killed'];
-        }
-        if ($code !== 0) {
-            return ['text' => $this->i18n->t('term.exit', ['code' => (string) $code]), 'err' => false, 'kind' => 'err'];
-        }
-        return null;
-    }
-
-    /** 输入行：提示符 + 输入文本 + 光标反显（水平滚动保证光标可见） */
-    private function termInputLine(int $W, bool $focused): Line
-    {
-        $running = $this->termRunner->isRunning();
-        $prompt = $running ? '● ' : '$ ';
-        $promptStyle = $running
-            ? Style::default()->fg(AnsiColor::Green)
-            : Style::default()->fg(AnsiColor::Cyan);
-        $textW = max(0, $W - DisplayWidth::dispWidth($prompt));
-
-        $spans = [];
-        foreach (mb_str_split($this->termInput) as $g) {
-            $spans[] = [$g, Style::default()];
-        }
-        // 把光标显示列滚进窗口（+1 是给光标本身留一格）
-        $cursorDisp = DisplayWidth::dispWidth(mb_substr($this->termInput, 0, $this->termPos));
-        $scrollLeft = max(0, $cursorDisp - $textW + 1);
-
-        return Line::fromSpans(
-            Span::styled($prompt, $promptStyle),
-            ...SpanClip::clip($spans, $focused, $this->termPos, $scrollLeft, $textW)
-        );
-    }
-
-    private function submitTerm(): void
-    {
-        $cmd = trim($this->termInput);
-        $this->termInput = '';
-        $this->termPos = 0;
-        if ($cmd === '') {
-            return;
-        }
-        if (end($this->termHist) !== $cmd) {
-            $this->termHist[] = $cmd;
-            if (count($this->termHist) > 200) {
-                array_shift($this->termHist);
-            }
-        }
-        $this->termHistIdx = -1;
-
-        if ($this->termRunner->isRunning()) {
-            // 必须带 \n：不带会被当成未终止的半行攒在 tail 里，渲染不出来
-            $this->termBuf->append($this->i18n->t('term.busy') . "\n", true);
-            return;
-        }
-        $this->termBuf->append('$ ' . $cmd . "\n", false);   // 回显命令
-        $this->termFollow = true;
-        $this->termScroll = 0;
-        if (!$this->termRunner->start($cmd, $this->termCwd)) {
-            $this->termBuf->append($this->i18n->t('term.spawn_failed') . "\n", true);
-        }
-    }
-
-    /** R7：中断正在跑的命令 */
-    private function termCancel(): void
-    {
-        if (!$this->termRunner->isRunning()) {
-            return;
-        }
-        $this->termRunner->cancel();
-        $this->termFollow = true;
-        $this->message = $this->i18n->t('term.killed');
-    }
-
-    private function termScrollBy(int $delta): void
-    {
-        $this->termFollow = false;
-        $this->termScroll = max(0, $this->termScroll + $delta);
-    }
-
-    private function termClear(): void
-    {
-        $this->termBuf->clear();
-        $this->termScroll = 0;
-        $this->termFollow = true;
-    }
-
-    private function termHistoryPrev(): void
-    {
-        if ($this->termHist === []) {
-            return;
-        }
-        $this->termHistIdx = $this->termHistIdx === -1
-            ? count($this->termHist) - 1
-            : max(0, $this->termHistIdx - 1);
-        $this->termInput = $this->termHist[$this->termHistIdx];
-        $this->termPos = mb_strlen($this->termInput);
-    }
-
-    private function termHistoryNext(): void
-    {
-        if ($this->termHistIdx === -1) {
-            return;
-        }
-        if ($this->termHistIdx >= count($this->termHist) - 1) {
-            $this->termHistIdx = -1;
-            $this->termInput = '';
-            $this->termPos = 0;
-            return;
-        }
-        $this->termHistIdx++;
-        $this->termInput = $this->termHist[$this->termHistIdx];
-        $this->termPos = mb_strlen($this->termInput);
-    }
-
-    private function handleTermChar(CharKeyEvent $e): void
-    {
-        $ctrl = ($e->modifiers & KeyModifiers::CONTROL) !== 0;
-        if ($ctrl && strtolower($e->char) === 'l') {
-            $this->termClear();
-            return;
-        }
-        if ($e->char === "\r" || $e->char === "\n") {
-            $this->submitTerm();
-            return;
-        }
-        if ($e->char === "\x7f" || $e->char === "\x08") {
-            if ($this->termPos > 0) {
-                $this->termInput = mb_substr($this->termInput, 0, $this->termPos - 1)
-                    . mb_substr($this->termInput, $this->termPos);
-                $this->termPos--;
-                $this->termHistIdx = -1;
-            }
-            return;
-        }
-        if (strlen($e->char) === 1 && ord($e->char) >= 32 && !$ctrl) {
-            $this->termInput = mb_substr($this->termInput, 0, $this->termPos) . $e->char
-                . mb_substr($this->termInput, $this->termPos);
-            $this->termPos++;
-            $this->termHistIdx = -1;
-        }
+        return $this->terminal->isRunning();
     }
 
     // ── 侧栏内容（tab 行 + Explorer 树 / GIT / Search） ──
@@ -722,7 +507,7 @@ class App
     /** 收尾退出：先停掉还在跑的命令，避免留下孤儿子进程 */
     private function finishQuit(): void
     {
-        $this->termRunner->shutdown();
+        $this->terminal->shutdown();
         $this->quit = true;
     }
 
@@ -799,11 +584,11 @@ class App
         if ($event instanceof CharKeyEvent) {
             // 终端有命令在跑时，Ctrl+C 先中断子进程（R7），而不是退出应用
             if ($this->focusPanel() === 'terminal'
-                && $this->termRunner->isRunning()
+                && $this->terminal->isRunning()
                 && ($event->modifiers & KeyModifiers::CONTROL)
                 // 有些终端/解析器给的是原始字节 \x03 而不是带 CONTROL 修饰的 'c'
                 && (strtolower($event->char) === 'c' || $event->char === "\x03")) {
-                $this->termCancel();
+                $this->terminal->cancel();
                 return;
             }
             // 全局：Ctrl+Q 退出（若有未保存改动先弹确认）。
@@ -827,7 +612,7 @@ class App
             }
             // 终端：可打印字符进命令输入行（q 也进输入行，不再直接退出）
             if ($this->focusPanel() === 'terminal') {
-                $this->handleTermChar($event);
+                $this->terminal->onChar($event);
                 return;
             }
             // 其它面板：Enter 在侧栏展开/打开；q 退出（非输入态）
@@ -856,7 +641,7 @@ class App
             } elseif ($this->focusPanel() === 'sidebar') {
                 $this->moveTreeSelection(1);
             } elseif ($this->focusPanel() === 'terminal') {
-                $this->termScrollBy(3);
+                $this->terminal->scrollBy(3);
             }
             return;
         }
@@ -866,7 +651,7 @@ class App
             } elseif ($this->focusPanel() === 'sidebar') {
                 $this->moveTreeSelection(-1);
             } elseif ($this->focusPanel() === 'terminal') {
-                $this->termScrollBy(-3);
+                $this->terminal->scrollBy(-3);
             }
             return;
         }
@@ -904,11 +689,10 @@ class App
         switch ($e->code) {
             case KeyCode::Esc:
                 // 终端：运行中→中断命令；有输入→清空输入；否则才退出
-                if ($focus === 'terminal' && $this->termRunner->isRunning()) {
-                    $this->termCancel();
-                } elseif ($focus === 'terminal' && $this->termInput !== '') {
-                    $this->termInput = '';
-                    $this->termPos = 0;
+                if ($focus === 'terminal' && $this->terminal->isRunning()) {
+                    $this->terminal->cancel();
+                } elseif ($focus === 'terminal' && $this->terminal->input !== '') {
+                    $this->terminal->clearInput();
                 } else {
                     $this->requestQuit();
                 }
@@ -926,7 +710,7 @@ class App
                 } elseif ($focus === 'terminal') {
                     // 真实终端里回车是 CodedKeyEvent(Enter)，不是 CharKeyEvent("\r")——
                     // 只挂在 CharKeyEvent 上的话，pty 下提交不了命令（headless 测试会漏掉）。
-                    $this->submitTerm();
+                    $this->terminal->submit();
                 }
                 break;
             case KeyCode::Up:
@@ -935,7 +719,7 @@ class App
                 } elseif ($focus === 'sidebar') {
                     $this->moveTreeSelection(-1);
                 } elseif ($focus === 'terminal') {
-                    $this->termHistoryPrev();
+                    $this->terminal->historyPrev();
                 }
                 break;
             case KeyCode::Down:
@@ -944,49 +728,49 @@ class App
                 } elseif ($focus === 'sidebar') {
                     $this->moveTreeSelection(1);
                 } elseif ($focus === 'terminal') {
-                    $this->termHistoryNext();
+                    $this->terminal->historyNext();
                 }
                 break;
             case KeyCode::Left:
                 if ($focus === 'editor') {
                     $this->buffer?->moveLeft();
-                } elseif ($focus === 'terminal' && $this->termPos > 0) {
-                    $this->termPos--;
+                } elseif ($focus === 'terminal') {
+                    $this->terminal->moveCursor(-1);
                 }
                 break;
             case KeyCode::Right:
                 if ($focus === 'editor') {
                     $this->buffer?->moveRight();
-                } elseif ($focus === 'terminal' && $this->termPos < mb_strlen($this->termInput)) {
-                    $this->termPos++;
+                } elseif ($focus === 'terminal') {
+                    $this->terminal->moveCursor(1);
                 }
                 break;
             case KeyCode::Home:
                 if ($focus === 'editor') {
                     $this->buffer?->moveHome();
                 } elseif ($focus === 'terminal') {
-                    $this->termPos = 0;
+                    $this->terminal->moveCursorHome();
                 }
                 break;
             case KeyCode::End:
                 if ($focus === 'editor') {
                     $this->buffer?->moveEnd();
                 } elseif ($focus === 'terminal') {
-                    $this->termPos = mb_strlen($this->termInput);
+                    $this->terminal->moveCursorEnd();
                 }
                 break;
             case KeyCode::PageUp:
                 if ($focus === 'editor') {
                     $this->buffer?->pageUp(max(1, $a['editor']->height - 4));
                 } elseif ($focus === 'terminal') {
-                    $this->termScrollBy(-max(1, $a['terminal']->height - 3));
+                    $this->terminal->scrollBy(-max(1, $a['terminal']->height - 3));
                 }
                 break;
             case KeyCode::PageDown:
                 if ($focus === 'editor') {
                     $this->buffer?->pageDown(max(1, $a['editor']->height - 4));
                 } elseif ($focus === 'terminal') {
-                    $this->termScrollBy(max(1, $a['terminal']->height - 3));
+                    $this->terminal->scrollBy(max(1, $a['terminal']->height - 3));
                 }
                 break;
             case KeyCode::Backspace:
@@ -994,18 +778,15 @@ class App
                     $this->ai->backspace();
                 } elseif ($focus === 'editor') {
                     $this->buffer?->backspace();
-                } elseif ($focus === 'terminal' && $this->termPos > 0) {
-                    $this->termInput = mb_substr($this->termInput, 0, $this->termPos - 1)
-                        . mb_substr($this->termInput, $this->termPos);
-                    $this->termPos--;
+                } elseif ($focus === 'terminal') {
+                    $this->terminal->deleteBackward();
                 }
                 break;
             case KeyCode::Delete:
                 if ($focus === 'editor') {
                     $this->buffer?->delete();
-                } elseif ($focus === 'terminal' && $this->termPos < mb_strlen($this->termInput)) {
-                    $this->termInput = mb_substr($this->termInput, 0, $this->termPos)
-                        . mb_substr($this->termInput, $this->termPos + 1);
+                } elseif ($focus === 'terminal') {
+                    $this->terminal->deleteForward();
                 }
                 break;
         }
