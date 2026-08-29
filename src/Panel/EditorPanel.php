@@ -78,6 +78,11 @@ final class EditorPanel
 
     public function content(Area $editor, bool $focused): Widget
     {
+        // 命中矩形每帧重建，故先无条件清空。原先只在 hasTabs() 时清，
+        // buffers 降到 1 个后旧矩形会残留——虽然 onClick() 同样判 hasTabs() 而不会误命中，
+        // 但那属于脏状态，也与本类 docblock 声明的「每帧重建」不符。
+        $this->tabRects = [];
+
         $inner = $editor->inner(new Margin(1, 1));
         $W = max(0, $inner->width);
         $H = max(0, $inner->height);
