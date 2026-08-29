@@ -5,12 +5,11 @@ namespace App;
 
 use App\Editor\Buffer;
 use App\Editor\Highlighter;
-use App\Explorer\FileTree;
-use App\Explorer\TreeNode;
 use App\Core\Config;
 use App\Core\LayoutFactory;
 use App\I18n\Translator;
 use App\Panel\AiPanel;
+use App\Panel\SidebarPanel;
 use App\Panel\TerminalPanel;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
@@ -56,15 +55,13 @@ class App
     public const PANELS = ['sidebar', 'editor', 'terminal', 'ai_stream', 'ai_input'];
 
     public int $focusIndex = 0;
-    public int $sidebarTabIndex = 0;          // 0=Explorer 1=GIT 2=Search
-    private const SIDEBAR_TABS = ['explorer', 'git', 'search'];
+    /** 侧栏面板（tab 行 + Explorer 树 / GIT / Search） */
+    public SidebarPanel $sidebar;
 
     private Translator $i18n;
-    private FileTree $tree;
     /** 图标配置（config/icons.php），可定制；缺省回退到空串（只用文字标签） */
     private array $icons = [];
     public string $selectedPath = '';
-    public int $treeOffset = 0;
 
     /**
      * 双击判定（终端没有双击事件：MouseEventKind 只有 Down/Up/Drag/Moved/Scroll*，
@@ -72,9 +69,6 @@ class App
      * 用途：对齐 VSCode 习惯——双击目录=展开/折叠；单击目录只选中（避免误触折叠）。
      */
     private const DOUBLE_CLICK_MS = 400;
-    private ?float $lastTreeClickAtMs = null;
-    private ?string $lastTreeClickPath = null;
-    private ?int $lastTreeClickRow = null;
 
     /** @var array<string,Buffer> */
     private array $buffers = [];
@@ -99,11 +93,12 @@ class App
     {
         $this->i18n = Translator::fromEnv(__DIR__ . '/../config/locales');
         $this->icons = Config::loadPhp(__DIR__ . '/../config/icons.php');
-        $this->tree = new FileTree(getcwd() ?: '.');
+        $this->sidebar = new SidebarPanel($this);
         $this->ai = new AiPanel($this);
         $this->terminal = new TerminalPanel($this);
-        if (!empty($this->tree->roots)) {
-            $this->selectedPath = $this->tree->roots[0]->path;
+        $roots = $this->sidebar->tree()->roots;
+        if (!empty($roots)) {
+            $this->selectedPath = $roots[0]->path;
         }
     }
 
@@ -121,6 +116,12 @@ class App
     public function locale(): string
     {
         return $this->i18n->locale();
+    }
+
+    /** 切换焦点面板（供面板回写，如侧栏点中条目后聚焦自己） */
+    public function focus(string $panel): void
+    {
+        $this->focusIndex = array_search($panel, self::PANELS);
     }
 
     /** 设置状态栏瞬时消息（供面板回写，如终端中断命令后提示「已中断」） */
@@ -156,7 +157,7 @@ class App
         $focus = $this->focusPanel();
 
         // ── Sidebar ──
-        $sidebarInner = $this->sidebarContent($a['sidebar'], $focus === 'sidebar');
+        $sidebarInner = $this->sidebar->content($a['sidebar'], $focus === 'sidebar');
         $sidebar = BlockWidget::default()
             ->borders(Borders::ALL)
             ->borderStyle($this->borderStyle($focus === 'sidebar'))
@@ -220,7 +221,7 @@ class App
         // ── StatusBar ──
         $file = $this->buffer !== null ? basename((string) $this->buffer->path) : '—';
         $dirty = $this->buffer !== null && $this->buffer->dirty ? ' ' . $this->i18n->t('status.dirty') : '';
-        $tabLabel = $this->i18n->t('sidebar.' . self::SIDEBAR_TABS[$this->sidebarTabIndex]);
+        $tabLabel = $this->sidebar->tabLabel();
         $statusText = ' ' . $this->i18n->t('app.title')
             . ' · ' . $this->i18n->t('status.focus') . '=' . strtoupper($focus)
             . ' · ' . $this->i18n->t('status.tab') . '=' . $tabLabel
@@ -260,77 +261,6 @@ class App
     public function termRunning(): bool
     {
         return $this->terminal->isRunning();
-    }
-
-    // ── 侧栏内容（tab 行 + Explorer 树 / GIT / Search） ──
-    private function sidebarContent(Area $sidebar, bool $focused): Widget
-    {
-        $lines = [];
-
-        // tab 行（配置了图标就只显示图标、不显示文字，省空间；选中用 [ ] 包裹）。
-        // 按「显示列宽」预算分段，否则中文标签占 2 列会把段宽撑爆导致 ] 换行（M1 反馈的 bug）。
-        $innerW = max(0, $sidebar->width - 2);
-        $seg = max(1, intdiv(max(1, $innerW), 3)); // 每段可用显示列宽
-        $tabLine = '';
-        foreach (self::SIDEBAR_TABS as $i => $key) {
-            $icon = $this->icon($key);
-            $label = $this->i18n->t('sidebar.' . $key);
-            // 有图标则只显示图标（不占文字位置）；无图标退化成纯文字标签以保持可用性。
-            $core = $icon !== '' ? $icon : ' ' . $label . ' ';
-            if ($i === $this->sidebarTabIndex) {
-                $core = '[' . $core . ']';
-            }
-            // 段内超宽则按显示列宽截断（保留字素边界，不劈开 CJK）
-            if (DisplayWidth::dispWidth($core) > $seg) {
-                $core = DisplayWidth::mbCutDisp($core, $seg);
-            }
-            $tabLine .= DisplayWidth::mbPadDisp($core, $seg);
-        }
-        if ($innerW > 0) {
-            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($tabLine, $innerW), Style::default()->fg(AnsiColor::Yellow)));
-            $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), Style::default()->fg(AnsiColor::Gray)));
-        }
-
-        if ($this->sidebarTabIndex === 0) {
-            $visible = $this->tree->visible();
-            $rowsH = max(0, $sidebar->height - 2 - 2); // 边框 + tab行 + 分隔
-            if ($rowsH > 0 && !empty($visible)) {
-                $idx = $this->explorerSelectedIndex($visible);
-                if ($idx < $this->treeOffset) {
-                    $this->treeOffset = $idx;
-                } elseif ($idx >= $this->treeOffset + $rowsH) {
-                    $this->treeOffset = $idx - $rowsH + 1;
-                }
-                if ($this->treeOffset < 0) {
-                    $this->treeOffset = 0;
-                }
-                for ($i = $this->treeOffset; $i < min($this->treeOffset + $rowsH, count($visible)); $i++) {
-                    $node = $visible[$i];
-                    $indent = str_repeat('  ', $node->depth);
-                    $prefix = $node->isDir ? ($node->expanded ? '▼ ' : '▶ ') : '  ';
-                    $marker = $node->path === $this->selectedPath ? '» ' : '  ';
-                    $suffix = $node->isDir ? '/' : '';
-                    $text = DisplayWidth::mbCutDisp($marker . $indent . $prefix . $node->name . $suffix, $innerW);
-                    $style = $node->path === $this->selectedPath
-                        ? Style::default()->addModifier(Modifier::REVERSED)
-                        : Style::default();
-                    $lines[] = Line::fromSpans(Span::styled($text, $style));
-                }
-            } elseif (empty($visible)) {
-                $lines[] = Line::fromSpans(Span::styled('(empty)', Style::default()->fg(AnsiColor::DarkGray)));
-            }
-        } elseif ($this->sidebarTabIndex === 1) {
-            $lines[] = Line::fromSpans(Span::styled($this->i18n->t('git.placeholder'), Style::default()->fg(AnsiColor::DarkGray)));
-            $lines[] = Line::fromSpans(Span::styled($this->i18n->t('git.sub'), Style::default()->fg(AnsiColor::DarkGray)));
-        } else {
-            $lines[] = Line::fromSpans(Span::styled($this->i18n->t('search.placeholder'), Style::default()->fg(AnsiColor::DarkGray)));
-            $lines[] = Line::fromSpans(Span::styled($this->i18n->t('search.prompt'), Style::default()->fg(AnsiColor::DarkGray)));
-        }
-
-        if ($lines === []) {
-            return ParagraphWidget::fromString('');
-        }
-        return ParagraphWidget::fromLines(...$lines);
     }
 
     // ── 编辑器内容（行号 + 语法高亮 + 光标反显） ──
@@ -618,7 +548,7 @@ class App
             // 其它面板：Enter 在侧栏展开/打开；q 退出（非输入态）
             if ($event->char === "\r" || $event->char === "\n") {
                 if ($this->focusPanel() === 'sidebar') {
-                    $this->handleSidebarEnter();
+                    $this->sidebar->activate();
                 }
                 return;
             }
@@ -639,7 +569,7 @@ class App
             if ($this->focusPanel() === 'editor') {
                 $this->buffer?->pageDown(3);
             } elseif ($this->focusPanel() === 'sidebar') {
-                $this->moveTreeSelection(1);
+                $this->sidebar->onScroll(MouseEventKind::ScrollDown);
             } elseif ($this->focusPanel() === 'terminal') {
                 $this->terminal->scrollBy(3);
             }
@@ -649,7 +579,7 @@ class App
             if ($this->focusPanel() === 'editor') {
                 $this->buffer?->pageUp(3);
             } elseif ($this->focusPanel() === 'sidebar') {
-                $this->moveTreeSelection(-1);
+                $this->sidebar->onScroll(MouseEventKind::ScrollUp);
             } elseif ($this->focusPanel() === 'terminal') {
                 $this->terminal->scrollBy(-3);
             }
@@ -706,7 +636,7 @@ class App
                 break;
             case KeyCode::Enter:
                 if ($focus === 'sidebar') {
-                    $this->handleSidebarEnter();
+                    $this->sidebar->activate();
                 } elseif ($focus === 'terminal') {
                     // 真实终端里回车是 CodedKeyEvent(Enter)，不是 CharKeyEvent("\r")——
                     // 只挂在 CharKeyEvent 上的话，pty 下提交不了命令（headless 测试会漏掉）。
@@ -717,7 +647,7 @@ class App
                 if ($focus === 'editor') {
                     $this->buffer?->moveUp();
                 } elseif ($focus === 'sidebar') {
-                    $this->moveTreeSelection(-1);
+                    $this->sidebar->moveSelection(-1);
                 } elseif ($focus === 'terminal') {
                     $this->terminal->historyPrev();
                 }
@@ -726,7 +656,7 @@ class App
                 if ($focus === 'editor') {
                     $this->buffer?->moveDown();
                 } elseif ($focus === 'sidebar') {
-                    $this->moveTreeSelection(1);
+                    $this->sidebar->moveSelection(1);
                 } elseif ($focus === 'terminal') {
                     $this->terminal->historyNext();
                 }
@@ -799,54 +729,9 @@ class App
         $row = $e->row;
         $pos = new Position($col, $row);
 
-        $sb = $a['sidebar'];
-        // 侧栏 tab 行（inner 第 0 行）
-        if ($pos->y === $sb->position->y + 1 && $col >= $sb->position->x && $col < $sb->position->x + $sb->width) {
-            $inner = $col - ($sb->position->x + 1);
-            $seg = max(1, intdiv(max(1, $sb->width - 2), 3));
-            $this->sidebarTabIndex = min(2, intdiv($inner, $seg));
-            $this->focusIndex = array_search('sidebar', self::PANELS);
+        // 侧栏：tab 行 + 树条目（行首三角展开/折叠、双击展开、单击文件打开都由面板自己处理）
+        if ($a['sidebar']->containsPosition($pos) && $this->sidebar->onClick($pos, $a)) {
             return;
-        }
-
-        // 侧栏树条目（inner 第 2 行起）
-        if ($this->sidebarTabIndex === 0 && $sb->containsPosition($pos) && $pos->y >= $sb->position->y + 3) {
-            $visible = $this->tree->visible();
-            $idx = ($pos->y - ($sb->position->y + 3)) + $this->treeOffset;
-            if (isset($visible[$idx])) {
-                $node = $visible[$idx];
-
-                // 点行首三角（▶/▼）= 展开/折叠（VSCode 习惯）。
-                // 命中区取「三角 + 其后空格」2 列：只判三角那 1 列太窄，很难点中。
-                if ($node->isDir && self::hitTreeArrow($pos, $sb, $node->depth)) {
-                    $this->resetTreeDoubleClick();
-                    $this->selectedPath = $node->path;
-                    $this->focusIndex = array_search('sidebar', self::PANELS);
-                    $node->expanded = !$node->expanded;
-                    if ($node->expanded) {
-                        $node->ensureChildren();
-                    }
-                    return;
-                }
-
-                $isDouble = $this->consumeTreeDoubleClick($node->path, $pos->y);
-
-                $this->selectedPath = $node->path;
-                $this->focusIndex = array_search('sidebar', self::PANELS);
-
-                if ($node->isDir) {
-                    // 双击目录 = 展开/折叠（VSCode 习惯）；单击条目名只选中，保持原样
-                    if ($isDouble) {
-                        $node->expanded = !$node->expanded;
-                        if ($node->expanded) {
-                            $node->ensureChildren();
-                        }
-                    }
-                    return;
-                }
-                $this->openFile($node->path);
-                return;
-            }
         }
 
         // 命中测试：点哪个面板就聚焦哪个；点编辑器则按坐标定位光标（R6）
@@ -871,50 +756,6 @@ class App
                 return;
             }
         }
-    }
-
-    /**
-     * 命中侧栏行首三角（▶/▼）？
-     * 行结构（屏幕列）：边框 | marker「» 」2 列 | 缩进 2*depth 列 | 三角 1 列 + 其后空格 1 列 | 名称。
-     * 实测（120x40，depth=0）：`│» ▶ .docs/` → 三角在 x=3。
-     */
-    private static function hitTreeArrow(Position $pos, Area $sb, int $depth): bool
-    {
-        $arrowX = $sb->position->x + 1 + 2 + $depth * 2;  // inner 左界（margin 1）+ marker 2 列 + 缩进
-        return $pos->x >= $arrowX && $pos->x <= $arrowX + 1;
-    }
-
-    /**
-     * 判定这次点击是否构成双击（同一条目 + 同一屏幕行 + 阈值内），并更新记时。
-     * 判定成立即清空记录：否则第三击会再被判成一次双击，把目录 toggle 回原状。
-     */
-    private function consumeTreeDoubleClick(string $path, int $row): bool
-    {
-        $now = microtime(true) * 1000.0;
-        $isDouble = $this->lastTreeClickPath === $path
-            && $this->lastTreeClickRow === $row
-            && $this->lastTreeClickAtMs !== null
-            && ($now - $this->lastTreeClickAtMs) <= self::DOUBLE_CLICK_MS;
-
-        if ($isDouble) {
-            $this->lastTreeClickAtMs = null;
-            $this->lastTreeClickPath = null;
-            $this->lastTreeClickRow = null;
-            return true;
-        }
-
-        $this->lastTreeClickAtMs = $now;
-        $this->lastTreeClickPath = $path;
-        $this->lastTreeClickRow = $row;
-        return false;
-    }
-
-    /** 清空双击记时（点了三角这类独立动作后调用，避免与后续点击误合成双击） */
-    private function resetTreeDoubleClick(): void
-    {
-        $this->lastTreeClickAtMs = null;
-        $this->lastTreeClickPath = null;
-        $this->lastTreeClickRow = null;
     }
 
     /** 点击编辑器内某格 → 映射回 Buffer 的 (row,col) 并定位光标（R6 鼠标精细交互） */
@@ -944,46 +785,6 @@ class App
             $col = $lineLen;
         }
         $this->buffer->cursorCol = $col;
-    }
-
-    // ── 资源管理器操作 ──
-    /** @param TreeNode[] $visible */
-    private function explorerSelectedIndex(array $visible): int
-    {
-        foreach ($visible as $i => $n) {
-            if ($n->path === $this->selectedPath) {
-                return $i;
-            }
-        }
-        return 0;
-    }
-
-    private function moveTreeSelection(int $delta): void
-    {
-        $visible = $this->tree->visible();
-        if (empty($visible)) {
-            return;
-        }
-        $idx = $this->explorerSelectedIndex($visible) + $delta;
-        $idx = max(0, min(count($visible) - 1, $idx));
-        $this->selectedPath = $visible[$idx]->path;
-    }
-
-    private function handleSidebarEnter(): void
-    {
-        $visible = $this->tree->visible();
-        if (empty($visible)) {
-            return;
-        }
-        $node = $visible[$this->explorerSelectedIndex($visible)];
-        if ($node->isDir) {
-            $node->expanded = !$node->expanded;
-            if ($node->expanded) {
-                $node->ensureChildren();
-            }
-        } else {
-            $this->openFile($node->path);
-        }
     }
 
     public function openFile(string $path): void

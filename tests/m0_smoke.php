@@ -83,7 +83,7 @@ echo "== 侧栏 tab 切换 ==\n";
 $sb = $a['sidebar'];
 $seg2x = $sb->position->x + intdiv($sb->width, 3) + 1;     // 第二段（GIT）
 $app->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $seg2x, $sb->position->y + 1, 0), $vp);
-check($app->sidebarTabIndex === 1, '点击侧栏 tab 第 2 段 → 切到 GIT');
+check($app->sidebar->tabIndex === 1, '点击侧栏 tab 第 2 段 → 切到 GIT');
 
 echo "== 侧栏 ↓ 移动选中 ==\n";
 $app->focusIndex = array_search('sidebar', App::PANELS);

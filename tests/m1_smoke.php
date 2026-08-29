@@ -345,9 +345,7 @@ unlink($fR6);
 // 终端没有双击事件：SGR 协议里双击就是两次独立的 Down，由 App 按「同一条目 + 阈值内」合成。
 echo "== 侧栏双击目录（VSCode 习惯） ==\n";
 $appD = new App();
-$treeProp = new ReflectionProperty(App::class, 'tree');
-$treeProp->setAccessible(true);
-$treeD = $treeProp->getValue($appD);
+$treeD = $appD->sidebar->tree();
 $visD = $treeD->visible();
 // 挑第一个「非空」目录：空目录展开后可见节点数不变，断言会误报
 $dirIdx = null;
@@ -384,9 +382,7 @@ check(count($treeD->visible()) === $beforeVisible, '折叠后可见节点数复�
 
 // 双击文件：不能因为双击合成而失效（仍要打开进编辑器）
 $appF = new App();
-$treeF = (new ReflectionProperty(App::class, 'tree'));
-$treeF->setAccessible(true);
-$visF = $treeF->getValue($appF)->visible();
+$visF = $appF->sidebar->tree()->visible();
 $fileIdx = null;
 foreach ($visF as $i => $n) {
     if (!$n->isDir) {
@@ -407,9 +403,7 @@ check($appF->buffer !== null && $appF->buffer->path === $visF[$fileIdx]->path, '
 // 建一个全新 App 并定位到 src 目录（每个断言都用新实例：连续点击会被双击判定串味）
 $makeApp = static function () use ($vp): array {
     $app = new App();
-    $tp = new ReflectionProperty(App::class, 'tree');
-    $tp->setAccessible(true);
-    $tree = $tp->getValue($app);
+    $tree = $app->sidebar->tree();
     $node = null;
     $idx = null;
     foreach ($tree->visible() as $i => $n) {
