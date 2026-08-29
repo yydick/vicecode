@@ -871,7 +871,7 @@ class App
     {
         if ($event instanceof CharKeyEvent) {
             $ctrl = ($event->modifiers & KeyModifiers::CONTROL)
-                && (strtolower($event->char) === 'c' || $event->char === "\x03");
+                && strtolower($event->char) === 'q';
             $ch = strtolower($event->char);
             if ($ctrl || $ch === 'y') {
                 $this->confirmProceed();
@@ -891,7 +891,7 @@ class App
     // ── 事件分发 ──
     public function handle($event, Area $vp): void
     {
-        // 未保存确认进行中：拦截所有输入，只响应 y/n/Esc（及 Ctrl+C 视为确认）
+        // 未保存确认进行中：拦截所有输入，只响应 y/n/Esc（及 Ctrl+Q 视为确认）
         if ($this->confirm !== null) {
             $this->handleConfirm($event);
             return;
@@ -914,8 +914,12 @@ class App
                 $this->termCancel();
                 return;
             }
-            // 全局：Ctrl+C 退出（若有未保存改动先弹确认）
-            if (($event->modifiers & KeyModifiers::CONTROL) && strtolower($event->char) === 'c') {
+            // 全局：Ctrl+Q 退出（若有未保存改动先弹确认）。
+            // 退出热键原本是 Ctrl+C，但与「复制」冲突（习惯上 Ctrl+C 是复制，误按就退出了），
+            // 故换成 Ctrl+Q；Ctrl+C 只保留「中断终端里正在跑的命令」这个终端固有语义。
+            // 实测 php-tui/term 0.3.4 会把 0x11 解析成 CharKeyEvent(char:'q', modifiers:ctl)，
+            // 故无需另兜底原始字节——若写上 `\x11` 分支反而是死代码（它排在 CONTROL 判定之后）。
+            if (($event->modifiers & KeyModifiers::CONTROL) && strtolower($event->char) === 'q') {
                 $this->requestQuit();
                 return;
             }

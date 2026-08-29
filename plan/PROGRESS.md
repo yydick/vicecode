@@ -52,7 +52,7 @@ php examples/snapshot.php       # 渲染 6 个例子的初始画面
 
 直接用已验证的 6 个零件拼成了真实 M0（纯 php-tui/term 驱动，无 Swoole 终端驱动）：
 
-- `src/App.php` — 状态 + `areas()`（布局矩形）+ `render()/build()`（Sidebar[Explorer/GIT/Search] + Editor + Terminal + AI 聊天流 + AI 输入框 + StatusBar）+ `handle()`（键鼠分发：Tab/点击切焦点、侧栏 tab 切换、AI 输入打字+Enter 发送、↑/↓ 滚动文件列表、Ctrl+C/q/Esc 退出）。
+- `src/App.php` — 状态 + `areas()`（布局矩形）+ `render()/build()`（Sidebar[Explorer/GIT/Search] + Editor + Terminal + AI 聊天流 + AI 输入框 + StatusBar）+ `handle()`（键鼠分发：Tab/点击切焦点、侧栏 tab 切换、AI 输入打字+Enter 发送、↑/↓ 滚动文件列表、Ctrl+Q/q/Esc 退出）。
 - `bin/tui.php` — 终端生命周期（alternateScreen + enableMouseCapture + rawMode）+ 渲染循环（`draw` + `events()->next()`）+ 干净还原。
 - `tests/m0_smoke.php` — headless 验收（面板标题、点击命中、AI 发送、tab 切换、↑ 移动）。
 
@@ -64,7 +64,7 @@ php examples/snapshot.php       # 渲染 6 个例子的初始画面
 │GIT      ├──────── TERMINAL ──────┤           │
 │SEARCH   │                         ├ AI INPUT ─┤
 └─────────┴─────────────────────────┴───────────┘
- M0 · focus=... · Tab/点击切焦点 · Ctrl+C 退出
+ M0 · focus=... · Tab/点击切焦点 · Ctrl+Q 退出
 ```
 
 ## 六、M1 已组装并验证 ✅（2026-08-28）

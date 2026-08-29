@@ -27,7 +27,7 @@ return [
     'status.dirty'     => '*',
     'status.readonly'  => 'RO',
     'status.locale'    => 'lang',
-    'status.quit'      => 'Ctrl+C quit',
+    'status.quit'      => 'Ctrl+Q quit',
 
     // AI 输入框提示
     'ai.input_hint'    => '(Enter send)',

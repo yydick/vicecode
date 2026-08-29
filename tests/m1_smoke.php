@@ -244,7 +244,8 @@ unlink($fB);
 
 // ───────────────────────── 7) 未保存确认（R8） ─────────────────────────
 echo "== 未保存确认（R8） ==\n";
-// 退出确认：dirty 时 Ctrl+C 先弹确认，不立即退出
+// 退出热键是 Ctrl+Q（Ctrl+C 与「复制」冲突，只保留「中断终端命令」语义）
+// 退出确认：dirty 时 Ctrl+Q 先弹确认，不立即退出
 $appR8 = new App();
 $fR8 = tempnam(sys_get_temp_dir(), 'r8') . '.txt';
 file_put_contents($fR8, "orig");
@@ -252,8 +253,8 @@ $appR8->openFile($fR8);
 $appR8->focusIndex = array_search('editor', App::PANELS);
 $appR8->handle(CharKeyEvent::new('x', 0), $vp); // 键入 → dirty
 check($appR8->buffer->dirty, '编辑后 dirty 为真');
-$appR8->handle(CharKeyEvent::new('c', KeyModifiers::CONTROL), $vp); // Ctrl+C 请求退出
-check($appR8->confirm !== null && $appR8->confirm['kind'] === 'quit', 'dirty 时 Ctrl+C → confirm(kind=quit)');
+$appR8->handle(CharKeyEvent::new('q', KeyModifiers::CONTROL), $vp); // Ctrl+Q 请求退出
+check($appR8->confirm !== null && $appR8->confirm['kind'] === 'quit', 'dirty 时 Ctrl+Q → confirm(kind=quit)');
 check($appR8->quit === false, '确认前 quit 仍为 false');
 // 确认进行中状态栏应显示提示文案（zh_CN）
 $buf8s = TuiBuffer::empty($vp);
@@ -262,8 +263,8 @@ check(str_contains(implode("\n", $buf8s->toLines()), '有未保存改动'), '确
 // n 取消
 $appR8->handle(CharKeyEvent::new('n', 0), $vp);
 check($appR8->confirm === null && $appR8->quit === false, 'n → 取消确认，未退出');
-// 再 Ctrl+C → y 确认退出
-$appR8->handle(CharKeyEvent::new('c', KeyModifiers::CONTROL), $vp);
+// 再 Ctrl+Q → y 确认退出
+$appR8->handle(CharKeyEvent::new('q', KeyModifiers::CONTROL), $vp);
 $appR8->handle(CharKeyEvent::new('y', 0), $vp);
 check($appR8->quit === true, 'y → 确认退出（quit=true）');
 
@@ -289,8 +290,22 @@ $appR8c = new App();
 $fR8c = tempnam(sys_get_temp_dir(), 'r8c') . '.txt';
 file_put_contents($fR8c, "clean");
 $appR8c->openFile($fR8c);
-$appR8c->handle(CharKeyEvent::new('c', KeyModifiers::CONTROL), $vp);
-check($appR8c->quit === true && $appR8c->confirm === null, '非 dirty 时 Ctrl+C 直接退出（无确认）');
+$appR8c->handle(CharKeyEvent::new('q', KeyModifiers::CONTROL), $vp);
+check($appR8c->quit === true && $appR8c->confirm === null, '非 dirty 时 Ctrl+Q 直接退出（无确认）');
+
+// Ctrl+C 不再是退出热键（避免与「复制」冲突）：静默忽略，不弹确认也不退出
+$appR8d = new App();
+$fR8d = tempnam(sys_get_temp_dir(), 'r8d') . '.txt';
+file_put_contents($fR8d, "clean");
+$appR8d->openFile($fR8d);
+$appR8d->handle(CharKeyEvent::new('c', KeyModifiers::CONTROL), $vp);
+check($appR8d->quit === false && $appR8d->confirm === null, '非终端运行时 Ctrl+C 不退出（让位给「复制」）');
+// 状态栏的退出提示也要同步成 Ctrl+Q（文案走 i18n，zh_CN/en 两个包都要改）
+$buf8d = TuiBuffer::empty($vp);
+(new AggregateWidgetRenderer($renderers))->render($renderer, $appR8d->render($vp), $buf8d, $buf8d->area());
+check(str_contains(implode("\n", $buf8d->toLines()), 'Ctrl+Q'), '状态栏退出提示已改为 Ctrl+Q');
+check(!str_contains(implode("\n", $buf8d->toLines()), 'Ctrl+C'), '状态栏不再提示 Ctrl+C 退出');
+unlink($fR8d);
 
 // ───────────────────────── 8) 编辑器鼠标交互（R6） ─────────────────────────
 echo "== 编辑器鼠标交互（R6） ==\n";

@@ -274,22 +274,21 @@ check(!$app->quit && $app->termInput === '', 'Esc 在有输入时清空输入');
 $app->handle(CodedKeyEvent::new(KeyCode::Esc, 0), $vp);
 check($app->quit, 'Esc 在空输入时退出（保持原有手感）');
 
-// 非运行状态下 Ctrl+C 仍是退出
+// 非运行状态下 Ctrl+Q 退出（Ctrl+C 已让位给「复制」，不再兼任退出热键）
 $app2 = new App();
 $app2->focusIndex = array_search('terminal', App::PANELS, true);
-$app2->handle(CharKeyEvent::new('c', KeyModifiers::CONTROL), $vp);
-check($app2->quit, '非运行时 Ctrl+C 仍退出应用');
+$app2->handle(CharKeyEvent::new('q', KeyModifiers::CONTROL), $vp);
+check($app2->quit, '非运行时 Ctrl+Q 退出应用');
 
-// 退出时清理：有命令在跑也要能干净退出（不留孤儿进程）
+// 退出时清理：命令在跑时按 Ctrl+Q 直接退出，也要干净收尾（不留孤儿进程）
 $app3 = new App();
 $app3->focusIndex = array_search('terminal', App::PANELS, true);
 typeTerm($app3, $vp, 'sleep 20');
 $app3->handle(CharKeyEvent::new("\r", 0), $vp);
 usleep(50000);
-$app3->handle(CharKeyEvent::new('c', KeyModifiers::CONTROL), $vp);
-pump($app3);
-$app3->handle(CodedKeyEvent::new(KeyCode::Esc, 0), $vp);
-check($app3->quit && !$app3->termRunning(), '退出时命令已收尾');
+check($app3->termRunning(), '退出前命令确实在跑');
+$app3->handle(CharKeyEvent::new('q', KeyModifiers::CONTROL), $vp);
+check($app3->quit && !$app3->termRunning(), '运行中 Ctrl+Q 直接退出且命令已收尾');
 
 echo $failed ? "RESULT: FAIL\n" : "RESULT: PASS\n";
 exit($failed ? 1 : 0);

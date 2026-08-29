@@ -11,7 +11,9 @@
 - 手动验证：在真实终端（≥80×24，建议 120×40）运行 `php bin/tui.php`，按描述操作观察。
 - 纯逻辑单元验证：对 `Buffer` / `StreamParser` / `KeyParser` / `GitClient` 等无 I/O 依赖的纯函数写 PHPUnit 用例。
 - 协程验证：用 `Swoole\Coroutine\run()` 包裹，断言非阻塞（运行不卡死主线程）。
-- 干净退出：每次手动验证结束用 `Ctrl+C` / `ESC` 退出，确认终端恢复正常（无乱码、无残留 raw mode）。
+- 干净退出：每次手动验证结束用 `Ctrl+Q` / `ESC` 退出，确认终端恢复正常（无乱码、无残留 raw mode）。
+  （退出热键 2026-08-29 由 `Ctrl+C` 改为 `Ctrl+Q`：`Ctrl+C` 与「复制」冲突，现只保留
+   「中断终端里正在跑的命令」这个终端固有语义。）
 
 ---
 
@@ -42,8 +44,8 @@
 
 ### R2 协程主循环与终端生命周期  [P0]
 - **需求描述**：`Swoole\Coroutine\run()` 内初始化 php-tui `Terminal`，进入 alternate screen + raw mode，启用鼠标捕获；用 `Swoole\Timer` 定时 `draw`；协程 `fread` 读 STDIN。退出时 `defer` 恢复终端。
-- **达标项**：程序启动即全屏；`Ctrl+C`/`ESC`/异常退出都能干净恢复终端（无乱码、光标可见、回显恢复）；渲染循环持续运行。
-- **验证方式**：手动启动→`Ctrl+C` 退出，检查终端正常；故意抛异常退出，确认仍恢复；用 `strace`/日志确认 draw 由 Timer 驱动（非忙等）。
+- **达标项**：程序启动即全屏；`Ctrl+Q`/`ESC`/异常退出都能干净恢复终端（无乱码、光标可见、回显恢复）；渲染循环持续运行。
+- **验证方式**：手动启动→`Ctrl+Q` 退出，检查终端正常；故意抛异常退出，确认仍恢复；用 `strace`/日志确认 draw 由 Timer 驱动（非忙等）。
 
 ### R3 静态 VSCode 布局  [P0]
 - **需求描述**：用 php-tui `Layout` 嵌套画出：左 Sidebar、中上 Editor、中下 Terminal、右上 AI 交互流、右下 AI 输入框、底部 StatusBar；各面板渲染边框与标题占位。

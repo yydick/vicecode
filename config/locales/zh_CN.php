@@ -23,7 +23,7 @@ return [
     'status.dirty'     => '*',
     'status.readonly'  => '只读',
     'status.locale'    => '语言',
-    'status.quit'      => 'Ctrl+C 退出',
+    'status.quit'      => 'Ctrl+Q 退出',
 
     'ai.input_hint'    => '（回车发送）',
 
