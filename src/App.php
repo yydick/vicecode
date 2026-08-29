@@ -7,6 +7,8 @@ use App\Editor\Buffer;
 use App\Editor\Highlighter;
 use App\Explorer\FileTree;
 use App\Explorer\TreeNode;
+use App\Core\Config;
+use App\Core\LayoutFactory;
 use App\I18n\Translator;
 use App\Terminal\CommandRunner;
 use App\Terminal\TerminalBuffer;
@@ -28,8 +30,6 @@ use PhpTui\Tui\Widget\Borders;
 use PhpTui\Tui\Widget\Direction;
 use PhpTui\Tui\Widget\Widget;
 use PhpTui\Tui\Widget\Margin;
-use PhpTui\Tui\Layout\Constraint;
-use PhpTui\Tui\Layout\Layout;
 use PhpTui\Tui\Style\Style;
 use PhpTui\Tui\Style\Modifier;
 use PhpTui\Tui\Color\AnsiColor;
@@ -113,7 +113,7 @@ class App
     public function __construct()
     {
         $this->i18n = Translator::fromEnv(__DIR__ . '/../config/locales');
-        $this->icons = $this->loadConfig(__DIR__ . '/../config/icons.php');
+        $this->icons = Config::loadPhp(__DIR__ . '/../config/icons.php');
         $this->tree = new FileTree(getcwd() ?: '.');
         $this->aiMessages = ['AI: ' . $this->i18n->t('app.title') . '（M0 占位，M5 接真实 LLM）。'];
         $this->termRunner = new CommandRunner();
@@ -122,16 +122,6 @@ class App
         if (!empty($this->tree->roots)) {
             $this->selectedPath = $this->tree->roots[0]->path;
         }
-    }
-
-    /** 读取 config 下的 php 数组配置（语言包 / 图标等），文件缺失返回空数组 */
-    private function loadConfig(string $file): array
-    {
-        if (!is_file($file)) {
-            return [];
-        }
-        $data = require $file;
-        return is_array($data) ? $data : [];
     }
 
     /** 取图标；未配置返回空串（调用方据此回退到纯文字标签） */
@@ -150,43 +140,10 @@ class App
         return $this->i18n->locale();
     }
 
-    // ── 布局（与 M0 一致：Sidebar 30 / 中 Editor+Terminal / AI 45） ──
+    /** 六个面板的矩形（命中测试与渲染共用），约束的唯一真身在 LayoutFactory。 */
     public function areas(Area $vp): array
     {
-        $root = Layout::default()
-            ->constraints([Constraint::min(1), Constraint::length(1)])
-            ->direction(Direction::Vertical)
-            ->split($vp);
-        $status = $root->get(1);
-
-        $main = Layout::default()
-            ->constraints([Constraint::length(30), Constraint::min(10), Constraint::length(45)])
-            ->direction(Direction::Horizontal)
-            ->split($root->get(0));
-        $sidebar = $main->get(0);
-
-        $center = Layout::default()
-            ->constraints([Constraint::percentage(60), Constraint::percentage(40)])
-            ->direction(Direction::Vertical)
-            ->split($main->get(1));
-        $editor = $center->get(0);
-        $terminal = $center->get(1);
-
-        $ai = Layout::default()
-            ->constraints([Constraint::percentage(75), Constraint::length(3)])
-            ->direction(Direction::Vertical)
-            ->split($main->get(2));
-        $aiStream = $ai->get(0);
-        $aiInput = $ai->get(1);
-
-        return [
-            'sidebar' => $sidebar,
-            'editor' => $editor,
-            'terminal' => $terminal,
-            'ai_stream' => $aiStream,
-            'ai_input' => $aiInput,
-            'status' => $status,
-        ];
+        return LayoutFactory::split($vp);
     }
 
     private function borderStyle(bool $focused): Style
@@ -237,7 +194,7 @@ class App
 
         $center = GridWidget::default()
             ->direction(Direction::Vertical)
-            ->constraints(Constraint::percentage(60), Constraint::percentage(40))
+            ->constraints(...LayoutFactory::centerConstraints())
             ->widgets($editor, $terminal);
 
         // ── AI Stream ──
@@ -256,13 +213,13 @@ class App
 
         $ai = GridWidget::default()
             ->direction(Direction::Vertical)
-            ->constraints(Constraint::percentage(75), Constraint::length(3))
+            ->constraints(...LayoutFactory::aiConstraints())
             ->widgets($aiStream, $aiInput);
 
         // ── 主区 ──
         $main = GridWidget::default()
             ->direction(Direction::Horizontal)
-            ->constraints(Constraint::length(30), Constraint::min(10), Constraint::length(45))
+            ->constraints(...LayoutFactory::mainConstraints())
             ->widgets($sidebar, $center, $ai);
 
         // ── StatusBar ──
@@ -289,7 +246,7 @@ class App
 
         return GridWidget::default()
             ->direction(Direction::Vertical)
-            ->constraints(Constraint::min(1), Constraint::length(1))
+            ->constraints(...LayoutFactory::rootConstraints())
             ->widgets($main, $status);
     }
 

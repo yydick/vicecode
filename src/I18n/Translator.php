@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\I18n;
 
+use App\Core\Config;
+
 /**
  * 极简 i18n 翻译器。
  *
@@ -60,11 +62,7 @@ final class Translator
     /** @return array<string,string> */
     private function load(string $baseDir, string $loc): array
     {
-        $file = rtrim($baseDir, '/') . '/' . $loc . '.php';
-        if (!is_file($file)) {
-            return [];
-        }
-        $data = require $file;
-        return is_array($data) ? $data : [];
+        // 与 App 的 config 加载是同一套（Config::loadPhp），避免两份实现漂移
+        return Config::loadPhp(rtrim($baseDir, '/') . '/' . $loc . '.php');
     }
 }
