@@ -3,12 +3,12 @@ declare(strict_types=1);
 
 namespace App;
 
-use App\Editor\Buffer;
-use App\Editor\Highlighter;
 use App\Core\Config;
 use App\Core\LayoutFactory;
+use App\Editor\Buffer;
 use App\I18n\Translator;
 use App\Panel\AiPanel;
+use App\Panel\EditorPanel;
 use App\Panel\SidebarPanel;
 use App\Panel\TerminalPanel;
 use App\Text\DisplayWidth;
@@ -80,8 +80,8 @@ class App
     /** 未保存确认状态机：null=无；['kind'=>'quit'|'close','path'=>?string] */
     public ?array $confirm = null;
 
-    /** 编辑器 tab 栏各标签的命中矩形（点击切换用），渲染时填充 */
-    private array $editorTabRects = [];
+    /** 编辑器面板（行号 + 高亮 + 光标 + 多 Buffer 标签） */
+    public EditorPanel $editor;
 
     /** AI 面板（消息流 + 输入框，M5 接真实 LLM） */
     public AiPanel $ai;
@@ -94,6 +94,7 @@ class App
         $this->i18n = Translator::fromEnv(__DIR__ . '/../config/locales');
         $this->icons = Config::loadPhp(__DIR__ . '/../config/icons.php');
         $this->sidebar = new SidebarPanel($this);
+        $this->editor = new EditorPanel($this);
         $this->ai = new AiPanel($this);
         $this->terminal = new TerminalPanel($this);
         $roots = $this->sidebar->tree()->roots;
@@ -122,6 +123,28 @@ class App
     public function focus(string $panel): void
     {
         $this->focusIndex = array_search($panel, self::PANELS);
+    }
+
+    public function hasTabs(): bool
+    {
+        return $this->editor->hasTabs();
+    }
+
+    /** 指定路径的文件是否仍被打开（测试与未保存确认断言用） */
+    public function hasBuffer(string $path): bool
+    {
+        return $this->editor->hasBuffer($path);
+    }
+
+    public function switchBuffer(string $path): void
+    {
+        $this->editor->switchBuffer($path);
+    }
+
+    /** 打开文件进编辑器（侧栏点文件 / Enter 都走这里） */
+    public function openFile(string $path): void
+    {
+        $this->editor->openFile($path);
     }
 
     /** 设置状态栏瞬时消息（供面板回写，如终端中断命令后提示「已中断」） */
@@ -175,7 +198,7 @@ class App
             ->borders(Borders::ALL)
             ->borderStyle($this->borderStyle($focus === 'editor'))
             ->titles(Title::fromString($editorTitle))
-            ->widget($this->editorContent($a['editor'], $focus === 'editor'));
+            ->widget($this->editor->content($a['editor'], $focus === 'editor'));
 
         // ── Terminal（M2 命令运行器） ──
         $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
@@ -264,160 +287,10 @@ class App
     }
 
     // ── 编辑器内容（行号 + 语法高亮 + 光标反显） ──
-    private function editorContent(Area $editor, bool $focused): Widget
-    {
-        $inner = $editor->inner(new Margin(1, 1));
-        $W = max(0, $inner->width);
-        $H = max(0, $inner->height);
-
-        if ($this->buffer === null) {
-            return ParagraphWidget::fromString($this->i18n->t('editor.no_file'));
-        }
-        if ($this->buffer->noticeKey !== null) {
-            return ParagraphWidget::fromString($this->i18n->t($this->buffer->noticeKey, $this->buffer->noticeParams));
-        }
-
-        $buf = $this->buffer;
-        $gutterW = min($W, $buf->maxLineNoWidth + 1);
-        $textW = max(0, $W - $gutterW);
-        $hasTabs = $this->hasTabs();
-        $tabH = $hasTabs ? 1 : 0;
-        $visibleRows = max(0, $H - $tabH);
-
-        // 垂直滚动：保证光标行可见
-        if ($buf->cursorRow < $buf->scrollTop) {
-            $buf->scrollTop = $buf->cursorRow;
-        }
-        if ($buf->cursorRow >= $buf->scrollTop + $visibleRows) {
-            $buf->scrollTop = $buf->cursorRow - $visibleRows + 1;
-        }
-        if ($buf->scrollTop < 0) {
-            $buf->scrollTop = 0;
-        }
-        // 水平滚动：保证光标列可见
-        if ($buf->cursorCol < $buf->scrollLeft) {
-            $buf->scrollLeft = $buf->cursorCol;
-        }
-        if ($buf->cursorCol >= $buf->scrollLeft + $textW) {
-            $buf->scrollLeft = $buf->cursorCol - $textW + 1;
-        }
-        if ($buf->scrollLeft < 0) {
-            $buf->scrollLeft = 0;
-        }
-
-        // 高亮缓存（按 Buffer 修订号；整文件高亮一次，scrivo 需完整上下文）
-        $lang = Highlighter::langFor((string) $buf->path);
-        if ($buf->hlRev !== $buf->rev) {
-            $buf->hlLines = Highlighter::highlightLines($buf->lines, $lang);
-            $buf->hlRev = $buf->rev;
-        }
-        $hl = $buf->hlLines;
-
-        $lines = [];
-        if ($hasTabs) {
-            $lines[] = $this->editorTabLine($editor, $W);
-        }
-        $total = count($buf->lines);
-        for ($i = 0; $i < $visibleRows; $i++) {
-            $li = $buf->scrollTop + $i;
-            $lineNo = (string) ($li + 1);
-            $gutter = DisplayWidth::mbPad($lineNo, $gutterW - 1) . ' ';
-            $gutterStyle = $li === $buf->cursorRow
-                ? Style::default()->fg(AnsiColor::Yellow)
-                : Style::default()->fg(AnsiColor::DarkGray);
-
-            if ($li >= $total) {
-                // 缓冲区之后：暗色 ~ 占位
-                $lines[] = Line::fromSpans(
-                    Span::styled($gutter, $gutterStyle),
-                    Span::styled('~', Style::default()->fg(AnsiColor::DarkGray)),
-                );
-                continue;
-            }
-
-            if ($hl !== null && isset($hl[$li]) && $hl[$li] !== null) {
-                $lineSpans = $hl[$li];
-            } else {
-                $lineSpans = [[$buf->lines[$li], Style::default()]];
-            }
-            $contentSpans = SpanClip::clip(
-                $lineSpans,
-                $li === $buf->cursorRow && $focused,
-                $buf->cursorCol,
-                $buf->scrollLeft,
-                $textW
-            );
-            $lines[] = Line::fromSpans(
-                Span::styled($gutter, $gutterStyle),
-                ...$contentSpans
-            );
-        }
-        return ParagraphWidget::fromLines(...$lines);
-    }
-
-    // ── 多 Buffer 标签（R7） ──────────────────────────────
-    public function hasTabs(): bool
-    {
-        return count($this->buffers) > 1;
-    }
-
-    /** 指定路径的文件是否仍被打开（用于未保存确认等断言，避免外部直接访问 private $buffers）。 */
-    public function hasBuffer(string $path): bool
-    {
-        return isset($this->buffers[$path]);
-    }
-
-    /** 编辑器顶部标签栏（一行）：已开文件 + dirty*，当前 REVERSED；同时记录命中矩形供点击。 */
-    private function editorTabLine(Area $editor, int $W): Line
-    {
-        $absX0 = $editor->position->x + 1;
-        $maxX = $absX0 + $W;
-        $this->editorTabRects = [];
-        $spans = [];
-        $cx = $absX0;
-        foreach ($this->buffers as $path => $b) {
-            $name = basename($path);
-            $mark = $b->dirty ? $this->i18n->t('status.dirty') : '';
-            $seg = ' ' . $name . $mark . ' ';
-            $w = DisplayWidth::dispWidth($seg);
-            if ($cx + $w > $maxX) {
-                break;
-            }
-            $st = ($b === $this->buffer)
-                ? Style::default()->addModifier(Modifier::REVERSED)
-                : Style::default()->fg(AnsiColor::Gray);
-            $spans[] = Span::styled($seg, $st);
-            $this->editorTabRects[$cx] = [$cx, $cx + $w - 1, $path];
-            $cx += $w;
-        }
-        return Line::fromSpans(...$spans);
-    }
-
-    public function switchBuffer(string $path): void
-    {
-        if (isset($this->buffers[$path])) {
-            $this->buffer = $this->buffers[$path];
-        }
-    }
-
-    private function cycleBuffer(): void
-    {
-        $paths = array_keys($this->buffers);
-        if (count($paths) < 2 || $this->buffer === null) {
-            return;
-        }
-        $idx = array_search($this->buffer->path, $paths, true);
-        if ($idx === false) {
-            return;
-        }
-        $next = $paths[($idx + 1) % count($paths)];
-        $this->buffer = $this->buffers[$next];
-    }
-
     // ── 未保存确认状态机（R8） ───────────────────────────
     private function anyDirty(): bool
     {
-        foreach ($this->buffers as $b) {
+        foreach ($this->editor->buffers() as $b) {
             if ($b->dirty) {
                 return true;
             }
@@ -441,12 +314,12 @@ class App
         $this->quit = true;
     }
 
-    private function requestClose(string $path): void
+    public function requestClose(string $path): void
     {
-        if (!isset($this->buffers[$path])) {
+        if (!$this->editor->hasBuffer($path)) {
             return;
         }
-        if ($this->buffers[$path]->dirty) {
+        if ($this->editor->buffers()[$path]->dirty) {
             $this->confirm = ['kind' => 'close', 'path' => $path];
             return;
         }
@@ -467,9 +340,9 @@ class App
 
     private function reallyClose(string $path): void
     {
-        unset($this->buffers[$path]);
+        $this->editor->removeBuffer($path);
         if ($this->buffer === null || $this->buffer->path === $path) {
-            $remaining = array_values($this->buffers);
+            $remaining = array_values($this->editor->buffers());
             $this->buffer = $remaining !== [] ? $remaining[0] : null;
         }
     }
@@ -537,7 +410,7 @@ class App
             }
             // 编辑器：键入即编辑
             if ($this->focusPanel() === 'editor') {
-                $this->handleEditorChar($event);
+                $this->editor->onChar($event);
                 return;
             }
             // 终端：可打印字符进命令输入行（q 也进输入行，不再直接退出）
@@ -590,29 +463,6 @@ class App
         }
     }
 
-    private function handleEditorChar(CharKeyEvent $e): void
-    {
-        // Ctrl+W 关闭当前 buffer（dirty 时弹确认）
-        if (($e->modifiers & KeyModifiers::CONTROL) && strtolower($e->char) === 'w') {
-            if ($this->buffer !== null) {
-                $this->requestClose((string) $this->buffer->path);
-            }
-            return;
-        }
-        // Ctrl+S 保存
-        if (($e->modifiers & KeyModifiers::CONTROL) && (strtolower($e->char) === 's' || $e->char === "\x13")) {
-            $this->saveBuffer();
-            return;
-        }
-        if ($e->char === "\r" || $e->char === "\n") {
-            $this->buffer?->insertNewline();
-        } elseif ($e->char === "\x7f" || $e->char === "\x08") {
-            $this->buffer?->backspace();
-        } elseif (strlen($e->char) === 1 && ord($e->char) >= 32 && !($e->modifiers & KeyModifiers::CONTROL)) {
-            $this->buffer?->insertChar($e->char);
-        }
-    }
-
     private function handleCoded(CodedKeyEvent $e, array $a): void
     {
         $focus = $this->focusPanel();
@@ -629,7 +479,7 @@ class App
                 break;
             case KeyCode::Tab:
                 if (($e->modifiers & KeyModifiers::CONTROL) && $focus === 'editor') {
-                    $this->cycleBuffer();
+                    $this->editor->cycleBuffer();
                 } else {
                     $this->focusIndex = ($this->focusIndex + 1) % count(self::PANELS);
                 }
@@ -738,19 +588,9 @@ class App
         foreach (self::PANELS as $key) {
             if ($a[$key]->containsPosition($pos)) {
                 if ($key === 'editor') {
-                    // 点 tab 栏（编辑器内第 1 行）→ 切换 buffer
-                    if ($this->hasTabs() && $pos->y === $a['editor']->position->y + 1) {
-                        foreach ($this->editorTabRects as [$x0, $x1, $path]) {
-                            if ($pos->x >= $x0 && $pos->x <= $x1) {
-                                $this->switchBuffer($path);
-                                $this->focusIndex = array_search('editor', self::PANELS);
-                                return;
-                            }
-                        }
-                        $this->focusIndex = array_search('editor', self::PANELS);
-                        return;
-                    }
-                    $this->positionCursorAtClick($pos, $a['editor']);
+                    // 点 tab 栏切 buffer / 按坐标定位光标，都由编辑器面板处理（它会自己聚焦）
+                    $this->editor->onClick($pos, $a);
+                    return;
                 }
                 $this->focusIndex = array_search($key, self::PANELS);
                 return;
@@ -758,64 +598,4 @@ class App
         }
     }
 
-    /** 点击编辑器内某格 → 映射回 Buffer 的 (row,col) 并定位光标（R6 鼠标精细交互） */
-    private function positionCursorAtClick(Position $pos, Area $editor): void
-    {
-        if ($this->buffer === null || $this->buffer->readOnly) {
-            return;
-        }
-        $inner = $editor->inner(new Margin(1, 1));
-        $W = max(0, $inner->width);
-        $gutterW = min($W, $this->buffer->maxLineNoWidth + 1);
-
-        $row = ($pos->y - $inner->position->y - ($this->hasTabs() ? 1 : 0)) + $this->buffer->scrollTop;
-        $total = count($this->buffer->lines);
-        if ($row < 0 || $row >= $total) {
-            // 点在可视行之外：夹到最近的有效行
-            $row = max(0, min($total - 1, $row));
-        }
-        $this->buffer->cursorRow = $row;
-
-        $col = ($pos->x - $inner->position->x - $gutterW) + $this->buffer->scrollLeft;
-        if ($col < 0) {
-            $col = 0;
-        }
-        $lineLen = mb_strlen($this->buffer->lines[$row]);
-        if ($col > $lineLen) {
-            $col = $lineLen;
-        }
-        $this->buffer->cursorCol = $col;
-    }
-
-    public function openFile(string $path): void
-    {
-        if (is_dir($path)) {
-            return;
-        }
-        if (!isset($this->buffers[$path])) {
-            $this->buffers[$path] = Buffer::fromFile($path);
-        }
-        $this->buffer = $this->buffers[$path];
-        $this->focusIndex = array_search('editor', self::PANELS);
-    }
-
-    private function saveBuffer(): void
-    {
-        if ($this->buffer === null) {
-            return;
-        }
-        if ($this->buffer->readOnly) {
-            $this->message = $this->i18n->t('editor.readonly');
-            return;
-        }
-        $path = $this->buffer->path;
-        if ($path === null || (!is_writable($path) && !is_writable(dirname($path)))) {
-            $this->message = $this->i18n->t('editor.save_failed', ['msg' => '权限不足或路径不可写']);
-            return;
-        }
-        $ok = $this->buffer->save();
-        $this->message = $ok
-            ? $this->i18n->t('editor.saved')
-            : $this->i18n->t('editor.save_failed', ['msg' => (error_get_last()['message'] ?? 'unknown')]);
-    }
 }
