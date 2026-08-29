@@ -96,7 +96,9 @@ final class Highlighter
         };
         while ($i < $n) {
             if ($html[$i] === '<') {
-                if (strncmp($html, '<span class="hljs-', 18) === 0) {
+                // 必须用 substr 带偏移比较：strncmp($html, ...) 比的是字符串开头而非 $i 处，
+                // 那会让除首个标签外的所有 hljs span 都被当纯文本吞进 buf（标签泄漏到编辑区）。
+                if (substr($html, $i, 18) === '<span class="hljs-') {
                     $m = [];
                     if (preg_match('/<span class="hljs-([^"]+)">/', $html, $m, 0, $i)) {
                         $flush();

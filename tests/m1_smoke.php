@@ -326,5 +326,141 @@ check($appR6->buffer->cursorCol >= 0, '点击列定位合法（cursorCol>=0）')
 check($appR6->focusPanel() === 'editor', '点击编辑器后焦点为 editor');
 unlink($fR6);
 
+// ───────────────────────── 9) 侧栏双击目录展开/折叠（VSCode 习惯） ─────────────────────────
+// 终端没有双击事件：SGR 协议里双击就是两次独立的 Down，由 App 按「同一条目 + 阈值内」合成。
+echo "== 侧栏双击目录（VSCode 习惯） ==\n";
+$appD = new App();
+$treeProp = new ReflectionProperty(App::class, 'tree');
+$treeProp->setAccessible(true);
+$treeD = $treeProp->getValue($appD);
+$visD = $treeD->visible();
+// 挑第一个「非空」目录：空目录展开后可见节点数不变，断言会误报
+$dirIdx = null;
+foreach ($visD as $i => $n) {
+    if (!$n->isDir || !is_readable($n->path)) {
+        continue;
+    }
+    $entries = scandir($n->path);
+    if (is_array($entries) && count(array_diff($entries, ['.', '..'])) > 0) {
+        $dirIdx = $i;
+        break;
+    }
+}
+$dirNode = $visD[$dirIdx];
+$sbD = $appD->areas($vp)['sidebar'];
+$rowD = $sbD->position->y + 3 + $dirIdx;   // 树条目从 inner 第 2 行起 → sb.y+3
+$colD = $sbD->position->x + 5;
+$clickDir = static fn() => $appD->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $colD, $rowD, 0), $vp);
+
+check($dirNode->expanded === false, '目录初始为折叠');
+$clickDir();
+check($dirNode->expanded === false, '单击目录只选中、不展开（避免误触折叠）');
+check($appD->selectedPath === $dirNode->path, '单击目录设为选中项');
+
+$beforeVisible = count($treeD->visible());
+$clickDir();    // 阈值内的第二次点击 → 构成双击
+check($dirNode->expanded === true, '双击目录 → 展开');
+check(count($treeD->visible()) > $beforeVisible, '展开后可见节点数增加');
+
+$clickDir();    // 第 3 击：重新记时（双击后已清空，防止三击连 toggle 抵消）
+$clickDir();    // 第 4 击：构成双击 → 折叠
+check($dirNode->expanded === false, '再次双击目录 → 折叠');
+check(count($treeD->visible()) === $beforeVisible, '折叠后可见节点数复原');
+
+// 双击文件：不能因为双击合成而失效（仍要打开进编辑器）
+$appF = new App();
+$treeF = (new ReflectionProperty(App::class, 'tree'));
+$treeF->setAccessible(true);
+$visF = $treeF->getValue($appF)->visible();
+$fileIdx = null;
+foreach ($visF as $i => $n) {
+    if (!$n->isDir) {
+        $fileIdx = $i;
+        break;
+    }
+}
+$sbF = $appF->areas($vp)['sidebar'];
+$rowF = $sbF->position->y + 3 + $fileIdx;
+$colF = $sbF->position->x + 5;
+$appF->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $colF, $rowF, 0), $vp);
+$appF->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $colF, $rowF, 0), $vp);
+check($appF->buffer !== null && $appF->buffer->path === $visF[$fileIdx]->path, '双击文件仍能打开进编辑器');
+
+// 点行首三角（▶/▼）展开/折叠（VSCode 习惯）
+// 行结构：边框 | marker「» 」2 列 | 缩进 2*depth 列 | 三角 1 列 + 空格 1 列 | 名称
+// 故 depth=0 的三角在 sb.x+3，depth=1 在 sb.x+5
+// 建一个全新 App 并定位到 src 目录（每个断言都用新实例：连续点击会被双击判定串味）
+$makeApp = static function () use ($vp): array {
+    $app = new App();
+    $tp = new ReflectionProperty(App::class, 'tree');
+    $tp->setAccessible(true);
+    $tree = $tp->getValue($app);
+    $node = null;
+    $idx = null;
+    foreach ($tree->visible() as $i => $n) {
+        if ($n->name === 'src' && $n->isDir) {
+            $node = $n;
+            $idx = $i;
+            break;
+        }
+    }
+    return [$app, $tree, $node, $idx, $app->areas($vp)['sidebar']];
+};
+
+/** 在 src 行上点第 $colOff 列（相对侧栏左边界），返回 src 是否被展开 */
+$clickOnce = static function (int $colOff) use ($makeApp, $vp): bool {
+    [$app, $tree, $node, $idx, $sb] = $makeApp();
+    $app->handle(MouseEvent::new(
+        MouseEventKind::Down, MouseButton::Left,
+        $sb->position->x + $colOff, $sb->position->y + 3 + $idx, 0), $vp);
+    return $node->expanded;
+};
+
+// 命中区必须逐列钉死：只测「三角那一列」的话，命中区左右偏 1 列都测不出来
+check($clickOnce(2) === false, '点三角左侧 marker 区（+2）→ 不展开');
+check($clickOnce(3) === true, '点三角本身（+3）→ 展开');
+check($clickOnce(4) === true, '点三角右侧空格（+4）→ 也展开（命中区含其后 1 列，方便点中）');
+check($clickOnce(5) === false, '点名称首列（+5）→ 不 toggle');
+check($clickOnce(10) === false, '点条目名（+10）→ 不 toggle（只选中）');
+
+// 点条目名仍要能选中（上面只验了不展开）
+[$appN, $treeN, $nodeN, $idxN, $sbN] = $makeApp();
+$appN->handle(MouseEvent::new(
+    MouseEventKind::Down, MouseButton::Left,
+    $sbN->position->x + 10, $sbN->position->y + 3 + $idxN, 0), $vp);
+check($appN->selectedPath === $nodeN->path, '点条目名设为选中项');
+
+// 子目录三角的缩进也要按 depth 偏移（depth=1 → +5）
+$clickSub = static function (int $colOff) use ($makeApp, $vp): ?bool {
+    [$app, $tree, $node, $idx, $sb] = $makeApp();
+    $row = $sb->position->y + 3 + $idx;
+    $app->handle(MouseEvent::new(            // 先展开 src，露出 depth=1 的子目录
+        MouseEventKind::Down, MouseButton::Left, $sb->position->x + 3, $row, 0), $vp);
+    $subIdx = null;
+    foreach ($tree->visible() as $i => $n) {
+        if ($n->isDir && $n->depth === 1) {
+            $subIdx = $i;
+            break;
+        }
+    }
+    if ($subIdx === null) {
+        return null;
+    }
+    $sub = $tree->visible()[$subIdx];
+    $app->handle(MouseEvent::new(
+        MouseEventKind::Down, MouseButton::Left,
+        $sb->position->x + $colOff, $sb->position->y + 3 + $subIdx, 0), $vp);
+    return $sub->expanded;
+};
+
+$sub5 = $clickSub(5);
+if ($sub5 === null) {
+    echo "  [SKIP] 未找到 depth=1 的子目录\n";
+} else {
+    check($sub5 === true, 'depth=1 子目录三角（+5）→ 展开（缩进按 depth 偏移正确）');
+    check($clickSub(4) === false, 'depth=1 子目录三角左侧（+4）→ 不展开');
+    check($clickSub(7) === false, 'depth=1 子目录名称区（+7）→ 不 toggle');
+}
+
 echo $failed ? "\nRESULT: FAIL\n" : "\nRESULT: PASS\n";
 exit($failed ? 1 : 0);

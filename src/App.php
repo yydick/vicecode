@@ -64,6 +64,16 @@ class App
     public string $selectedPath = '';
     public int $treeOffset = 0;
 
+    /**
+     * 双击判定（终端没有双击事件：MouseEventKind 只有 Down/Up/Drag/Moved/Scroll*，
+     * SGR 协议里双击就是两次独立的按下，得自己按「同一条目 + 时间间隔」合成）。
+     * 用途：对齐 VSCode 习惯——双击目录=展开/折叠；单击目录只选中（避免误触折叠）。
+     */
+    private const DOUBLE_CLICK_MS = 400;
+    private ?float $lastTreeClickAtMs = null;
+    private ?string $lastTreeClickPath = null;
+    private ?int $lastTreeClickRow = null;
+
     /** @var array<string,Buffer> */
     private array $buffers = [];
     public ?Buffer $buffer = null;
@@ -692,12 +702,16 @@ class App
                 $gs[] = [' ', Style::default()->addModifier(Modifier::REVERSED)];
             }
         }
-        // 按显示宽度裁剪到视口
+        // 按显示宽度裁剪到视口。
+        // 必须用「起始列 + 自身宽度 <= 右边界」判断：只比较起始列的话，宽字符（占 2 列）
+        // 会在边界处溢出 1 列，行总宽超出面板 → php-tui 的 LineTruncator 把这一行
+        // 折成两行，后续所有行整体下移、行号错位（用户报的「幽灵行」）。
         $picked = [];
         $w = 0;
+        $right = $scrollLeft + $textW;
         foreach ($gs as [$g, $st]) {
             $gw = self::dispWidth($g);
-            if ($w >= $scrollLeft && $w < $scrollLeft + $textW) {
+            if ($w >= $scrollLeft && $w + $gw <= $right) {
                 $picked[] = [$g, $st];
             }
             $w += $gw;
@@ -1134,11 +1148,37 @@ class App
             $visible = $this->tree->visible();
             $idx = ($pos->y - ($sb->position->y + 3)) + $this->treeOffset;
             if (isset($visible[$idx])) {
-                $this->selectedPath = $visible[$idx]->path;
-                $this->focusIndex = array_search('sidebar', self::PANELS);
-                if (!$visible[$idx]->isDir) {
-                    $this->openFile($visible[$idx]->path);
+                $node = $visible[$idx];
+
+                // 点行首三角（▶/▼）= 展开/折叠（VSCode 习惯）。
+                // 命中区取「三角 + 其后空格」2 列：只判三角那 1 列太窄，很难点中。
+                if ($node->isDir && self::hitTreeArrow($pos, $sb, $node->depth)) {
+                    $this->resetTreeDoubleClick();
+                    $this->selectedPath = $node->path;
+                    $this->focusIndex = array_search('sidebar', self::PANELS);
+                    $node->expanded = !$node->expanded;
+                    if ($node->expanded) {
+                        $node->ensureChildren();
+                    }
+                    return;
                 }
+
+                $isDouble = $this->consumeTreeDoubleClick($node->path, $pos->y);
+
+                $this->selectedPath = $node->path;
+                $this->focusIndex = array_search('sidebar', self::PANELS);
+
+                if ($node->isDir) {
+                    // 双击目录 = 展开/折叠（VSCode 习惯）；单击条目名只选中，保持原样
+                    if ($isDouble) {
+                        $node->expanded = !$node->expanded;
+                        if ($node->expanded) {
+                            $node->ensureChildren();
+                        }
+                    }
+                    return;
+                }
+                $this->openFile($node->path);
                 return;
             }
         }
@@ -1165,6 +1205,50 @@ class App
                 return;
             }
         }
+    }
+
+    /**
+     * 命中侧栏行首三角（▶/▼）？
+     * 行结构（屏幕列）：边框 | marker「» 」2 列 | 缩进 2*depth 列 | 三角 1 列 + 其后空格 1 列 | 名称。
+     * 实测（120x40，depth=0）：`│» ▶ .docs/` → 三角在 x=3。
+     */
+    private static function hitTreeArrow(Position $pos, Area $sb, int $depth): bool
+    {
+        $arrowX = $sb->position->x + 1 + 2 + $depth * 2;  // inner 左界（margin 1）+ marker 2 列 + 缩进
+        return $pos->x >= $arrowX && $pos->x <= $arrowX + 1;
+    }
+
+    /**
+     * 判定这次点击是否构成双击（同一条目 + 同一屏幕行 + 阈值内），并更新记时。
+     * 判定成立即清空记录：否则第三击会再被判成一次双击，把目录 toggle 回原状。
+     */
+    private function consumeTreeDoubleClick(string $path, int $row): bool
+    {
+        $now = microtime(true) * 1000.0;
+        $isDouble = $this->lastTreeClickPath === $path
+            && $this->lastTreeClickRow === $row
+            && $this->lastTreeClickAtMs !== null
+            && ($now - $this->lastTreeClickAtMs) <= self::DOUBLE_CLICK_MS;
+
+        if ($isDouble) {
+            $this->lastTreeClickAtMs = null;
+            $this->lastTreeClickPath = null;
+            $this->lastTreeClickRow = null;
+            return true;
+        }
+
+        $this->lastTreeClickAtMs = $now;
+        $this->lastTreeClickPath = $path;
+        $this->lastTreeClickRow = $row;
+        return false;
+    }
+
+    /** 清空双击记时（点了三角这类独立动作后调用，避免与后续点击误合成双击） */
+    private function resetTreeDoubleClick(): void
+    {
+        $this->lastTreeClickAtMs = null;
+        $this->lastTreeClickPath = null;
+        $this->lastTreeClickRow = null;
     }
 
     /** 点击编辑器内某格 → 映射回 Buffer 的 (row,col) 并定位光标（R6 鼠标精细交互） */
@@ -1300,35 +1384,19 @@ class App
         return $s . str_repeat(' ', $n - $len);
     }
 
-    // ── 显示列宽（CJK / 全角 / emoji 算 2 列；php-tui 的 width() 只算 1，故这里自己算） ──
-    private static function cpWidth(int $cp): int
-    {
-        if ($cp > 0xFFFF) {
-            return 2; // 辅助平面（emoji 等）
-        }
-        if (($cp >= 0x1100 && $cp <= 0x115F) ||   // Hangul Jamo
-            ($cp >= 0x2E80 && $cp <= 0x303E) ||   // CJK 部首
-            ($cp >= 0x3041 && $cp <= 0x33FF) ||   // 假名 + CJK 符号
-            ($cp >= 0x3400 && $cp <= 0x4DBF) ||   // CJK 扩展 A
-            ($cp >= 0x4E00 && $cp <= 0x9FFF) ||   // CJK 统一表意
-            ($cp >= 0xF900 && $cp <= 0xFAFF) ||   // 兼容汉字
-            ($cp >= 0xFF00 && $cp <= 0xFF60) ||   // 全角 ASCII
-            ($cp >= 0xFFE0 && $cp <= 0xFFE6)) {   // 全角符号
-            return 2;
-        }
-        return 1;
-    }
-
+    // ── 显示列宽（CJK / 全角 / emoji 算 2 列） ──
+    //
+    // 必须与 php-tui 保持同源：php-tui 的 LineTruncator 用 mb_strwidth() 累加行宽，
+    // 决定一行是否被「切分」成两行（注意它名虽为 Truncator，超宽时其实是折行）。
+    // 曾自维护 Unicode 宽度区间表，漏了韩文音节 U+AC00–D7A3 等，导致算出来的宽度
+    // 比 php-tui 小 → 行溢出 1 列 → 整片后续行被折行挤下去（「幽灵行」）。
+    // 直接与 mb_strwidth 对齐，从根上杜绝两边算法漂移。
     private static function dispWidth(string $s): int
     {
         if ($s === '') {
             return 0;
         }
-        $w = 0;
-        foreach (mb_str_split($s) as $g) {
-            $w += self::cpWidth(mb_ord($g));
-        }
-        return $w;
+        return mb_strwidth($s);
     }
 
     /** 从字符偏移 $off 起，按显示列宽截取最多 $disp 列（在字素边界截断，不劈开 CJK） */
@@ -1346,7 +1414,7 @@ class App
         $w = 0;
         $out = '';
         foreach (mb_str_split($s) as $g) {
-            $cw = self::cpWidth(mb_ord($g));
+            $cw = self::dispWidth($g);
             if ($w + $cw > $disp) {
                 break;
             }
