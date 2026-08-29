@@ -8,7 +8,9 @@ use App\Terminal\CommandRunner;
 use App\Terminal\TerminalBuffer;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
+use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\Event\CharKeyEvent;
+use PhpTui\Term\KeyCode;
 use PhpTui\Term\KeyModifiers;
 use PhpTui\Tui\Color\AnsiColor;
 use PhpTui\Tui\Display\Area;
@@ -212,6 +214,52 @@ final class TerminalPanel
             return true;
         }
         return false;
+    }
+
+    /**
+     * 导航/编辑键（终端焦点时由 App 分发过来）。Esc / Tab 不在此处理——
+     * 它们是全局键（Esc 还担着退出/中断语义），交由 App 的全局逻辑。
+     * 返回 true 表示本面板已消费该键。
+     */
+    public function onKey(CodedKeyEvent $e, array $areas): bool
+    {
+        switch ($e->code) {
+            case KeyCode::Enter:
+                $this->submit();
+                return true;
+            case KeyCode::Up:
+                $this->historyPrev();
+                return true;
+            case KeyCode::Down:
+                $this->historyNext();
+                return true;
+            case KeyCode::Left:
+                $this->moveCursor(-1);
+                return true;
+            case KeyCode::Right:
+                $this->moveCursor(1);
+                return true;
+            case KeyCode::Home:
+                $this->moveCursorHome();
+                return true;
+            case KeyCode::End:
+                $this->moveCursorEnd();
+                return true;
+            case KeyCode::PageUp:
+                $this->scrollBy(-max(1, $areas['terminal']->height - 3));
+                return true;
+            case KeyCode::PageDown:
+                $this->scrollBy(max(1, $areas['terminal']->height - 3));
+                return true;
+            case KeyCode::Backspace:
+                $this->deleteBackward();
+                return true;
+            case KeyCode::Delete:
+                $this->deleteForward();
+                return true;
+            default:
+                return false;
+        }
     }
 
     public function submit(): void

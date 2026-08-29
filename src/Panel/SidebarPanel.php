@@ -203,11 +203,19 @@ final class SidebarPanel
     /** Enter：目录展开/折叠，文件打开进编辑器 */
     public function onKey(CodedKeyEvent $e, array $areas): bool
     {
-        if ($e->code !== KeyCode::Enter) {
-            return false;
+        switch ($e->code) {
+            case KeyCode::Enter:
+                $this->activate();
+                return true;
+            case KeyCode::Up:
+                $this->moveSelection(-1);
+                return true;
+            case KeyCode::Down:
+                $this->moveSelection(1);
+                return true;
+            default:
+                return false;
         }
-        $this->activate();
-        return true;
     }
 
     /**

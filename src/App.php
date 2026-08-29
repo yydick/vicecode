@@ -410,15 +410,16 @@ class App
     {
         $focus = $this->focusPanel();
 
-        // 编辑器焦点下先把按键交给 EditorPanel：它管光标移动 / 翻页 / 删除 / Ctrl+Tab。
-        // 返回 false 的键（普通 Tab 切焦点、Esc 退出等）不归编辑器，继续走下面的全局逻辑。
-        if ($focus === 'editor' && $this->editor->onKey($e, $a)) {
-            return;
-        }
+        // 焦点面板优先消费自己的按键；返回 false 的键（全局键 Esc/Tab、以及非本面板键）
+        // 继续走下面的全局逻辑。各面板的 onKey 已按焦点分发出去，故这里不再判 $focus。
+        if ($focus === 'editor'   && $this->editor->onKey($e, $a))   return;
+        if ($focus === 'terminal' && $this->terminal->onKey($e, $a)) return;
+        if ($focus === 'sidebar'  && $this->sidebar->onKey($e, $a))   return;
 
         switch ($e->code) {
             case KeyCode::Esc:
                 // 终端：运行中→中断命令；有输入→清空输入；否则才退出
+                // （Esc 不归任何面板的 onKey，故走到这里统一处理）
                 if ($focus === 'terminal' && $this->terminal->isRunning()) {
                     $this->terminal->cancel();
                 } elseif ($focus === 'terminal' && $this->terminal->input !== '') {
@@ -428,72 +429,13 @@ class App
                 }
                 break;
             case KeyCode::Tab:
-                // Ctrl+Tab 切 buffer 已由 EditorPanel 处理，这里只剩全局切焦点
+                // Ctrl+Tab 切 buffer 已由 EditorPanel::onKey 处理，这里只剩全局切焦点
                 $this->focusIndex = ($this->focusIndex + 1) % count(self::PANELS);
                 break;
-            case KeyCode::Enter:
-                if ($focus === 'sidebar') {
-                    $this->sidebar->activate();
-                } elseif ($focus === 'terminal') {
-                    // 真实终端里回车是 CodedKeyEvent(Enter)，不是 CharKeyEvent("\r")——
-                    // 只挂在 CharKeyEvent 上的话，pty 下提交不了命令（headless 测试会漏掉）。
-                    $this->terminal->submit();
-                }
-                break;
-            case KeyCode::Up:
-                if ($focus === 'sidebar') {
-                    $this->sidebar->moveSelection(-1);
-                } elseif ($focus === 'terminal') {
-                    $this->terminal->historyPrev();
-                }
-                break;
-            case KeyCode::Down:
-                if ($focus === 'sidebar') {
-                    $this->sidebar->moveSelection(1);
-                } elseif ($focus === 'terminal') {
-                    $this->terminal->historyNext();
-                }
-                break;
-            case KeyCode::Left:
-                if ($focus === 'terminal') {
-                    $this->terminal->moveCursor(-1);
-                }
-                break;
-            case KeyCode::Right:
-                if ($focus === 'terminal') {
-                    $this->terminal->moveCursor(1);
-                }
-                break;
-            case KeyCode::Home:
-                if ($focus === 'terminal') {
-                    $this->terminal->moveCursorHome();
-                }
-                break;
-            case KeyCode::End:
-                if ($focus === 'terminal') {
-                    $this->terminal->moveCursorEnd();
-                }
-                break;
-            case KeyCode::PageUp:
-                if ($focus === 'terminal') {
-                    $this->terminal->scrollBy(-max(1, $a['terminal']->height - 3));
-                }
-                break;
-            case KeyCode::PageDown:
-                if ($focus === 'terminal') {
-                    $this->terminal->scrollBy(max(1, $a['terminal']->height - 3));
-                }
-                break;
             case KeyCode::Backspace:
+                // AI 输入框退格（AiPanel 无 onKey，故留全局；终端退格已下沉到 TerminalPanel::onKey）
                 if ($focus === 'ai_input') {
                     $this->ai->backspace();
-                } elseif ($focus === 'terminal') {
-                    $this->terminal->deleteBackward();
-                }
-                break;
-            case KeyCode::Delete:
-                if ($focus === 'terminal') {
-                    $this->terminal->deleteForward();
                 }
                 break;
         }
