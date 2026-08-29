@@ -86,6 +86,9 @@ $app->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $seg2x, $s
 check($app->sidebar->tabIndex === 1, '点击侧栏 tab 第 2 段 → 切到 GIT');
 
 echo "== 侧栏 ↓ 移动选中 ==\n";
+// 先切回 Explorer tab（上面刚切到 GIT tab；GIT tab 的 ↓ 走 git 导航，故这里回到 Explorer 验证树导航）
+$app->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $sb->position->x + 1, $sb->position->y + 1, 0), $vp);
+check($app->sidebar->tabIndex === 0, '点击侧栏 tab 第 1 段 → 切回 Explorer');
 $app->focusIndex = array_search('sidebar', App::PANELS);
 $sel0 = $app->selectedPath;
 $app->handle(CodedKeyEvent::new(KeyCode::Down, 0), $vp);

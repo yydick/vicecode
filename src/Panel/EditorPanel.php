@@ -332,6 +332,24 @@ final class EditorPanel
         }
     }
 
+    /** 打开虚拟文档（如 git diff），以字符串内容建只读 Buffer 并切焦点到编辑器 */
+    public function openVirtual(string $path, string $content, bool $readOnly = true): void
+    {
+        if (!isset($this->buffers[$path])) {
+            $this->buffers[$path] = Buffer::fromString($path, $content, $readOnly);
+        } else {
+            // 已有则更新内容（diff 可能变化），保持只读
+            $b = $this->buffers[$path];
+            $c = str_replace("\r\n", "\n", $content);
+            $c = rtrim($c, "\n");
+            $b->lines = $c === '' ? [''] : explode("\n", $c);
+            $b->readOnly = $readOnly;
+            $b->recompute();
+        }
+        $this->shell->buffer = $this->buffers[$path];
+        $this->shell->focus('editor');
+    }
+
     /** Ctrl+Tab：在已开文件间环形切换 */
     public function cycleBuffer(): void
     {

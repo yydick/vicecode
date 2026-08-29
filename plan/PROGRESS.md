@@ -117,3 +117,21 @@ Terminal 面板从占位变成真正能跑命令的终端。R1–R7 全做。
 **下一步（按里程碑）**：
 - 之后：M3 GIT；M4 Search；M5 多 Provider LLM 流式（Swoole 协程底座在这里才真正派上用场）。
 - 每步延续"先最小验证再拼接"。
+
+## 八、M3 GIT 面板已接入（2026-08-29）
+
+重构第 1–12 步完成「面板契约」后，按里程碑进入 M3。GIT 内容挂在 Sidebar 的 GIT tab（原占位处），分支进 StatusBar。
+
+- **R1 git status 异步展示** ✅：`Git/GitClient::parseStatusPorcelain`（纯解析，单测覆盖 M/A/D/?/R/U）+ `Git/GitModel::refresh()` 协程内 `git status --porcelain`（Swoole `System::exec` 不阻塞 reactor）。状态着色（staged 绿 / modified 黄 / untracked 红 / renamed 品红 / conflict 亮红）。
+- **R2 git log 展示** ✅：`git log --pretty=format:%h|%an|%ar|%s` 解析，`[L]` 在 status/log 子视图间切换，可滚动。
+- **R3 分支显示在状态栏** ✅：`git rev-parse --abbrev-ref HEAD` 进 `StatusBarPanel`（`状态.branch`）。
+- **R4 git diff 查看** ✅：GIT tab 选中文件 `Enter` → `git diff [--cached] -- <path>` 载入编辑器只读 Buffer 查看（复用编辑器渲染）。
+- 交互：GIT tab 内 `↑/↓` 移动、`Enter` 看 diff、`L` 切 status/log、`R` 刷新；切到 GIT tab 自动触发异步刷新。
+
+**新增文件**：`src/Git/{GitClient,GitFileStatus,GitCommit,GitModel}.php`；`Buffer::fromString`（虚拟只读文档）；`EditorPanel::openVirtual`。
+**验收**：`tests/git_unit.php`（解析单测 + 注入数据渲染 + 协程内真实 git 异步刷新，全 PASS）；`tests/pty_git.php`（真实 pty 点 GIT tab→看分支/状态→Enter 看 diff→Ctrl+Q 干净退出，exit=0）。m0/m1/m2 回归全绿（m0 一处断言前提是旧 GIT tab 无内容，已改为切回 Explorer tab 再验证树导航）。
+
+**待做（M3 出口标准里 R5/R6，P1/P2）**：
+- **R5 基础操作 stage/commit/push**：需通用输入提示框（commit message 输入），尚未实现。
+- **R6 分支切换**：列出本地分支并可 `checkout/switch`，尚未实现。
+

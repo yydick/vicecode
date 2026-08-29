@@ -49,6 +49,19 @@ final class Buffer
         return $b;
     }
 
+    /** 从字符串内容建 Buffer（用于查看 git diff 等虚拟文档，readOnly） */
+    public static function fromString(string $path, string $content, bool $readOnly = true): self
+    {
+        $b = new self();
+        $b->path = $path;
+        $b->readOnly = $readOnly;
+        $c = str_replace("\r\n", "\n", $content);
+        $c = rtrim($c, "\n");
+        $b->lines = $c === '' ? [''] : explode("\n", $c);
+        $b->recompute();
+        return $b;
+    }
+
     public static function fromFile(string $path): self
     {
         $b = new self();

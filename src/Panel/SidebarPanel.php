@@ -6,6 +6,7 @@ namespace App\Panel;
 use App\App;
 use App\Explorer\FileTree;
 use App\Explorer\TreeNode;
+use App\Git\GitClient;
 use App\Text\DisplayWidth;
 use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\KeyCode;
@@ -48,6 +49,9 @@ final class SidebarPanel
 
     /** 树可视区首行的索引（保证选中项可见） */
     public int $offset = 0;
+
+    /** GIT 列表可视区首行索引（status / log 共用） */
+    public int $gitOffset = 0;
 
     public int $tabIndex = 0;
 
@@ -130,8 +134,7 @@ final class SidebarPanel
                 $lines[] = Line::fromSpans(Span::styled('(empty)', Style::default()->fg(AnsiColor::DarkGray)));
             }
         } elseif ($this->tabIndex === 1) {
-            $lines[] = Line::fromSpans(Span::styled($this->shell->t('git.placeholder'), Style::default()->fg(AnsiColor::DarkGray)));
-            $lines[] = Line::fromSpans(Span::styled($this->shell->t('git.sub'), Style::default()->fg(AnsiColor::DarkGray)));
+            $this->gitContent($sidebar, $lines);
         } else {
             $lines[] = Line::fromSpans(Span::styled($this->shell->t('search.placeholder'), Style::default()->fg(AnsiColor::DarkGray)));
             $lines[] = Line::fromSpans(Span::styled($this->shell->t('search.prompt'), Style::default()->fg(AnsiColor::DarkGray)));
@@ -141,6 +144,117 @@ final class SidebarPanel
             return ParagraphWidget::fromString('');
         }
         return ParagraphWidget::fromLines(...$lines);
+    }
+
+    /**
+     * GIT tab 内容（M3）：status 子视图（文件 + 状态着色）/ log 子视图（提交列表）。
+     * 窄侧栏放不下两者，用 [L] 切换子视图；选中行 REVERSED。
+     * 列表可视区按 selIdx 自动滚动（与 Explorer 同约定，content() 非纯函数）。
+     * @param list<Line> $lines
+     */
+    private function gitContent(Area $sidebar, array &$lines): void
+    {
+        $git = $this->shell->git;
+        $innerW = max(0, $sidebar->width - 2);
+
+        if (!$git->inRepo()) {
+            $lines[] = Line::fromSpans(Span::styled(
+                DisplayWidth::mbCutDisp($this->shell->t('git.not_repo'), $innerW),
+                Style::default()->fg(AnsiColor::DarkGray)));
+            return;
+        }
+
+        // 头部：分支 + 子视图标题
+        $viewTitle = $git->subView === 0
+            ? $this->shell->t('git.view_status', ['n' => count($git->status)])
+            : $this->shell->t('git.view_log', ['n' => count($git->log)]);
+        $header = '⎇ ' . $git->branch . '  ' . $viewTitle;
+        $lines[] = Line::fromSpans(Span::styled(
+            DisplayWidth::mbCutDisp($header, $innerW),
+            Style::default()->fg(AnsiColor::Cyan)));
+        $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), Style::default()->fg(AnsiColor::Gray)));
+
+        $rowsH = max(0, $sidebar->height - 4);
+        if ($rowsH <= 0) {
+            return;
+        }
+
+        if ($git->loading && $git->subView === 0 && $git->status === []) {
+            $lines[] = Line::fromSpans(Span::styled(
+                DisplayWidth::mbCutDisp($this->shell->t('git.loading'), $innerW),
+                Style::default()->fg(AnsiColor::DarkGray)));
+            return;
+        }
+
+        if ($git->subView === 0) {
+            $items = $git->status;
+            if ($items === []) {
+                $lines[] = Line::fromSpans(Span::styled(
+                    DisplayWidth::mbCutDisp($this->shell->t('git.clean'), $innerW),
+                    Style::default()->fg(AnsiColor::Green)));
+                return;
+            }
+            $this->clampGitOffset(count($items), $rowsH);
+            for ($i = $this->gitOffset; $i < min($this->gitOffset + $rowsH, count($items)); $i++) {
+                $f = $items[$i];
+                $sel = $i === $git->selIdx;
+                $text = ' ' . $f->badge() . ' ' . $f->displayPath();
+                $style = $sel
+                    ? Style::default()->addModifier(Modifier::REVERSED)
+                    : Style::default()->fg($this->gitColor($f->category()));
+                $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($text, $innerW), $style));
+            }
+        } else {
+            $items = $git->log;
+            if ($items === []) {
+                $lines[] = Line::fromSpans(Span::styled(
+                    DisplayWidth::mbCutDisp($this->shell->t('git.no_log'), $innerW),
+                    Style::default()->fg(AnsiColor::DarkGray)));
+                return;
+            }
+            $this->clampGitOffset(count($items), $rowsH);
+            for ($i = $this->gitOffset; $i < min($this->gitOffset + $rowsH, count($items)); $i++) {
+                $c = $items[$i];
+                $sel = $i === $git->selIdx;
+                $text = $c->hash . ' ' . $c->subject;
+                $style = $sel
+                    ? Style::default()->addModifier(Modifier::REVERSED)
+                    : Style::default()->fg(AnsiColor::Gray);
+                $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($text, $innerW), $style));
+            }
+        }
+    }
+
+    /** GIT 状态类别 → 颜色（与 VSCode gutter 着色近似） */
+    private function gitColor(string $cat): AnsiColor
+    {
+        return match ($cat) {
+            GitClient::STATUS_STAGED => AnsiColor::Green,
+            GitClient::STATUS_MODIFIED => AnsiColor::Yellow,
+            GitClient::STATUS_UNTRACKED => AnsiColor::Red,
+            GitClient::STATUS_RENAMED => AnsiColor::Magenta,
+            GitClient::STATUS_DELETED => AnsiColor::Red,
+            GitClient::STATUS_CONFLICT => AnsiColor::LightRed,
+            GitClient::STATUS_IGNORED => AnsiColor::DarkGray,
+            default => AnsiColor::Gray,
+        };
+    }
+
+    /** 按选中行夹紧 git 列表可视区首行（保证选中行可见） */
+    private function clampGitOffset(int $n, int $rowsH): void
+    {
+        $idx = $this->shell->git->selIdx;
+        if ($idx < $this->gitOffset) {
+            $this->gitOffset = $idx;
+        } elseif ($idx >= $this->gitOffset + $rowsH) {
+            $this->gitOffset = $idx - $rowsH + 1;
+        }
+        if ($this->gitOffset < 0) {
+            $this->gitOffset = 0;
+        }
+        if ($this->gitOffset > max(0, $n - $rowsH)) {
+            $this->gitOffset = max(0, $n - $rowsH);
+        }
     }
 
     // ── 事件 ────────────────────────────────────────
@@ -160,6 +274,10 @@ final class SidebarPanel
             $seg = max(1, intdiv(max(1, $sb->width - 2), 3));
             $this->tabIndex = min(2, intdiv($inner, $seg));
             $this->shell->focus('sidebar');
+            // 切到 GIT tab 即异步刷新 status/log/branch（M3 R1/R2/R3）
+            if ($this->tabIndex === 1) {
+                $this->shell->git->refresh();
+            }
             return true;
         }
 
@@ -203,6 +321,10 @@ final class SidebarPanel
     /** Enter：目录展开/折叠，文件打开进编辑器 */
     public function onKey(CodedKeyEvent $e, array $areas): bool
     {
+        // GIT tab 用自己的导航语义
+        if ($this->tabIndex === 1) {
+            return $this->gitKey($e);
+        }
         switch ($e->code) {
             case KeyCode::Enter:
                 $this->activate();
@@ -212,6 +334,25 @@ final class SidebarPanel
                 return true;
             case KeyCode::Down:
                 $this->moveSelection(1);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** GIT tab 按键（M3）：↑/↓ 移动、Enter 看 diff、L 切 status/log、R 刷新 */
+    private function gitKey(CodedKeyEvent $e): bool
+    {
+        $git = $this->shell->git;
+        switch ($e->code) {
+            case KeyCode::Up:
+                $git->moveSelection(-1);
+                return true;
+            case KeyCode::Down:
+                $git->moveSelection(1);
+                return true;
+            case KeyCode::Enter:
+                $git->openDiff();
                 return true;
             default:
                 return false;

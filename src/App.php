@@ -7,6 +7,7 @@ use App\Core\Config;
 use App\Core\Lifecycle;
 use App\Core\LayoutFactory;
 use App\Editor\Buffer;
+use App\Git\GitModel;
 use App\I18n\Translator;
 use App\Panel\AiPanel;
 use App\Panel\EditorPanel;
@@ -95,6 +96,9 @@ class App
     /** 终端面板（M2 命令运行器） */
     public TerminalPanel $terminal;
 
+    /** GIT 面板状态（M3）：status / log / 分支，供 Sidebar 的 GIT tab 与 StatusBar 读取 */
+    public GitModel $git;
+
     /** 底部状态栏 */
     public StatusBarPanel $statusBar;
 
@@ -110,6 +114,7 @@ class App
         $this->ai = new AiPanel($this);
         $this->terminal = new TerminalPanel($this);
         $this->statusBar = new StatusBarPanel($this);
+        $this->git = new GitModel($this);
         // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, fn() => $this->terminal->shutdown());
         $roots = $this->sidebar->tree()->roots;
@@ -367,6 +372,18 @@ class App
                     $this->sidebar->activate();
                 }
                 return;
+            }
+            // GIT tab 专用字符键（focus=sidebar 且当前在 GIT tab）
+            if ($this->focusPanel() === 'sidebar' && $this->sidebar->tabIndex === 1) {
+                $ch = strtolower($event->char);
+                if ($ch === 'l') {
+                    $this->git->toggleSubView();
+                    return;
+                }
+                if ($ch === 'r') {
+                    $this->git->refresh();
+                    return;
+                }
             }
             if (strtolower($event->char) === 'q') {
                 $this->lifecycle->requestQuit();

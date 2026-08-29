@@ -41,6 +41,7 @@ final class StatusBarPanel
         return ' ' . $this->shell->t('app.title')
             . ' · ' . $this->shell->t('status.focus') . '=' . strtoupper($this->shell->focusPanel())
             . ' · ' . $this->shell->t('status.tab') . '=' . $this->shell->sidebar->tabLabel()
+            . ' · ' . $this->shell->t('status.branch') . '=' . $this->shell->git->branch
             . ' · ' . $this->shell->t('status.file') . '=' . $file . $dirty
             . ' · ' . $this->shell->t('status.locale') . '=' . $this->shell->locale()
             . ' · ' . $this->shell->message

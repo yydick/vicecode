@@ -27,6 +27,7 @@ return [
     'status.dirty'     => '*',
     'status.readonly'  => 'RO',
     'status.locale'    => 'lang',
+    'status.branch'    => 'branch',
     'status.quit'      => 'Ctrl+Q quit',
 
     // AI 输入框提示
@@ -54,8 +55,13 @@ return [
     'term.empty'         => '(focus this panel to type a command, Enter to run; ↑/↓ history, Ctrl+L clear)',
 
     // 侧栏其它标签占位
-    'git.placeholder'    => 'git status (M3)',
-    'git.sub'            => ' - changed files',
+    'git.not_repo'       => '(not a git repository)',
+    'git.view_status'    => 'status {n}',
+    'git.view_log'       => 'log {n}',
+    'git.loading'        => '(loading…)',
+    'git.clean'          => '(working tree clean)',
+    'git.no_log'         => '(no commit history)',
+    'git.no_diff'        => 'no diff for this file',
     'search.placeholder' => 'search (M4)',
     'search.prompt'      => ' > ',
 ];

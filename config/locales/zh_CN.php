@@ -23,6 +23,7 @@ return [
     'status.dirty'     => '*',
     'status.readonly'  => '只读',
     'status.locale'    => '语言',
+    'status.branch'    => '分支',
     'status.quit'      => 'Ctrl+Q 退出',
 
     'ai.input_hint'    => '（回车发送）',
@@ -46,8 +47,13 @@ return [
     'term.spawn_failed'  => '无法启动命令进程',
     'term.empty'         => '（聚焦此面板后可输入命令，回车执行；↑/↓ 翻历史，Ctrl+L 清屏）',
 
-    'git.placeholder'    => 'git status（M3 接入）',
-    'git.sub'            => ' - 改动文件若干',
+    'git.not_repo'       => '（当前目录不是 git 仓库）',
+    'git.view_status'    => '状态 {n}',
+    'git.view_log'       => '日志 {n}',
+    'git.loading'        => '（加载中…）',
+    'git.clean'          => '（工作区干净）',
+    'git.no_log'         => '（无提交历史）',
+    'git.no_diff'        => '该文件无 diff',
     'search.placeholder' => '搜索（M4 接入）',
     'search.prompt'      => ' > ',
 ];
