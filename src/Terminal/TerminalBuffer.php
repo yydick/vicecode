@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Terminal;
 
+use App\Terminal\Ansi;
+
 /**
  * 终端输出缓冲：把命令输出的任意字节块切成带 stderr 标记的行，供渲染层取视口。
  *
@@ -39,7 +41,7 @@ final class TerminalBuffer
         }
         $this->tailErr = $err;
 
-        $text = $this->tail . $this->sanitize($bytes);
+        $text = $this->tail . Ansi::sanitize($bytes);
         $parts = explode("\n", $text);
         $this->tail = (string) array_pop($parts);   // 最后一段可能还没换行
         foreach ($parts as $line) {
@@ -97,21 +99,5 @@ final class TerminalBuffer
         if ($over > 0) {
             array_splice($this->lines, 0, $over);
         }
-    }
-
-    private function sanitize(string $s): string
-    {
-        // 先整段移除 ANSI 序列再剔控制符，否则 `ls --color` 会留下 "[31mfoo[0m" 这种残渣
-        $s = (string) preg_replace('/\x1B\[[0-9;?]*[ -\/]*[@-~]/', '', $s);          // CSI（颜色/光标）
-        $s = (string) preg_replace('/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\\\)/', '', $s); // OSC（窗口标题等）
-        $s = (string) preg_replace('/\x1B[@-Z\\\\-_]/', '', $s);                     // 其余两字符转义
-        $s = str_replace(["\r\n", "\r"], "\n", $s);
-        $s = str_replace("\t", '    ', $s);
-        // 剔除除 \n 外的 C0 控制符与 DEL
-        $s = (string) preg_replace('/[\x00-\x09\x0B-\x1F\x7F]/', '', $s);
-        if (!mb_check_encoding($s, 'UTF-8')) {
-            $s = mb_convert_encoding($s, 'UTF-8', 'UTF-8');
-        }
-        return $s;
     }
 }
