@@ -10,6 +10,7 @@ use App\Explorer\TreeNode;
 use App\Core\Config;
 use App\Core\LayoutFactory;
 use App\I18n\Translator;
+use App\Panel\AiPanel;
 use App\Terminal\CommandRunner;
 use App\Terminal\TerminalBuffer;
 use App\Text\DisplayWidth;
@@ -89,9 +90,8 @@ class App
     /** 编辑器 tab 栏各标签的命中矩形（点击切换用），渲染时填充 */
     private array $editorTabRects = [];
 
-    /** AI 聊天：消息流 + 输入框缓冲（沿用 M0） */
-    public array $aiMessages = [];
-    public string $aiInput = '';
+    /** AI 面板（消息流 + 输入框，M5 接真实 LLM） */
+    public AiPanel $ai;
 
     // ── Terminal（M2 命令运行器） ──
     /** 命令在独立子进程跑，主循环每轮 pollTerminal() 排空管道，故不阻塞渲染 */
@@ -115,7 +115,7 @@ class App
         $this->i18n = Translator::fromEnv(__DIR__ . '/../config/locales');
         $this->icons = Config::loadPhp(__DIR__ . '/../config/icons.php');
         $this->tree = new FileTree(getcwd() ?: '.');
-        $this->aiMessages = ['AI: ' . $this->i18n->t('app.title') . '（M0 占位，M5 接真实 LLM）。'];
+        $this->ai = new AiPanel($this);
         $this->termRunner = new CommandRunner();
         $this->termBuf = new TerminalBuffer();
         $this->termCwd = getcwd() ?: '.';
@@ -138,6 +138,12 @@ class App
     public function locale(): string
     {
         return $this->i18n->locale();
+    }
+
+    /** 取翻译文案（供各面板使用，避免面板各自持有 Translator） */
+    public function t(string $key, array $params = []): string
+    {
+        return $this->i18n->t($key, $params);
     }
 
     /** 六个面板的矩形（命中测试与渲染共用），约束的唯一真身在 LayoutFactory。 */
@@ -202,14 +208,14 @@ class App
             ->borders(Borders::ALL)
             ->borderStyle($this->borderStyle($focus === 'ai_stream'))
             ->titles(Title::fromString(' ' . $this->i18n->t('panel.ai_chat') . ' '))
-            ->widget(ParagraphWidget::fromString(implode("\n", $this->aiMessages)));
+            ->widget($this->ai->streamContent());
 
         // ── AI Input ──
         $aiInput = BlockWidget::default()
             ->borders(Borders::ALL)
             ->borderStyle($this->borderStyle($focus === 'ai_input'))
             ->titles(Title::fromString(' ' . $this->i18n->t('panel.ai_input') . ' ' . $this->i18n->t('ai.input_hint') . ' '))
-            ->widget(ParagraphWidget::fromString('> ' . $this->aiInput . '▌'));
+            ->widget($this->ai->inputContent());
 
         $ai = GridWidget::default()
             ->direction(Direction::Vertical)
@@ -811,7 +817,7 @@ class App
             }
             // AI 输入框
             if ($this->focusPanel() === 'ai_input') {
-                $this->handleAiChar($event);
+                $this->ai->onChar($event);
                 return;
             }
             // 编辑器：键入即编辑
@@ -866,17 +872,6 @@ class App
         }
         if ($e->kind === MouseEventKind::Down) {
             $this->handleClick($e, $a);
-        }
-    }
-
-    private function handleAiChar(CharKeyEvent $e): void
-    {
-        if ($e->char === "\r" || $e->char === "\n") {
-            $this->sendAi();
-        } elseif ($e->char === "\x7f" || $e->char === "\x08") {
-            $this->aiInput = substr($this->aiInput, 0, -1);
-        } elseif (strlen($e->char) === 1 && ord($e->char) >= 32 && !(($e->modifiers & KeyModifiers::CONTROL))) {
-            $this->aiInput .= $e->char;
         }
     }
 
@@ -996,7 +991,7 @@ class App
                 break;
             case KeyCode::Backspace:
                 if ($focus === 'ai_input') {
-                    $this->aiInput = substr($this->aiInput, 0, -1);
+                    $this->ai->backspace();
                 } elseif ($focus === 'editor') {
                     $this->buffer?->backspace();
                 } elseif ($focus === 'terminal' && $this->termPos > 0) {
@@ -1241,16 +1236,4 @@ class App
             ? $this->i18n->t('editor.saved')
             : $this->i18n->t('editor.save_failed', ['msg' => (error_get_last()['message'] ?? 'unknown')]);
     }
-
-    private function sendAi(): void
-    {
-        $text = trim($this->aiInput);
-        if ($text === '') {
-            return;
-        }
-        $this->aiMessages[] = 'You: ' . $text;
-        $this->aiMessages[] = 'AI: (' . $this->i18n->t('panel.ai_chat') . ' M5)';
-        $this->aiInput = '';
-    }
-
 }

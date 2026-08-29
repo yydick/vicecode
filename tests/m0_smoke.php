@@ -71,13 +71,13 @@ $click($a['ai_input']);
 check($app->focusPanel() === 'ai_input', '点击 AI 输入框 → 焦点切到 ai_input');
 
 echo "== AI 输入发送 ==\n";
-$before = count($app->aiMessages);
+$before = count($app->ai->messages());
 foreach (['h', 'i'] as $ch) {
     $app->handle(CharKeyEvent::new($ch, 0), $vp);
 }
 $app->handle(CharKeyEvent::new("\r", 0), $vp);
-check(count($app->aiMessages) === $before + 2, '输入 "hi" + Enter → 聊天流新增 2 条');
-check($app->aiInput === '', '发送后输入框清空');
+check(count($app->ai->messages()) === $before + 2, '输入 "hi" + Enter → 聊天流新增 2 条');
+check($app->ai->input() === '', '发送后输入框清空');
 
 echo "== 侧栏 tab 切换 ==\n";
 $sb = $a['sidebar'];
