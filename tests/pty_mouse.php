@@ -103,13 +103,16 @@ $out2 = runOnce($env, [
 check(str_contains($out2, '编辑器gitignore'), '双击后文件被打开进编辑器');
 
 echo "== 展开目录后点其中的文件（真实使用路径）==\n";
-// 0-based (5,10)=src 目录；展开后 src/App.php 位于 idx=13 → 0-based y=16 → SGR row=17
+// 刻意用 bin/ 而不是 src/：这里的坐标只能硬编码（pty 是黑盒，查不到树结构），
+// 而 src/ 的子目录数量会随重构变化——本次就因新增 src/Text/ 让 src/App.php 下移一行而失效。
+// bin/ 下只放文件、不会再增子目录，且 tui.php 按字母序（'.' < '_'）恒为第一个文件。
+// 0-based (5,2)=bin 目录；展开后 bin/tui.php 位于 idx=3 → 0-based y=6 → SGR row=7
 $out4 = runOnce($env, [
-    ["\x1b[<0;6;11M", 200000], ["\x1b[<0;6;11m", 200000],   // 点 src 目录（选中）
-    ["\r", 300000],                                          // Enter 展开
-    ["\x1b[<0;6;17M", 250000], ["\x1b[<0;6;17m", 450000],   // 点 src/App.php
+    ["\x1b[<0;6;6M", 200000], ["\x1b[<0;6;6m", 200000],   // 点 bin 目录（选中）
+    ["\r", 300000],                                        // Enter 展开
+    ["\x1b[<0;6;7M", 250000], ["\x1b[<0;6;7m", 450000],   // 点 bin/tui.php
 ], $readPty);
-check(str_contains($out4, '编辑器appphp'), '展开 src 后点 App.php 成功打开进编辑器');
+check(str_contains($out4, '编辑器tuiphp'), '展开 bin 后点 tui.php 成功打开进编辑器');
 
 echo "== 单击行首三角应展开（VSCode 习惯）==\n";
 // src 在 0-based y=10（SGR row=11）；三角在 0-based x=3（SGR col=4），名称区 x=10（SGR col=11）

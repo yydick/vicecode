@@ -10,6 +10,8 @@ use App\Explorer\TreeNode;
 use App\I18n\Translator;
 use App\Terminal\CommandRunner;
 use App\Terminal\TerminalBuffer;
+use App\Text\DisplayWidth;
+use App\Text\SpanClip;
 use PhpTui\Term\Event\CharKeyEvent;
 use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\Event\MouseEvent;
@@ -349,7 +351,7 @@ class App
                 'hint' => Style::default()->fg(AnsiColor::DarkGray),
                 default => Style::default(),
             };
-            $lines[] = Line::fromSpans(Span::styled(self::mbCutDisp($row['text'], $W), $style));
+            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($row['text'], $W), $style));
         }
         // 输出不足一屏时补空行，把输入行顶到面板底部
         while (count($lines) < $outH) {
@@ -387,19 +389,19 @@ class App
         $promptStyle = $running
             ? Style::default()->fg(AnsiColor::Green)
             : Style::default()->fg(AnsiColor::Cyan);
-        $textW = max(0, $W - self::dispWidth($prompt));
+        $textW = max(0, $W - DisplayWidth::dispWidth($prompt));
 
         $spans = [];
         foreach (mb_str_split($this->termInput) as $g) {
             $spans[] = [$g, Style::default()];
         }
         // 把光标显示列滚进窗口（+1 是给光标本身留一格）
-        $cursorDisp = self::dispWidth(mb_substr($this->termInput, 0, $this->termPos));
+        $cursorDisp = DisplayWidth::dispWidth(mb_substr($this->termInput, 0, $this->termPos));
         $scrollLeft = max(0, $cursorDisp - $textW + 1);
 
         return Line::fromSpans(
             Span::styled($prompt, $promptStyle),
-            ...$this->clipLineSpans($spans, $focused, $this->termPos, $scrollLeft, $textW)
+            ...SpanClip::clip($spans, $focused, $this->termPos, $scrollLeft, $textW)
         );
     }
 
@@ -531,13 +533,13 @@ class App
                 $core = '[' . $core . ']';
             }
             // 段内超宽则按显示列宽截断（保留字素边界，不劈开 CJK）
-            if (self::dispWidth($core) > $seg) {
-                $core = self::mbCutDisp($core, $seg);
+            if (DisplayWidth::dispWidth($core) > $seg) {
+                $core = DisplayWidth::mbCutDisp($core, $seg);
             }
-            $tabLine .= self::mbPadDisp($core, $seg);
+            $tabLine .= DisplayWidth::mbPadDisp($core, $seg);
         }
         if ($innerW > 0) {
-            $lines[] = Line::fromSpans(Span::styled(self::mbCutDisp($tabLine, $innerW), Style::default()->fg(AnsiColor::Yellow)));
+            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($tabLine, $innerW), Style::default()->fg(AnsiColor::Yellow)));
             $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), Style::default()->fg(AnsiColor::Gray)));
         }
 
@@ -560,7 +562,7 @@ class App
                     $prefix = $node->isDir ? ($node->expanded ? '▼ ' : '▶ ') : '  ';
                     $marker = $node->path === $this->selectedPath ? '» ' : '  ';
                     $suffix = $node->isDir ? '/' : '';
-                    $text = self::mbCutDisp($marker . $indent . $prefix . $node->name . $suffix, $innerW);
+                    $text = DisplayWidth::mbCutDisp($marker . $indent . $prefix . $node->name . $suffix, $innerW);
                     $style = $node->path === $this->selectedPath
                         ? Style::default()->addModifier(Modifier::REVERSED)
                         : Style::default();
@@ -641,7 +643,7 @@ class App
         for ($i = 0; $i < $visibleRows; $i++) {
             $li = $buf->scrollTop + $i;
             $lineNo = (string) ($li + 1);
-            $gutter = self::mbPad($lineNo, $gutterW - 1) . ' ';
+            $gutter = DisplayWidth::mbPad($lineNo, $gutterW - 1) . ' ';
             $gutterStyle = $li === $buf->cursorRow
                 ? Style::default()->fg(AnsiColor::Yellow)
                 : Style::default()->fg(AnsiColor::DarkGray);
@@ -660,7 +662,7 @@ class App
             } else {
                 $lineSpans = [[$buf->lines[$li], Style::default()]];
             }
-            $contentSpans = $this->clipLineSpans(
+            $contentSpans = SpanClip::clip(
                 $lineSpans,
                 $li === $buf->cursorRow && $focused,
                 $buf->cursorCol,
@@ -673,79 +675,6 @@ class App
             );
         }
         return ParagraphWidget::fromLines(...$lines);
-    }
-
-    /**
-     * 把整行 Span 列表裁剪到水平视口 [scrollLeft, scrollLeft+textW)，并叠加光标反显。
-     * @param array<int,array{0:string,1:Style}> $lineSpans
-     * @return array<int,Span>
-     */
-    private function clipLineSpans(array $lineSpans, bool $cursorHere, int $curCol, int $scrollLeft, int $textW): array
-    {
-        // 展开为字素列表 [g, Style]
-        $gs = [];
-        foreach ($lineSpans as [$text, $st]) {
-            foreach (mb_str_split($text) as $g) {
-                $gs[] = [$g, $st];
-            }
-        }
-        // 光标反显
-        if ($cursorHere) {
-            if ($curCol >= 0 && $curCol < count($gs)) {
-                [$g, $st] = $gs[$curCol];
-                // 必须 clone：Style::addModifier() 是原地修改并返回 $this，
-                // 而同一行的字素（乃至高亮缓存里的多行）可能共享同一个 Style 实例，
-                // 直接 addModifier 会把整行（甚至其它行）一起反显。
-                $gs[$curCol] = [$g === '' ? ' ' : $g, (clone $st)->addModifier(Modifier::REVERSED)];
-            } else {
-                // 光标在行尾（无字素）：补一个反显空格
-                $gs[] = [' ', Style::default()->addModifier(Modifier::REVERSED)];
-            }
-        }
-        // 按显示宽度裁剪到视口。
-        // 必须用「起始列 + 自身宽度 <= 右边界」判断：只比较起始列的话，宽字符（占 2 列）
-        // 会在边界处溢出 1 列，行总宽超出面板 → php-tui 的 LineTruncator 把这一行
-        // 折成两行，后续所有行整体下移、行号错位（用户报的「幽灵行」）。
-        $picked = [];
-        $w = 0;
-        $right = $scrollLeft + $textW;
-        foreach ($gs as [$g, $st]) {
-            $gw = self::dispWidth($g);
-            if ($w >= $scrollLeft && $w + $gw <= $right) {
-                $picked[] = [$g, $st];
-            }
-            $w += $gw;
-        }
-        return $this->groupSpans($picked);
-    }
-
-    /** 合并连续同色字素为一个 Span（降低 Span 数量）。 */
-    private function groupSpans(array $picked): array
-    {
-        $out = [];
-        $curText = '';
-        $curStyle = null;
-        foreach ($picked as [$g, $st]) {
-            if ($curStyle === null) {
-                $curText = $g;
-                $curStyle = $st;
-            } elseif ($this->styleKey($st) === $this->styleKey($curStyle)) {
-                $curText .= $g;
-            } else {
-                $out[] = Span::styled($curText, $curStyle);
-                $curText = $g;
-                $curStyle = $st;
-            }
-        }
-        if ($curText !== '') {
-            $out[] = Span::styled($curText, $curStyle);
-        }
-        return $out;
-    }
-
-    private function styleKey(Style $s): string
-    {
-        return ($s->fg?->name ?? '') . ':' . $s->addModifiers;
     }
 
     // ── 多 Buffer 标签（R7） ──────────────────────────────
@@ -772,7 +701,7 @@ class App
             $name = basename($path);
             $mark = $b->dirty ? $this->i18n->t('status.dirty') : '';
             $seg = ' ' . $name . $mark . ' ';
-            $w = self::dispWidth($seg);
+            $w = DisplayWidth::dispWidth($seg);
             if ($cx + $w > $maxX) {
                 break;
             }
@@ -1367,74 +1296,4 @@ class App
         $this->aiInput = '';
     }
 
-    // ── 多字节安全的显示宽度裁剪/填充（按字符数，非字节） ──
-    private static function mbCut(string $s, int $n): string
-    {
-        if ($n <= 0) {
-            return '';
-        }
-        return mb_substr($s, 0, $n);
-    }
-
-    private static function mbPad(string $s, int $n): string
-    {
-        if ($n <= 0) {
-            return '';
-        }
-        $len = mb_strlen($s);
-        if ($len >= $n) {
-            return $s;
-        }
-        return $s . str_repeat(' ', $n - $len);
-    }
-
-    // ── 显示列宽（CJK / 全角 / emoji 算 2 列） ──
-    //
-    // 必须与 php-tui 保持同源：php-tui 的 LineTruncator 用 mb_strwidth() 累加行宽，
-    // 决定一行是否被「切分」成两行（注意它名虽为 Truncator，超宽时其实是折行）。
-    // 曾自维护 Unicode 宽度区间表，漏了韩文音节 U+AC00–D7A3 等，导致算出来的宽度
-    // 比 php-tui 小 → 行溢出 1 列 → 整片后续行被折行挤下去（「幽灵行」）。
-    // 直接与 mb_strwidth 对齐，从根上杜绝两边算法漂移。
-    private static function dispWidth(string $s): int
-    {
-        if ($s === '') {
-            return 0;
-        }
-        return mb_strwidth($s);
-    }
-
-    /** 从字符偏移 $off 起，按显示列宽截取最多 $disp 列（在字素边界截断，不劈开 CJK） */
-    private static function mbSubstrDisp(string $s, int $off, int $disp): string
-    {
-        return self::mbCutDisp(mb_substr($s, $off), $disp);
-    }
-
-    /** 按显示列宽截取（在字素边界截断） */
-    private static function mbCutDisp(string $s, int $disp): string
-    {
-        if ($disp <= 0) {
-            return '';
-        }
-        $w = 0;
-        $out = '';
-        foreach (mb_str_split($s) as $g) {
-            $cw = self::dispWidth($g);
-            if ($w + $cw > $disp) {
-                break;
-            }
-            $out .= $g;
-            $w += $cw;
-        }
-        return $out;
-    }
-
-    /** 按显示列宽右侧补空格对齐 */
-    private static function mbPadDisp(string $s, int $disp): string
-    {
-        $d = self::dispWidth($s);
-        if ($d >= $disp) {
-            return $s;
-        }
-        return $s . str_repeat(' ', $disp - $d);
-    }
 }
