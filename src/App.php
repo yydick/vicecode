@@ -4,12 +4,14 @@ declare(strict_types=1);
 namespace App;
 
 use App\Core\Config;
+use App\Core\Lifecycle;
 use App\Core\LayoutFactory;
 use App\Editor\Buffer;
 use App\I18n\Translator;
 use App\Panel\AiPanel;
 use App\Panel\EditorPanel;
 use App\Panel\SidebarPanel;
+use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
@@ -89,6 +91,12 @@ class App
     /** 终端面板（M2 命令运行器） */
     public TerminalPanel $terminal;
 
+    /** 底部状态栏 */
+    public StatusBarPanel $statusBar;
+
+    /** 退出与未保存确认状态机（R8） */
+    public Lifecycle $lifecycle;
+
     public function __construct()
     {
         $this->i18n = Translator::fromEnv(__DIR__ . '/../config/locales');
@@ -97,6 +105,9 @@ class App
         $this->editor = new EditorPanel($this);
         $this->ai = new AiPanel($this);
         $this->terminal = new TerminalPanel($this);
+        $this->statusBar = new StatusBarPanel($this);
+        // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
+        $this->lifecycle = new Lifecycle($this, fn() => $this->terminal->shutdown());
         $roots = $this->sidebar->tree()->roots;
         if (!empty($roots)) {
             $this->selectedPath = $roots[0]->path;
@@ -145,6 +156,18 @@ class App
     public function openFile(string $path): void
     {
         $this->editor->openFile($path);
+    }
+
+    /** 请求退出（有未保存改动先弹确认） */
+    public function requestQuit(): void
+    {
+        $this->lifecycle->requestQuit();
+    }
+
+    /** 请求关闭某个 buffer（dirty 时先弹确认；编辑器 Ctrl+W 走这里） */
+    public function requestClose(string $path): void
+    {
+        $this->lifecycle->requestClose($path);
     }
 
     /** 设置状态栏瞬时消息（供面板回写，如终端中断命令后提示「已中断」） */
@@ -242,26 +265,9 @@ class App
             ->widgets($sidebar, $center, $ai);
 
         // ── StatusBar ──
-        $file = $this->buffer !== null ? basename((string) $this->buffer->path) : '—';
-        $dirty = $this->buffer !== null && $this->buffer->dirty ? ' ' . $this->i18n->t('status.dirty') : '';
-        $tabLabel = $this->sidebar->tabLabel();
-        $statusText = ' ' . $this->i18n->t('app.title')
-            . ' · ' . $this->i18n->t('status.focus') . '=' . strtoupper($focus)
-            . ' · ' . $this->i18n->t('status.tab') . '=' . $tabLabel
-            . ' · ' . $this->i18n->t('status.file') . '=' . $file . $dirty
-            . ' · ' . $this->i18n->t('status.locale') . '=' . $this->locale()
-            . ' · ' . $this->message
-            . ' · ' . $this->i18n->t('status.quit');
-        // 未保存确认进行中：状态栏改为确认提示
-        if ($this->confirm !== null) {
-            $statusText = ' ' . ($this->confirm['kind'] === 'close'
-                ? $this->i18n->t('confirm.close_dirty')
-                : $this->i18n->t('confirm.quit_dirty'));
-        }
-
         $status = BlockWidget::default()
             ->borders(Borders::NONE)
-            ->widget(ParagraphWidget::fromString($statusText));
+            ->widget($this->statusBar->content());
 
         return GridWidget::default()
             ->direction(Direction::Vertical)
@@ -287,93 +293,12 @@ class App
     }
 
     // ── 编辑器内容（行号 + 语法高亮 + 光标反显） ──
-    // ── 未保存确认状态机（R8） ───────────────────────────
-    private function anyDirty(): bool
-    {
-        foreach ($this->editor->buffers() as $b) {
-            if ($b->dirty) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private function requestQuit(): void
-    {
-        if ($this->anyDirty()) {
-            $this->confirm = ['kind' => 'quit'];
-            return;
-        }
-        $this->finishQuit();
-    }
-
-    /** 收尾退出：先停掉还在跑的命令，避免留下孤儿子进程 */
-    private function finishQuit(): void
-    {
-        $this->terminal->shutdown();
-        $this->quit = true;
-    }
-
-    public function requestClose(string $path): void
-    {
-        if (!$this->editor->hasBuffer($path)) {
-            return;
-        }
-        if ($this->editor->buffers()[$path]->dirty) {
-            $this->confirm = ['kind' => 'close', 'path' => $path];
-            return;
-        }
-        $this->reallyClose($path);
-    }
-
-    private function confirmProceed(): void
-    {
-        $kind = $this->confirm['kind'] ?? 'quit';
-        $path = $this->confirm['path'] ?? null;
-        $this->confirm = null;
-        if ($kind === 'close' && $path !== null) {
-            $this->reallyClose($path);
-        } else {
-            $this->finishQuit();
-        }
-    }
-
-    private function reallyClose(string $path): void
-    {
-        $this->editor->removeBuffer($path);
-        if ($this->buffer === null || $this->buffer->path === $path) {
-            $remaining = array_values($this->editor->buffers());
-            $this->buffer = $remaining !== [] ? $remaining[0] : null;
-        }
-    }
-
-    private function handleConfirm($event): void
-    {
-        if ($event instanceof CharKeyEvent) {
-            $ctrl = ($event->modifiers & KeyModifiers::CONTROL)
-                && strtolower($event->char) === 'q';
-            $ch = strtolower($event->char);
-            if ($ctrl || $ch === 'y') {
-                $this->confirmProceed();
-                return;
-            }
-            if ($ch === 'n') {
-                $this->confirm = null;
-                return;
-            }
-            return;
-        }
-        if ($event instanceof CodedKeyEvent && $event->code === KeyCode::Esc) {
-            $this->confirm = null;
-        }
-    }
-
     // ── 事件分发 ──
     public function handle($event, Area $vp): void
     {
         // 未保存确认进行中：拦截所有输入，只响应 y/n/Esc（及 Ctrl+Q 视为确认）
         if ($this->confirm !== null) {
-            $this->handleConfirm($event);
+            $this->lifecycle->handleEvent($event);
             return;
         }
 
@@ -400,7 +325,7 @@ class App
             // 实测 php-tui/term 0.3.4 会把 0x11 解析成 CharKeyEvent(char:'q', modifiers:ctl)，
             // 故无需另兜底原始字节——若写上 `\x11` 分支反而是死代码（它排在 CONTROL 判定之后）。
             if (($event->modifiers & KeyModifiers::CONTROL) && strtolower($event->char) === 'q') {
-                $this->requestQuit();
+                $this->lifecycle->requestQuit();
                 return;
             }
             // AI 输入框
@@ -426,7 +351,7 @@ class App
                 return;
             }
             if (strtolower($event->char) === 'q') {
-                $this->requestQuit();
+                $this->lifecycle->requestQuit();
             }
             return;
         }
@@ -474,7 +399,7 @@ class App
                 } elseif ($focus === 'terminal' && $this->terminal->input !== '') {
                     $this->terminal->clearInput();
                 } else {
-                    $this->requestQuit();
+                    $this->lifecycle->requestQuit();
                 }
                 break;
             case KeyCode::Tab:
