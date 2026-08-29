@@ -276,10 +276,6 @@ class App
     }
 
     // ── 终端面板（M2 命令运行器） ──────────────────────
-
-    /**
-     * 主循环每轮调用：排空命令管道。返回是否有新内容（供主循环决定是否重绘）。
-     */
     /** 主循环每轮调用：排空命令管道（bin/tui.php 依赖此签名） */
     public function pollTerminal(): bool
     {
@@ -292,7 +288,6 @@ class App
         return $this->terminal->isRunning();
     }
 
-    // ── 编辑器内容（行号 + 语法高亮 + 光标反显） ──
     // ── 事件分发 ──
     public function handle($event, Area $vp): void
     {
@@ -391,6 +386,13 @@ class App
     private function handleCoded(CodedKeyEvent $e, array $a): void
     {
         $focus = $this->focusPanel();
+
+        // 编辑器焦点下先把按键交给 EditorPanel：它管光标移动 / 翻页 / 删除 / Ctrl+Tab。
+        // 返回 false 的键（普通 Tab 切焦点、Esc 退出等）不归编辑器，继续走下面的全局逻辑。
+        if ($focus === 'editor' && $this->editor->onKey($e, $a)) {
+            return;
+        }
+
         switch ($e->code) {
             case KeyCode::Esc:
                 // 终端：运行中→中断命令；有输入→清空输入；否则才退出
@@ -403,11 +405,8 @@ class App
                 }
                 break;
             case KeyCode::Tab:
-                if (($e->modifiers & KeyModifiers::CONTROL) && $focus === 'editor') {
-                    $this->editor->cycleBuffer();
-                } else {
-                    $this->focusIndex = ($this->focusIndex + 1) % count(self::PANELS);
-                }
+                // Ctrl+Tab 切 buffer 已由 EditorPanel 处理，这里只剩全局切焦点
+                $this->focusIndex = ($this->focusIndex + 1) % count(self::PANELS);
                 break;
             case KeyCode::Enter:
                 if ($focus === 'sidebar') {
@@ -419,78 +418,58 @@ class App
                 }
                 break;
             case KeyCode::Up:
-                if ($focus === 'editor') {
-                    $this->buffer?->moveUp();
-                } elseif ($focus === 'sidebar') {
+                if ($focus === 'sidebar') {
                     $this->sidebar->moveSelection(-1);
                 } elseif ($focus === 'terminal') {
                     $this->terminal->historyPrev();
                 }
                 break;
             case KeyCode::Down:
-                if ($focus === 'editor') {
-                    $this->buffer?->moveDown();
-                } elseif ($focus === 'sidebar') {
+                if ($focus === 'sidebar') {
                     $this->sidebar->moveSelection(1);
                 } elseif ($focus === 'terminal') {
                     $this->terminal->historyNext();
                 }
                 break;
             case KeyCode::Left:
-                if ($focus === 'editor') {
-                    $this->buffer?->moveLeft();
-                } elseif ($focus === 'terminal') {
+                if ($focus === 'terminal') {
                     $this->terminal->moveCursor(-1);
                 }
                 break;
             case KeyCode::Right:
-                if ($focus === 'editor') {
-                    $this->buffer?->moveRight();
-                } elseif ($focus === 'terminal') {
+                if ($focus === 'terminal') {
                     $this->terminal->moveCursor(1);
                 }
                 break;
             case KeyCode::Home:
-                if ($focus === 'editor') {
-                    $this->buffer?->moveHome();
-                } elseif ($focus === 'terminal') {
+                if ($focus === 'terminal') {
                     $this->terminal->moveCursorHome();
                 }
                 break;
             case KeyCode::End:
-                if ($focus === 'editor') {
-                    $this->buffer?->moveEnd();
-                } elseif ($focus === 'terminal') {
+                if ($focus === 'terminal') {
                     $this->terminal->moveCursorEnd();
                 }
                 break;
             case KeyCode::PageUp:
-                if ($focus === 'editor') {
-                    $this->buffer?->pageUp(max(1, $a['editor']->height - 4));
-                } elseif ($focus === 'terminal') {
+                if ($focus === 'terminal') {
                     $this->terminal->scrollBy(-max(1, $a['terminal']->height - 3));
                 }
                 break;
             case KeyCode::PageDown:
-                if ($focus === 'editor') {
-                    $this->buffer?->pageDown(max(1, $a['editor']->height - 4));
-                } elseif ($focus === 'terminal') {
+                if ($focus === 'terminal') {
                     $this->terminal->scrollBy(max(1, $a['terminal']->height - 3));
                 }
                 break;
             case KeyCode::Backspace:
                 if ($focus === 'ai_input') {
                     $this->ai->backspace();
-                } elseif ($focus === 'editor') {
-                    $this->buffer?->backspace();
                 } elseif ($focus === 'terminal') {
                     $this->terminal->deleteBackward();
                 }
                 break;
             case KeyCode::Delete:
-                if ($focus === 'editor') {
-                    $this->buffer?->delete();
-                } elseif ($focus === 'terminal') {
+                if ($focus === 'terminal') {
                     $this->terminal->deleteForward();
                 }
                 break;

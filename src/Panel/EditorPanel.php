@@ -9,6 +9,8 @@ use App\Editor\Highlighter;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
 use PhpTui\Term\Event\CharKeyEvent;
+use PhpTui\Term\Event\CodedKeyEvent;
+use PhpTui\Term\KeyCode;
 use PhpTui\Term\KeyModifiers;
 use PhpTui\Tui\Color\AnsiColor;
 use PhpTui\Tui\Display\Area;
@@ -214,6 +216,63 @@ final class EditorPanel
         $this->positionCursorAtClick($pos, $editor);
         $this->shell->focus('editor');
         return true;
+    }
+
+    /**
+     * 编辑器焦点下的功能键：光标移动 / 翻页 / 删除，以及 Ctrl+Tab 切 buffer。
+     * 返回 false 表示本面板不处理该键，调用方（App）继续走全局键
+     * ——例如普通 Tab（切焦点）与 Esc（退出）都不归编辑器管。
+     *
+     * @param array<string,Area> $areas
+     */
+    public function onKey(CodedKeyEvent $e, array $areas): bool
+    {
+        // Ctrl+Tab 切 buffer 不需要 buffer 已打开，故放在 null 判断之前
+        if ($e->code === KeyCode::Tab && ($e->modifiers & KeyModifiers::CONTROL)) {
+            $this->cycleBuffer();
+            return true;
+        }
+
+        $buf = $this->shell->buffer;
+        if ($buf === null) {
+            return false;
+        }
+        $page = max(1, $areas['editor']->height - 4);
+
+        switch ($e->code) {
+            case KeyCode::Up:
+                $buf->moveUp();
+                return true;
+            case KeyCode::Down:
+                $buf->moveDown();
+                return true;
+            case KeyCode::Left:
+                $buf->moveLeft();
+                return true;
+            case KeyCode::Right:
+                $buf->moveRight();
+                return true;
+            case KeyCode::Home:
+                $buf->moveHome();
+                return true;
+            case KeyCode::End:
+                $buf->moveEnd();
+                return true;
+            case KeyCode::PageUp:
+                $buf->pageUp($page);
+                return true;
+            case KeyCode::PageDown:
+                $buf->pageDown($page);
+                return true;
+            case KeyCode::Backspace:
+                $buf->backspace();
+                return true;
+            case KeyCode::Delete:
+                $buf->delete();
+                return true;
+            default:
+                return false;
+        }
     }
 
     public function onChar(CharKeyEvent $e): bool
