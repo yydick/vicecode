@@ -3,8 +3,9 @@ declare(strict_types=1);
 
 namespace App;
 
-use App\Core\KeyInput;
 use App\Core\Config;
+use App\Core\KeyBindings;
+use App\Core\KeyInput;
 use App\Core\Lifecycle;
 use App\Core\LayoutFactory;
 use App\Editor\Buffer;
@@ -13,6 +14,7 @@ use App\Git\GitModel;
 use App\I18n\Translator;
 use App\Panel\AiPanel;
 use App\Panel\EditorPanel;
+use App\Panel\HelpPanel;
 use App\Panel\SidebarPanel;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
@@ -29,6 +31,7 @@ use PhpTui\Term\MouseButton;
 use PhpTui\Tui\Display\Area;
 use PhpTui\Tui\Position\Position;
 use PhpTui\Tui\Extension\Core\Widget\BlockWidget;
+use PhpTui\Tui\Extension\Core\Widget\CompositeWidget;
 use PhpTui\Tui\Extension\Core\Widget\GridWidget;
 use PhpTui\Tui\Extension\Core\Widget\ParagraphWidget;
 use PhpTui\Tui\Widget\Borders;
@@ -105,6 +108,9 @@ class App
     /** SEARCH 面板状态（M4 R1–R3）：输入框 / 异步 grep / 结果列表，供 Sidebar 的 SEARCH tab 读取 */
     public SearchModel $search;
 
+    /** 帮助页覆盖层（M6 R2）：全屏居中，打开期间独占键盘 */
+    public HelpPanel $help;
+
     /**
      * AI 对话状态（M5）：消息历史 / 流式生成 / Provider 选择。
      * 面板（AiPanel）只读它，不持有内容——与 GitModel / SearchModel 同构。
@@ -129,6 +135,7 @@ class App
         $this->git = new GitModel($this);
         $this->search = new SearchModel($this);
         $this->chat = new ChatModel($this);
+        $this->help = new HelpPanel($this);
         // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function () {
             $this->chat->shutdown();
@@ -247,7 +254,17 @@ class App
 
     public function render(Area $vp): Widget
     {
-        return $this->build($this->areas($vp));
+        $base = $this->build($this->areas($vp));
+        if (!$this->help->isOpen()) {
+            return $base;
+        }
+        // 覆盖层：CompositeWidget 把多个 widget 渲染到**同一个 area**
+        // （php-tui 注释原话是 "useful for showing dialogues"），底层 UI 先画、
+        // 帮助页再浮在上面。这样底下仍看得见自己在哪个面板。
+        return CompositeWidget::fromWidgets(
+            $base,
+            $this->help->widget($vp->width, $vp->height),
+        );
     }
 
     public function build(array $a): Widget
@@ -386,12 +403,39 @@ class App
 
         $a = $this->areas($vp);
 
+        // 帮助页打开期间**独占键盘**：不往下层面板分发，否则在帮助页里按 q 会顺带
+        // 把应用退了（q 是全局"非输入态退出"）。滚轮也交给它翻页。
+        if ($this->help->isOpen()) {
+            $viewH = $this->help->viewHeightFor($vp->width, $vp->height);
+            if ($event instanceof MouseEvent) {
+                if ($event->kind === MouseEventKind::ScrollUp) {
+                    $this->help->scrollBy(-3);
+                } elseif ($event->kind === MouseEventKind::ScrollDown) {
+                    $this->help->scrollBy(3);
+                }
+                return;
+            }
+            if ($event instanceof CharKeyEvent && $this->help->onChar($event)) {
+                return;
+            }
+            if ($event instanceof CodedKeyEvent && $this->help->onKey($event, $viewH)) {
+                return;
+            }
+            return; // 其余键一律吞掉：帮助页是模态的
+        }
+
         if ($event instanceof MouseEvent) {
             $this->handleMouse($event, $a);
             return;
         }
 
         if ($event instanceof CharKeyEvent) {
+            // 「?」唤出帮助页。必须在任何面板拿到字符之前拦截——
+            // 否则在编辑器里按 ? 会把它插进文档、在 AI 输入框会把它打进消息。
+            if ($event->char === KeyBindings::HELP_KEY) {
+                $this->help->open();
+                return;
+            }
             // 终端有命令在跑时，Ctrl+C 先中断子进程（R7），而不是退出应用
             if ($this->focusPanel() === 'terminal'
                 && $this->terminal->isRunning()

@@ -88,6 +88,12 @@ final class Buffer
             return $b;
         }
 
+        // 能读但不可写（如 0444）：直接标只读。否则状态栏显示「编辑」，
+        // 用户改半天按 Ctrl+S 才撞到权限错误——R1 要求编辑模式如实反映。
+        if (!is_writable($path)) {
+            $b->readOnly = true;
+        }
+
         $size = filesize($path);
         if ($size > self::MAX_BYTES) {
             $b->readOnly = true;
