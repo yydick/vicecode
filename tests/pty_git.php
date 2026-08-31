@@ -8,8 +8,21 @@ declare(strict_types=1);
  * 点击坐标用探针 App 的布局精确算出（0-based→SGR 1-based），不靠猜。
  * 全程不创建提交 / 不改仓库（空消息提交被拒；diff 只读）。
  *
+ * ## 自带 fixture，不依赖仓库此刻是否脏
+ * GIT 面板要有条目可点，前提是仓库里有改动。早期版本直接假设「本项目当前有未提交改动」，
+ * 于是一提交完改动测试就假失败（2026-08-31 提交完 M5 后踩到）。现在自己在项目根
+ * 造一个未跟踪的 fixture 文件，跑完删掉；用 register_shutdown_function 兜底，
+ * 中途 Fatal 也不会留下垃圾。
+ *
  * 运行：php tests/pty_git.php
  */
+
+chdir(__DIR__ . '/..');
+$fixture = getcwd() . '/pty_git_fixture.txt';
+file_put_contents($fixture, "fixture for tests/pty_git.php\nZZGITFIXTURE\n");
+register_shutdown_function(static function () use ($fixture): void {
+    @unlink($fixture);
+});
 
 $env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40']);
 
