@@ -257,6 +257,13 @@ final class AiPanel
     public function onKey(CodedKeyEvent $e, array $a): bool
     {
         switch ($e->code) {
+            case KeyCode::Enter:
+                // ⚠️ 真实终端里回车是 **CodedKeyEvent(Enter)**，不是 CharKeyEvent("\r")。
+                // 只在 onChar 里挂 "\r" 的话，headless 单测全绿但 pty 下按回车没反应
+                // （M2 的终端面板踩过一模一样的坑，见 project_php_tui_facts.md）。
+                // 两条路径都要能发送。
+                $this->send();
+                return true;
             case KeyCode::Backspace:
                 $this->backspace();
                 return true;

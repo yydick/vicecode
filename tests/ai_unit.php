@@ -19,6 +19,7 @@ use App\Ai\ProviderRegistry;
 use App\Ai\ProviderSpec;
 use App\Ai\SseParser;
 use App\App;
+use App\Text\DisplayWidth;
 
 $failed = false;
 function check(bool $cond, string $msg): void
@@ -606,6 +607,20 @@ drainChat($app3->chat);
 check(count($app3->chat->messages()) === 1, '回车后用户消息入列（请求失败后空的 assistant 占位被移除）');
 check(($app3->chat->messages()[0]['content'] ?? '') === '你好', '中文内容完整入列');
 
+// ── 回车两条路径都要能发送 ──
+// ⚠️ 真实终端发的是 **CodedKeyEvent(Enter)**，不是 CharKeyEvent("\r")。
+// 只挂 "\r" 时 headless 全绿但 pty 下按回车没反应（M2 的终端面板踩过同一个坑）。
+$app3b = new App();
+$app3b->chat = new ChatModel($app3b, mockRegistry(18995));
+$app3b->focusIndex = array_search('ai_input', App::PANELS, true);
+foreach (mb_str_split('路径') as $ch) {
+    $app3b->handle(CharKeyEvent::new($ch, 0), $vp2);
+}
+$app3b->handle(CodedKeyEvent::new(KeyCode::Enter), $vp2);
+drainChat($app3b->chat); // 18995 无服务端，curl 立刻失败；排空后空的 assistant 占位才被移除
+check(count($app3b->chat->messages()) === 1, 'CodedKeyEvent(Enter) 也能发送（真实终端走这条路径）');
+check($app3b->ai->input() === '', 'CodedKeyEvent(Enter) 发送后输入框清空');
+
 // ── ↑/↓ prompt 历史 ──
 foreach (mb_str_split('第二条') as $ch) {
     $app3->handle(CharKeyEvent::new($ch, 0), $vp2);
@@ -682,5 +697,42 @@ $app6 = new App();
 $app6->focusIndex = array_search('ai_input', App::PANELS, true);
 $app6->handle(CodedKeyEvent::new(KeyCode::Esc), TuiArea::fromDimensions(120, 40));
 check($app6->confirm !== null || $app6->quit === true, '未在生成时按 Esc → 走全局退出流程（不被 AI 面板吞掉）');
+
+// ── 压边界：极小视口不能崩、也不能出超宽行 ──────────────
+// 验收纪律要求压极小视口：宽度一变小，软换行的边界条件最容易出问题
+// （内宽 0/1 时 mbWrapDisp 要退化成返回空行而不是死循环或负数宽度）。
+echo "\n== 极小视口边界 ==\n";
+foreach ([[40, 10], [20, 6], [10, 4]] as [$W, $H]) {
+    $okRender = true;
+    $err = null;
+    try {
+        $t = renderText($renderer, $app, $W, $H);
+        foreach (explode("\n", $t) as $l) {
+            if (mb_strwidth($l) > $W) {
+                $okRender = false;
+                break;
+            }
+        }
+    } catch (Throwable $e) {
+        $okRender = false;
+        $err = get_class($e) . ': ' . $e->getMessage();
+    }
+    check($okRender, "{$W}x{$H}：渲染不崩且无超宽行" . ($err !== null ? "（$err）" : ''));
+}
+check(DisplayWidth::mbWrapDisp('abc', 0) === [''], 'mbWrapDisp 宽度 0 → 退化成空行，不负数不崩');
+check(DisplayWidth::mbWrapDisp('', 5) === [''], 'mbWrapDisp 空串 → 单行空串');
+// 宽 3 时两个 2 列宽的汉字放不进同一行（2+2=4>3）→ 逐字成行；汉字绝不会被劈成半字
+check(DisplayWidth::mbWrapDisp('你好世界', 3) === ['你', '好', '世', '界'],
+    '宽度 3 时汉字逐字成行，不被劈开（实际：' . json_encode(DisplayWidth::mbWrapDisp('你好世界', 3), JSON_UNESCAPED_UNICODE) . '）');
+// 宽 4 时两个汉字正好一行
+check(DisplayWidth::mbWrapDisp('你好世界', 4) === ['你好', '世界'],
+    '宽度 4 时两个汉字一行（实际：' . json_encode(DisplayWidth::mbWrapDisp('你好世界', 4), JSON_UNESCAPED_UNICODE) . '）');
+// 混排：末尾的 ASCII 会补进最后一行
+// 混排：'界'(2列) 后面还能塞下 1 个 ASCII(1列) 凑满 3 列，第 2 个 ASCII 放不下另起一行
+$mixed = DisplayWidth::mbWrapDisp('你好世界ab', 3);
+check($mixed === ['你', '好', '世', '界a', 'b'],
+    'CJK+ASCII 混排按列宽贪心填行（实际：' . json_encode($mixed, JSON_UNESCAPED_UNICODE) . '）');
+$over = array_values(array_filter($mixed, static fn($l) => mb_strwidth($l) > 3));
+check($over === [], 'mbWrapDisp 每行宽度都不超过给定宽度（混排越界行：' . (implode(',', $over) ?: '无') . '）');
 
 exit($failed ? 1 : 0);

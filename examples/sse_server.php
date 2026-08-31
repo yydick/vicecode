@@ -94,9 +94,14 @@ if ($uri === '/v1/chat/completions' && $method === 'POST') {
     sseFrame(['delta' => ['role' => 'assistant'], 'index' => 0]);
     usleep($delayMs * 1000);
 
-    // 回复内容：默认 tok1..tokN；reply=a|b|c 可自定义分词
-    if (isset($_GET['reply']) && is_string($_GET['reply']) && $_GET['reply'] !== '') {
-        $tokens = explode('|', $_GET['reply']);
+    // 回复内容：默认 tok1..tokN；reply=a|b|c 可自定义分词。
+    // 启动服务端时用 MOCK_REPLY 也能设（客户端 URL 拼不出 query，见上面 status 的说明）。
+    $replyParam = $_GET['reply'] ?? null;
+    if (!is_string($replyParam) || $replyParam === '') {
+        $replyParam = getenv('MOCK_REPLY') ?: null;
+    }
+    if ($replyParam !== null && $replyParam !== false && $replyParam !== '') {
+        $tokens = explode('|', $replyParam);
     } else {
         $tokens = [];
         for ($i = 1; $i <= max(1, $n); $i++) {

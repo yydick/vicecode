@@ -183,3 +183,61 @@ Terminal 面板从占位变成真正能跑命令的终端。R1–R7 全做。
 **验收**：`tests/hscroll_unit.php`（切片/反查/跨行移动边界）全 PASS；m0/m1/m1_edge/m2/git/search/
 editor_render_check/diff_invariant2/coroutine_channel_test 与全部 pty 测试回归全绿（19/19）。
 
+## 十一、M5 AI 交互流已接入（2026-08-31）
+
+右上消息流 + 右下输入框接上真实 LLM 流式。范围：OpenAI + DeepSeek 两家（同一协议共用实现），
+本地 mock 端点验收（真 key 从环境变量读，不入库）。
+
+### 传输层：先验证再选型（这一步省不得）
+
+里程碑原本写「Swoole 协程 curl + WRITEFUNCTION」。**实测这条路是坏的**，详见
+`docs/swoole_study.md` §9 与 `tests/sse_probe*.php`：
+
+| 方案 | 结果 |
+|---|---|
+| libcurl + WRITEFUNCTION，含 `NATIVE_CURL` hook | ❌ 回调被**静默吞掉**（不报错、没数据） |
+| `curl_multi` + `NATIVE_CURL` hook | ❌ **段错误** |
+| libcurl + WRITEFUNCTION，关掉 CURL hook | ⚠️ 能流式，但**阻塞整个调度器**（打点=1） |
+| `Coroutine\Http\Client` + `recv()` | ❌ `recv()` 是 WebSocket 方法，HTTP 没有增量读的口子 |
+| **`curl` 子进程 + 非阻塞管道** | ✅ 流式 + 不阻塞（打点=29） |
+
+选最后一条：**复用 M2/M4 的 `CommandRunner`，传输层零新代码**，HTTPS 交给 curl，
+「停止生成」就是 `cancel()` → `proc_terminate`（M2 R7 已验证）。
+命令行必须带 `-N`（关 curl 缓冲，否则流式退化成一次性返回）。
+
+顺带记一个 API 坑：`Swoole\Coroutine::run()` 静态方法**不存在**，只有函数
+`Swoole\Coroutine\run()`。
+
+### 实现要点
+
+- `src/Ai/SseParser.php`：增量解析。**半行保持原始字节**，凑齐 `\n` 才解析——
+  UTF-8 汉字是 3 字节，chunk 边界随时会劈开它，提前 sanitize 会永久乱码（同 M4 的教训）。
+- `src/Ai/OpenAiCompatProvider.php`：请求体与请求头都走**临时文件**。
+  长对话不撞 ARG_MAX，且 **API key 不进 argv**（命令行对同机其他用户可见）。
+  用 `-D` 单独 dump 响应头，才能区分「401 鉴权失败」和「模型真的没话说」。
+- `src/Ai/ChatModel.php`：`send/poll/cancel`。流式在数据层就是「最后一条 assistant
+  消息在长」，渲染层无需为「正在生成的消息」开特例。
+- `src/Panel/AiPanel.php`：**必须自己软换行**（新增 `DisplayWidth::mbWrapDisp`）。
+  `ParagraphWidget` 默认走 `LineTruncator`，超宽时是**折行不是截断**，一行超 1 列就把
+  后续整片行挤下去（M1 幽灵行根因）。LLM 回复动辄超宽，这个坑必踩。
+- 交互：回车发送、`Ctrl+P` 切 Provider、`Ctrl+N` 切模型、`Ctrl+L` 清空、`↑/↓` prompt 历史
+  （含草稿保存）、滚轮滚动（上滚脱离 follow，否则新 token 把人拽回底部）、`Esc` 中断生成
+  （不生成时放回全局退出）。**不能用 Ctrl+M——它就是回车 0x0D**。
+
+### 顺手修掉的两个真 bug（都是 headless 测不出来的）
+
+1. **全应用 CJK 输入失效**：编辑器 / 终端 / AI 输入 / GIT 提交框 / SEARCH 输入框五处的
+   可打印字符判定都写成 `strlen($char) === 1`，而 UTF-8 的「你」是 3 字节 →
+   **中文和全角标点根本打不进去**。实测 php-tui/term 的 EventParser 会正确解码成单个
+   `CharKeyEvent(char:'你')`，故只需放宽字节数判断。统一抽到 `Core\KeyInput::isPrintable()`。
+2. **AI 面板回车发不出去**：真实终端里回车是 `CodedKeyEvent(Enter)`，不是
+   `CharKeyEvent("\r")`。只在 `onChar` 挂 `"\r"` 的话 headless 全绿、pty 下按回车没反应
+   （M2 的终端面板踩过一模一样的坑）。两条路径都补了测试钉死。
+
+### 验收
+
+`tests/ai_unit.php`（142 项）+ `tests/pty_ai.php`（真实 pty）。
+pty 里的关键断言是**中途快照能看到首 token、但看不到末 token** —— 这才能证明主循环
+确实把 `pollAi()` 的返回值并入了重绘判据；headless 直接调 `poll()` 绕过这条路径，测不出来。
+全部 21 个测试（11 headless + 10 pty）无回归。
+

@@ -376,6 +376,37 @@
 
 **M5 出口标准**：R1–R4 全达标，能流式多轮对话并切换 ≥2 个 Provider。
 
+> 状态：**R1–R4 完成（2026-08-31）**。R5–R10 未做。
+>
+> **⚠️ 与里程碑描述的三处偏离（都是有实测依据的，改回前请先读）：**
+>
+> 1. **R2 的「Swoole 协程 curl + `CURLOPT_WRITEFUNCTION」是坏的实现路径**，已换成
+>    `curl` 子进程 + 非阻塞管道（复用 M2/M4 的 `CommandRunner`）。实测见
+>    `docs/swoole_study.md` §9 / `tests/sse_probe*.php`：`SWOOLE_HOOK_NATIVE_CURL`
+>    会**静默吞掉** WRITEFUNCTION（不报错、只是没数据）；`curl_multi` 在该 hook 下
+>    **段错误**；关掉 hook 后 `curl_exec` 阻塞整个协程调度器（界面僵死）。
+>    三个达标方案里选子进程的理由：传输层零新代码、HTTPS 与中断白送、与 M2/M4 同构。
+> 2. **没有定义 `ChatProvider` 接口**（R1 提了，但当前只有一个实现）。
+>    OpenAI 与 DeepSeek 是同一协议、共用 `OpenAiCompatProvider`，接口此时是臆想抽象。
+>    等 R5 真要接 Claude（`content_block_delta` 事件名不同）时再抽，那时有两个实现，
+>    抽接口才有依据。
+> 3. **R4 的切换入口是键盘 + 标题/状态栏，不是下拉菜单**。AI 输入面板只有 1 行可用
+>    （布局 `length(3)` 减去边框），放不下独立状态行；改成 `Ctrl+P` 切 Provider、
+>    `Ctrl+N` 切模型，当前值显示在 AI 面板标题与状态栏。
+>    ⚠️ **不能用 `Ctrl+M` 切模型——它就是回车（0x0D）**。
+>
+> **踩到并修掉的两个真 bug**（都是 headless 测不出来的那类）：
+> - **全应用 CJK 输入失效**：五处输入判定都写 `strlen($char)===1`，而 UTF-8 的「你」
+>   是 3 字节 → 中文/全角全打不进去。已统一到 `Core\KeyInput::isPrintable()`。
+> - **AI 面板回车发不出去**：真实终端发的是 `CodedKeyEvent(Enter)` 而非
+>   `CharKeyEvent("\r")`，只在 `onChar` 挂 `"\r"` 的话 headless 全绿、pty 下按回车没反应
+>   （与 M2 终端面板同一个坑）。两条路径都补了测试。
+>
+> **验收**：`tests/ai_unit.php`（142 项：SSE 解析逐字节、Provider 配置、请求构造含
+> "key 不进 argv"、端到端流式、中断、401 判定、软换行无超宽行 ×3 视口、极小视口边界、
+> prompt 历史、Esc 中断）；`tests/pty_ai.php`（真实 pty：中文输入 → 流式 token 增量出现
+> → Ctrl+P 切 Provider → Ctrl+Q 干净退出）。全部 21 个测试无回归。
+
 ---
 
 ## M6 — 打磨
