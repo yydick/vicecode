@@ -29,6 +29,8 @@ return [
     'status.locale'    => 'lang',
     'status.branch'    => 'branch',
     'status.provider'  => 'AI',
+    'status.mode'      => 'Mode',
+    'status.mode_edit' => 'Edit',
     'status.quit'      => 'Ctrl+Q quit',
 
     // AI 输入框提示

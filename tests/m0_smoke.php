@@ -54,7 +54,10 @@ $renderer->render($renderer, $app->render($vp), $buffer, $buffer->area());
 $text = implode("\n", $buffer->toLines());
 
 echo "== 面板标题渲染 ==\n";
-foreach (['SIDEBAR', 'EDITOR', 'TERMINAL', 'AI CHAT', 'AI INPUT', 'ViceCode · focus'] as $needle) {
+// 状态栏只断言 'ViceCode'：M6 起状态栏改为按优先级裁剪，段的顺序与取舍会随
+// 视口宽度变化（焦点/标签在界面上已有高亮，窄屏时优先被丢），不能再断言
+// 'ViceCode · focus' 这种相邻片段。
+foreach (['SIDEBAR', 'EDITOR', 'TERMINAL', 'AI CHAT', 'AI INPUT', 'ViceCode'] as $needle) {
     check(str_contains($text, $needle), "渲染输出包含标题: $needle");
 }
 

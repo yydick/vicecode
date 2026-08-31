@@ -326,9 +326,11 @@ class App
             ->widgets($sidebar, $center, $ai);
 
         // ── StatusBar ──
+        // 传入可视宽度：状态栏要在放不下时**按优先级丢弃**低优先级段，
+        // 而不是让 php-tui 从尾部硬切（那样窄屏下文件名和瞬时消息会整个消失）。
         $status = BlockWidget::default()
             ->borders(Borders::NONE)
-            ->widget($this->statusBar->content());
+            ->widget($this->statusBar->content(max(0, ($a['status']->width ?? 0))));
 
         return GridWidget::default()
             ->direction(Direction::Vertical)
