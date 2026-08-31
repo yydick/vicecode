@@ -253,7 +253,7 @@ final class HelpPanel
         foreach ($slice as $i => $text) {
             $isGroupHeader = $this->isGroupHeaderLine($this->scroll + $i);
             $style = $isGroupHeader
-                ? Style::default()->fg(\PhpTui\Tui\Color\AnsiColor::Yellow)
+                ? $this->shell->theme->style('helpGroup')
                 : Style::default();
             $lines[] = Line::fromSpans(Span::styled(
                 DisplayWidth::mbCutDisp($text, $innerW),

@@ -140,7 +140,7 @@ final class EditorPanel
         // 高亮缓存（按 Buffer 修订号；整文件高亮一次，scrivo 需完整上下文）
         $lang = Highlighter::langFor((string) $buf->path);
         if ($buf->hlRev !== $buf->rev) {
-            $buf->hlLines = Highlighter::highlightLines($buf->lines, $lang);
+            $buf->hlLines = Highlighter::highlightLines($buf->lines, $lang, $this->shell->theme);
             $buf->hlRev = $buf->rev;
         }
         $hl = $buf->hlLines;
@@ -155,14 +155,14 @@ final class EditorPanel
             $lineNo = (string) ($li + 1);
             $gutter = DisplayWidth::mbPad($lineNo, $gutterW - 1) . ' ';
             $gutterStyle = $li === $buf->cursorRow
-                ? Style::default()->fg(AnsiColor::Yellow)
-                : Style::default()->fg(AnsiColor::DarkGray);
+                ? $this->shell->theme->style('editorLineNoActive')
+                : $this->shell->theme->style('editorLineNo');
 
             if ($li >= $total) {
                 // 缓冲区之后：暗色 ~ 占位
                 $lines[] = Line::fromSpans(
                     Span::styled($gutter, $gutterStyle),
-                    Span::styled('~', Style::default()->fg(AnsiColor::DarkGray)),
+                    Span::styled('~', $this->shell->theme->style('editorTilde')),
                 );
                 continue;
             }
@@ -255,7 +255,7 @@ final class EditorPanel
             }
             $st = ($b === $this->shell->buffer)
                 ? Style::default()->addModifier(Modifier::REVERSED)
-                : Style::default()->fg(AnsiColor::Gray);
+                : $this->shell->theme->style('editorTab');
             $spans[] = Span::styled($seg, $st);
             $this->tabRects[$cx] = [$cx, $cx + $w - 1, $path];
             $cx += $w;

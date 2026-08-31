@@ -18,7 +18,9 @@ use App\Ai\ChatModel;
 use App\Ai\ProviderRegistry;
 use App\App;
 use App\Core\KeyBindings;
+use App\Core\Theme;
 use App\Editor\Buffer;
+use App\Git\GitClient;
 use App\Text\DisplayWidth;
 use PhpTui\Term\Event\CharKeyEvent;
 use PhpTui\Term\Event\CodedKeyEvent;
@@ -248,7 +250,7 @@ foreach ([[120, 40], [80, 24], [40, 10], [20, 6], [10, 4]] as [$W, $H]) {
         $ok = false;
         $err = get_class($e) . ': ' . $e->getMessage();
     }
-    check($ok, "{$W}x{$H}：帮助页渲染不崩且无超宽行" . ($err !== null ? "（$err）" : ''));
+    check($ok, "{$W}x{$H}：帮助页渲染不崩且无超宽行" . ($err !== null ? "（{$err}）" : ""));
 }
 
 // 覆盖层必须让底层 UI 透出来（Composite 的意义所在）
@@ -293,6 +295,80 @@ check(str_contains($appE->message, '不存在'), 'App::openFile 失败时状态�
 
 @unlink($secret);
 @rmdir($dir);
+
+// ═══════════════ 5) R4 主题切换 ═══════════════
+echo "\n== R4 主题 ==\n";
+$ids = Theme::ids();
+check(count($ids) >= 2, '至少 2 套主题（实际 ' . count($ids) . '）：' . implode(',', $ids));
+
+// 两套主题的语义角色必须一一对应：漏一个就走 Gray 兜底，表现为"主题只换了一半"
+$keys0 = null;
+foreach ($ids as $id) {
+    $th = Theme::byId($id);
+    $k = array_keys($th->ui);
+    sort($k);
+    if ($keys0 === null) {
+        $keys0 = $k;
+    } elseif ($k !== $keys0) {
+        $failed = true;
+        echo "  [FAIL] 主题 {$id} 的语义角色与首套不一致。多出："
+            . implode(',', array_diff($k, $keys0)) . " 缺少：" . implode(',', array_diff($keys0, $k)) . "\n";
+    }
+}
+check(true, '各主题的语义角色集合完全一致（否则会出现"只换了一半"）');
+
+// Style 是可变对象：每次取样式必须是新实例，共享会污染全界面（M1 踩过）
+$th = Theme::default();
+$s1 = $th->style('err');
+$s2 = $th->style('err');
+check($s1 !== $s2, 'style() 每次返回新实例（Style 可变，共享实例改样式会污染全部持有者）');
+// Style 是可变对象，addModifier 会原地改；用 addModifiers 位掩码验证污染范围
+$s1->addModifier(\PhpTui\Tui\Style\Modifier::BOLD);
+check($s2->addModifiers === 0, '改一个实例的 modifier 不会影响另一次取到的实例（Style 可变，必须每次新建）');
+
+// git 状态色走主题
+$stagedDark = Theme::byId('dark')->gitStyle(GitClient::STATUS_STAGED);
+$stagedMid = Theme::byId('midnight')->gitStyle(GitClient::STATUS_STAGED);
+check($stagedDark->fg != $stagedMid->fg, 'git 状态色随主题变化');
+
+// 未知角色要有兜底而不是崩
+check(Theme::default()->color('__nope__') instanceof \PhpTui\Tui\Color\AnsiColor, '未知语义角色走兜底色，不抛异常');
+
+echo "\n== R4 切换后全界面配色真的变了 ==\n";
+$appT = new App();
+$before = implode("\n", renderLines($renderer, $appT, 120, 40));
+$appT->cycleTheme();
+check($appT->theme->id !== 'dark', 'Ctrl+T 之后主题不再是默认（实际 ' . $appT->theme->id . '）');
+$after = implode("\n", renderLines($renderer, $appT, 120, 40));
+check($before !== $after, '切换后渲染输出发生变化（全界面配色更新，不只是某个面板）');
+
+// 环形切回
+$appT->cycleTheme();
+check($appT->theme->id === 'dark', '再切一次回到默认主题（环形）');
+
+// 语法高亮缓存必须失效，否则代码区仍是旧配色
+$appT2 = new App();
+$phpFile = tempnam(sys_get_temp_dir(), 'vc6_');
+rename($phpFile, $phpFile . '.php');
+$phpFile .= '.php';
+file_put_contents($phpFile, "<?php\nfunction hello() { return 'x'; }\n");
+$appT2->openFile($phpFile);
+// 先渲染一次，让高亮缓存生成
+renderLines($renderer, $appT2, 120, 40);
+$hlBefore = $appT2->buffer?->hlLines;
+$appT2->cycleTheme();
+renderLines($renderer, $appT2, 120, 40);
+$hlAfter = $appT2->buffer?->hlLines;
+$same = ($hlBefore !== null && $hlAfter !== null && $hlBefore === $hlAfter);
+check(!$same, '换主题后语法高亮被重算（hlRev 失效生效，不会残留旧配色）');
+@unlink($phpFile);
+
+// 状态栏显示当前主题
+check(str_contains($appT2->statusBar->text(200), '主题='), '状态栏显示当前主题');
+
+// 帮助页里登记了 Ctrl+T（漂移检测会自动校验它与代码一致）
+$joined2 = implode("\n", (new App())->help->contentLines());
+check(str_contains($joined2, 'Ctrl+T'), '帮助页登记了 Ctrl+T');
 
 echo $failed ? "\nM6 单测 FAIL\n" : "\nM6 单测全部 PASS\n";
 exit($failed ? 1 : 0);

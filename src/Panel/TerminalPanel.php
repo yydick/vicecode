@@ -146,9 +146,9 @@ final class TerminalPanel
         foreach (array_slice($rows, $off, $outH) as $row) {
             $kind = $row['kind'] ?? ($row['err'] ? 'err' : 'out');
             $style = match ($kind) {
-                'err' => Style::default()->fg(AnsiColor::Red),
-                'killed' => Style::default()->fg(AnsiColor::Yellow),
-                'hint' => Style::default()->fg(AnsiColor::DarkGray),
+                'err' => $this->shell->theme->style('termErr'),
+                'killed' => $this->shell->theme->style('termKilled'),
+                'hint' => $this->shell->theme->style('termHint'),
                 default => Style::default(),
             };
             $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($row['text'], $this->hScroll, $W), $style));
@@ -187,8 +187,8 @@ final class TerminalPanel
         $running = $this->runner->isRunning();
         $prompt = $running ? '● ' : '$ ';
         $promptStyle = $running
-            ? Style::default()->fg(AnsiColor::Green)
-            : Style::default()->fg(AnsiColor::Cyan);
+            ? $this->shell->theme->style('termPromptIdle')
+            : $this->shell->theme->style('termPromptBusy');
         $textW = max(0, $W - DisplayWidth::dispWidth($prompt));
 
         $spans = [];

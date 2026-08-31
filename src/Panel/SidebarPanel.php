@@ -134,8 +134,8 @@ final class SidebarPanel
             $tabLine .= DisplayWidth::mbPadDisp($core, $seg);
         }
         if ($innerW > 0) {
-            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($tabLine, $innerW), Style::default()->fg(AnsiColor::Yellow)));
-            $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), Style::default()->fg(AnsiColor::Gray)));
+            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($tabLine, $innerW), $this->shell->theme->style('gitHead')));
+            $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), $this->shell->theme->style('muted')));
         }
 
         if ($this->tabIndex === 0) {
@@ -166,7 +166,7 @@ final class SidebarPanel
                     $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
                 }
             } elseif (empty($visible)) {
-                $lines[] = Line::fromSpans(Span::styled('(empty)', Style::default()->fg(AnsiColor::DarkGray)));
+                $lines[] = Line::fromSpans(Span::styled('(empty)', $this->shell->theme->style('dim')));
             }
         } elseif ($this->tabIndex === 1) {
             $this->gitContent($sidebar, $lines);
@@ -264,15 +264,15 @@ final class SidebarPanel
 
         $lines[] = Line::fromSpans(Span::styled(
             DisplayWidth::mbCutDisp('⎇ ' . $this->shell->t('git.branch_pick') . ' (Esc)', $innerW),
-            Style::default()->fg(AnsiColor::Cyan)));
-        $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), Style::default()->fg(AnsiColor::Gray)));
+            $this->shell->theme->style('gitBranch')));
+        $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), $this->shell->theme->style('muted')));
 
         $innerH = max(0, $sidebar->height - 2);
         $itemRows = max(0, $innerH - 2); // 标题 + 分隔
         if ($itemRows <= 0 || $git->branches === []) {
             $lines[] = Line::fromSpans(Span::styled(
                 DisplayWidth::mbCutDisp($this->shell->t('git.no_branch'), $innerW),
-                Style::default()->fg(AnsiColor::DarkGray)));
+                $this->shell->theme->style('dim')));
             return;
         }
 
@@ -285,7 +285,7 @@ final class SidebarPanel
             $text = $marker . $b;
             $style = $sel
                 ? Style::default()->addModifier(Modifier::REVERSED)
-                : ($cur ? Style::default()->fg(AnsiColor::Green) : Style::default());
+                : ($cur ? $this->shell->theme->style('ok') : Style::default());
             $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW), $style));
             $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
         }
@@ -307,7 +307,7 @@ final class SidebarPanel
         if (!$git->inRepo()) {
             $lines[] = Line::fromSpans(Span::styled(
                 DisplayWidth::mbCutDisp($this->shell->t('git.not_repo'), $innerW),
-                Style::default()->fg(AnsiColor::DarkGray)));
+                $this->shell->theme->style('dim')));
             return;
         }
 
@@ -326,13 +326,13 @@ final class SidebarPanel
             : '⎇ ' . $git->branch . ' ▾  ' . $viewTitle;
         $lines[] = Line::fromSpans(Span::styled(
             DisplayWidth::mbCutDisp($branchText, $innerW),
-            Style::default()->fg(AnsiColor::Cyan)));
-        $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), Style::default()->fg(AnsiColor::Gray)));
+            $this->shell->theme->style('gitBranch')));
+        $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), $this->shell->theme->style('muted')));
 
         // 行2：提交信息输入框（默认聚焦，键入即进 commitMsg；空时显占位）
         $msg = $git->commitMsg;
         $inputText = $msg === '' ? $this->shell->t('git.msg_placeholder') : $msg;
-        $inputStyle = $msg === '' ? Style::default()->fg(AnsiColor::DarkGray) : Style::default();
+        $inputStyle = $msg === '' ? $this->shell->theme->style('gitPlaceholder') : Style::default();
         $lines[] = Line::fromSpans(Span::styled(
             DisplayWidth::mbCutDisp('> ' . $inputText . '▏', $innerW), $inputStyle));
 
@@ -348,7 +348,7 @@ final class SidebarPanel
                 $text = ($i === 0 ? '● ' : '  ') . $label;
                 $lines[] = Line::fromSpans(Span::styled(
                     DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW),
-                    $i === 0 ? Style::default()->fg(AnsiColor::Green) : Style::default()));
+                    $i === 0 ? $this->shell->theme->style('gitSelMark') : Style::default()));
                 $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
                 $i++;
             }
@@ -360,12 +360,12 @@ final class SidebarPanel
             $title = $this->shell->t('git.changes', ['n' => count($git->status)]);
             $head = DisplayWidth::mbCutDisp($title, max(0, $innerW - 5))
                 . '  ' . str_repeat(' ', max(0, $innerW - mb_strwidth($title) - 5)) . '+ -';
-            $lines[] = Line::fromSpans(Span::styled($head, Style::default()->fg(AnsiColor::Yellow)));
+            $lines[] = Line::fromSpans(Span::styled($head, $this->shell->theme->style('gitHead')));
         } else {
             $title = $this->shell->t('git.log_title', ['n' => count($git->log)]);
             $head = DisplayWidth::mbCutDisp($title, max(0, $innerW - 4))
                 . '  ' . str_repeat(' ', max(0, $innerW - mb_strwidth($title) - 4)) . '⟳';
-            $lines[] = Line::fromSpans(Span::styled($head, Style::default()->fg(AnsiColor::Yellow)));
+            $lines[] = Line::fromSpans(Span::styled($head, $this->shell->theme->style('gitHead')));
         }
 
         // 行5+：变更/日志列表
@@ -380,7 +380,7 @@ final class SidebarPanel
             if ($items === []) {
                 $lines[] = Line::fromSpans(Span::styled(
                     DisplayWidth::mbCutDisp($this->shell->t('git.clean'), $innerW),
-                    Style::default()->fg(AnsiColor::Green)));
+                    $this->shell->theme->style('ok')));
                 return;
             }
             $this->clampGitOffset(count($items), $itemRows);
@@ -401,7 +401,7 @@ final class SidebarPanel
             if ($items === []) {
                 $lines[] = Line::fromSpans(Span::styled(
                     DisplayWidth::mbCutDisp($this->shell->t('git.no_log'), $innerW),
-                    Style::default()->fg(AnsiColor::DarkGray)));
+                    $this->shell->theme->style('dim')));
                 return;
             }
             $this->clampGitOffset(count($items), $itemRows);
@@ -411,7 +411,7 @@ final class SidebarPanel
                 $text = $c->hash . ' ' . $c->subject;
                 $style = $sel
                     ? Style::default()->addModifier(Modifier::REVERSED)
-                    : Style::default()->fg(AnsiColor::Gray);
+                    : $this->shell->theme->style('muted');
                 $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW), $style));
                 $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
             }
@@ -435,14 +435,14 @@ final class SidebarPanel
         // 行0：查询输入框（默认聚焦，键入即进 query；空时显占位）
         $q = $s->query;
         $inputText = $q === '' ? $this->shell->t('search.placeholder') : $q;
-        $inputStyle = $q === '' ? Style::default()->fg(AnsiColor::DarkGray) : Style::default();
+        $inputStyle = $q === '' ? $this->shell->theme->style('searchPlaceholder') : Style::default();
         $lines[] = Line::fromSpans(Span::styled(
             DisplayWidth::mbCutDisp('> ' . $inputText . '▏', $innerW), $inputStyle));
 
         // 行1：状态行（搜索中 / N 个匹配 / 无结果 / 出错）
         $lines[] = Line::fromSpans(Span::styled(
             DisplayWidth::mbCutDisp($this->searchStatusText(), $innerW),
-            Style::default()->fg($s->running ? AnsiColor::Cyan : AnsiColor::Gray)));
+            $this->shell->theme->style($s->running ? 'searchStateRunning' : 'searchStateIdle')));
 
         // 行2+：结果列表
         $innerH = max(0, $sidebar->height - 2);
@@ -463,7 +463,7 @@ final class SidebarPanel
                 $text = $mark . $row->path . ' (' . ($row->group?->count() ?? 0) . ')';
                 $style = $sel
                     ? Style::default()->addModifier(Modifier::REVERSED)
-                    : Style::default()->fg(AnsiColor::Yellow);
+                    : $this->shell->theme->style('searchGroup');
             } else {
                 $text = '  ' . ($row->hit?->line ?? 0) . ': ' . ltrim($row->hit?->text ?? '');
                 $style = $sel
@@ -604,14 +604,14 @@ final class SidebarPanel
     private function gitColor(string $cat): AnsiColor
     {
         return match ($cat) {
-            GitClient::STATUS_STAGED => AnsiColor::Green,
-            GitClient::STATUS_MODIFIED => AnsiColor::Yellow,
-            GitClient::STATUS_UNTRACKED => AnsiColor::Red,
-            GitClient::STATUS_RENAMED => AnsiColor::Magenta,
-            GitClient::STATUS_DELETED => AnsiColor::Red,
-            GitClient::STATUS_CONFLICT => AnsiColor::LightRed,
-            GitClient::STATUS_IGNORED => AnsiColor::DarkGray,
-            default => AnsiColor::Gray,
+            GitClient::STATUS_STAGED => $this->shell->theme->color('gitStaged'),
+            GitClient::STATUS_MODIFIED => $this->shell->theme->color('gitModified'),
+            GitClient::STATUS_UNTRACKED => $this->shell->theme->color('gitUntracked'),
+            GitClient::STATUS_RENAMED => $this->shell->theme->color('gitRenamed'),
+            GitClient::STATUS_DELETED => $this->shell->theme->color('gitDeleted'),
+            GitClient::STATUS_CONFLICT => $this->shell->theme->color('gitConflict'),
+            GitClient::STATUS_IGNORED => $this->shell->theme->color('gitIgnored'),
+            default => $this->shell->theme->color('gitDefault'),
         };
     }
 

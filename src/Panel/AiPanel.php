@@ -13,8 +13,8 @@ use PhpTui\Term\KeyCode;
 use PhpTui\Term\KeyModifiers;
 use PhpTui\Term\MouseEventKind;
 use PhpTui\Tui\Extension\Core\Widget\ParagraphWidget;
-use PhpTui\Tui\Style\Style;
 use PhpTui\Tui\Text\Line;
+use PhpTui\Tui\Style\Style;
 use PhpTui\Tui\Text\Span;
 use PhpTui\Tui\Widget\Widget;
 
@@ -157,7 +157,7 @@ final class AiPanel
             foreach ($this->helpLines() as $t) {
                 $lines[] = Line::fromSpans(Span::styled(
                     DisplayWidth::mbSubDisp($t, $this->hScroll, $W),
-                    Style::default()->fg(\PhpTui\Tui\Color\AnsiColor::DarkGray),
+                    $this->shell->theme->style('aiDim'),
                 ));
             }
             return $lines;
@@ -167,7 +167,7 @@ final class AiPanel
             $isUser = $m['role'] === 'user';
             $prefix = $isUser ? 'You: ' : 'AI: ';
             $style = $isUser
-                ? Style::default()->fg(\PhpTui\Tui\Color\AnsiColor::Cyan)
+                ? $this->shell->theme->style('aiUser')
                 : Style::default();
 
             $body = $m['content'];
@@ -194,7 +194,7 @@ final class AiPanel
             foreach (DisplayWidth::mbWrapDisp('! ' . $chat->error(), max(1, $W)) as $wl) {
                 $lines[] = Line::fromSpans(Span::styled(
                     DisplayWidth::mbSubDisp($wl, $this->hScroll, $W),
-                    Style::default()->fg(\PhpTui\Tui\Color\AnsiColor::Red),
+                    $this->shell->theme->style('aiErr'),
                 ));
             }
         }

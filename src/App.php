@@ -8,6 +8,7 @@ use App\Core\KeyBindings;
 use App\Core\KeyInput;
 use App\Core\Lifecycle;
 use App\Core\LayoutFactory;
+use App\Core\Theme;
 use App\Editor\Buffer;
 use App\Ai\ChatModel;
 use App\Git\GitModel;
@@ -108,6 +109,9 @@ class App
     /** SEARCH 面板状态（M4 R1–R3）：输入框 / 异步 grep / 结果列表，供 Sidebar 的 SEARCH tab 读取 */
     public SearchModel $search;
 
+    /** 当前配色主题（M6 R4）。面板一律通过 $this->theme->style('role') 取色，不硬编码颜色。 */
+    public Theme $theme;
+
     /** 帮助页覆盖层（M6 R2）：全屏居中，打开期间独占键盘 */
     public HelpPanel $help;
 
@@ -136,6 +140,7 @@ class App
         $this->search = new SearchModel($this);
         $this->chat = new ChatModel($this);
         $this->help = new HelpPanel($this);
+        $this->theme = Theme::default();
         // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function () {
             $this->chat->shutdown();
@@ -249,7 +254,7 @@ class App
 
     private function borderStyle(bool $focused): Style
     {
-        return Style::default()->fg($focused ? AnsiColor::LightGreen : AnsiColor::Gray);
+        return $this->theme->style($focused ? 'borderFocus' : 'border');
     }
 
     public function render(Area $vp): Widget
@@ -393,6 +398,27 @@ class App
     }
 
     // ── 事件分发 ──
+    // ── 主题（M6 R4）─────────────────────────────────
+
+    /**
+     * 环形切换到下一个主题。
+     *
+     * ⚠️ 必须让语法高亮缓存失效：hlLines 里存的是**已带 Style 的实例**，
+     * 不重置的话换主题后代码区域仍是旧配色（看起来像"主题只换了一半"）。
+     * 缓存键是 Buffer::$hlRev，把它推到与 rev 不同即可触发下一帧重算。
+     */
+    public function cycleTheme(): void
+    {
+        $ids = Theme::ids();
+        $cur = array_search($this->theme->id, $ids, true);
+        $next = $ids[(($cur === false ? 0 : $cur) + 1) % count($ids)];
+        $this->theme = Theme::byId($next);
+        foreach ($this->editor->buffers() as $buf) {
+            $buf->hlRev = -1; // 强制下一帧重算高亮
+        }
+        $this->setMessage($this->t('status.theme') . '=' . $this->theme->label);
+    }
+
     public function handle($event, Area $vp): void
     {
         // 未保存确认进行中：拦截所有输入，只响应 y/n/Esc（及 Ctrl+Q 视为确认）
@@ -452,6 +478,12 @@ class App
             // 故无需另兜底原始字节——若写上 `\x11` 分支反而是死代码（它排在 CONTROL 判定之后）。
             if (($event->modifiers & KeyModifiers::CONTROL) && strtolower($event->char) === 'q') {
                 $this->lifecycle->requestQuit();
+                return;
+            }
+            // Ctrl+T 切主题（M6 R4）。必须在面板拿到字符之前处理，
+            // 否则在编辑器/输入框里按它会把字符打进去。
+            if (($event->modifiers & KeyModifiers::CONTROL) && strtolower($event->char) === 't') {
+                $this->cycleTheme();
                 return;
             }
             // AI 输入/消息流：键入进输入框；Ctrl+P 切 Provider、Ctrl+N 切模型、

@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace App\Editor;
 
+use App\Core\Theme;
+
 use Highlight\Highlighter as Scivo;
 use PhpTui\Tui\Color\AnsiColor;
 use PhpTui\Tui\Style\Modifier;
@@ -54,11 +56,12 @@ final class Highlighter
      * @param string[] $lines
      * @return array<int,?array<int,array{0:string,1:Style}>>|null
      */
-    public static function highlightLines(array $lines, ?string $lang): ?array
+    public static function highlightLines(array $lines, ?string $lang, ?Theme $theme = null): ?array
     {
         if ($lang === null) {
             return null;
         }
+        $theme ??= Theme::default(); // 直接调用方（如单测）可以省略，默认用深色
         $code = implode("\n", $lines);
         try {
             $html = (self::engine())->highlight($lang, $code)->value;
@@ -66,7 +69,7 @@ final class Highlighter
             return null;
         }
         $flat = self::parseHtml($html);   // 扁平 [text, class|null]
-        return self::splitByLines($flat);
+        return self::splitByLines($flat, $theme);
     }
 
     private static function engine(): Scivo
@@ -131,12 +134,12 @@ final class Highlighter
      * @param array<int,array{0:string,1:?string}> $flat
      * @return array<int,array<int,array{0:string,1:Style}>>
      */
-    private static function splitByLines(array $flat): array
+    private static function splitByLines(array $flat, Theme $theme): array
     {
         $lines = [[]];
         $cur = 0;
         foreach ($flat as [$text, $class]) {
-            $style = self::styleFor($class);
+            $style = self::styleFor($class, $theme);
             $parts = explode("\n", $text);
             foreach ($parts as $j => $seg) {
                 if ($j > 0) {
@@ -151,44 +154,19 @@ final class Highlighter
         return $lines;
     }
 
-    /** hljs class → 颜色（默认白）；命中关键词加粗。 */
-    private static function styleFor(?string $class): Style
+    /**
+     * hljs class → Style（默认白；命中关键词加粗）。
+     *
+     * 颜色已从本类移到 `Core\Theme` 的 syntax 表：语法高亮配色是主题的一部分，
+     * 换主题时代码着色也要跟着变，否则面板换色了、代码还是原色，很割裂。
+     *
+     * @param Theme $theme 当前主题（由调用方从 App 传入，这里不持有 App 避免耦合）
+     */
+    private static function styleFor(?string $class, Theme $theme): Style
     {
-        static $map = [
-            'comment' => [AnsiColor::DarkGray, false],
-            'meta' => [AnsiColor::Gray, false],
-            'keyword' => [AnsiColor::Yellow, true],
-            'built_in' => [AnsiColor::LightBlue, false],
-            'type' => [AnsiColor::LightBlue, false],
-            'class' => [AnsiColor::LightBlue, false],
-            'title' => [AnsiColor::LightBlue, false],
-            'title.function_' => [AnsiColor::LightBlue, false],
-            'function' => [AnsiColor::LightBlue, false],
-            'params' => [AnsiColor::Magenta, false],
-            'variable' => [AnsiColor::Magenta, false],
-            'attribute' => [AnsiColor::Magenta, false],
-            'property' => [AnsiColor::Magenta, false],
-            'symbol' => [AnsiColor::Magenta, false],
-            'string' => [AnsiColor::Green, false],
-            'attr' => [AnsiColor::Green, false],
-            'meta-string' => [AnsiColor::Green, false],
-            'number' => [AnsiColor::Cyan, false],
-            'literal' => [AnsiColor::Magenta, false],
-            'tag' => [AnsiColor::Red, false],
-            'name' => [AnsiColor::Red, false],
-            'link' => [AnsiColor::Cyan, false],
-            'emphasis' => [AnsiColor::Yellow, true],
-            'strong' => [AnsiColor::Yellow, true],
-            'section' => [AnsiColor::Blue, true],
-        ];
-        if ($class === null || !isset($map[$class])) {
+        if ($class === null) {
             return Style::default()->fg(AnsiColor::White);
         }
-        [$color, $bold] = $map[$class];
-        $s = Style::default()->fg($color);
-        if ($bold) {
-            $s = $s->addModifier(Modifier::BOLD);
-        }
-        return $s;
+        return $theme->syntaxStyle($class);
     }
 }
