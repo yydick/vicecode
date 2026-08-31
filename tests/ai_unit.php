@@ -459,7 +459,8 @@ $chat4->useProvider('nokey');
 $chat4->send('hi');
 check(!$chat4->isStreaming(), '缺 key 时不起请求');
 check($chat4->error() !== null && str_contains($chat4->error(), 'DEFINITELY_UNSET_KEY_XYZ'), '缺 key 提示指明该设哪个环境变量（实际：' . var_export($chat4->error(), true) . '）');
-check(count($chat4->messages()) === 0, '缺 key 时用户消息不入历史（否则重试会带着失败记录）');
+check(count($chat4->messages()) === 1, '缺 key 时用户消息仍入历史（用户要能看到自己打了什么）');
+check(($chat4->messages()[0]['role'] ?? null) === 'user', '缺 key 时入列的只有 user，不会留下空的 assistant');
 
 // ── 一个 provider 都没配 ──
 $app5 = new App();
@@ -467,5 +468,219 @@ $chat5 = new ChatModel($app5, new ProviderRegistry([]));
 $chat5->send('hi');
 check($chat5->error() !== null, '空配置：给出"未配置 Provider"提示而不是崩溃');
 check($chat5->spec() === null, '空配置：spec() 为 null');
+
+// ─────────────── 5) 渲染与交互（面板层）───────────────
+echo "\n== AI 面板渲染与交互 ==\n";
+
+use PhpTui\Tui\Display\Area as TuiArea;
+use PhpTui\Tui\Display\Buffer as TuiBuffer;
+use PhpTui\Tui\Extension\Core\CoreExtension;
+use PhpTui\Tui\Widget\WidgetRenderer\AggregateWidgetRenderer;
+use PhpTui\Term\Event\CharKeyEvent;
+use PhpTui\Term\Event\CodedKeyEvent;
+use PhpTui\Term\KeyCode;
+use PhpTui\Term\KeyModifiers;
+use PhpTui\Term\Event\MouseEvent;
+use PhpTui\Term\MouseEventKind;
+use PhpTui\Term\MouseButton;
+
+$ext = new CoreExtension();
+$renderers = [];
+foreach ($ext->widgetRenderers() as $r) {
+    $renderers[] = $r;
+}
+$renderer = new AggregateWidgetRenderer($renderers);
+
+/** 轮询直到流式结束（请求完成或失败） */
+function drainChat(ChatModel $c, float $timeout = 15.0): void
+{
+    $dl = microtime(true) + $timeout;
+    while ($c->isStreaming() && microtime(true) < $dl) {
+        $c->poll();
+        usleep(20000);
+    }
+}
+
+/** 渲染一帧并返回纯文本（已剥掉 ANSI 之前的内容全行） */
+function renderText(AggregateWidgetRenderer $renderer, App $app, int $w, int $h): string
+{
+    $vp = TuiArea::fromDimensions($w, $h);
+    $buf = TuiBuffer::empty($vp);
+    $renderer->render($renderer, $app->render($vp), $buf, $buf->area());
+    return implode("\n", $buf->toLines());
+}
+
+/** 取 ai_stream 面板的内宽（减去左右边框） */
+function aiInnerWidth(App $app, int $w, int $h): int
+{
+    $a = $app->areas(TuiArea::fromDimensions($w, $h));
+    return max(0, ($a['ai_stream']->width ?? 0) - 2);
+}
+
+// 长回复 + 多轮：主要用来验「软换行后没有超宽行」——超宽 1 列就会触发
+// php-tui 的 LineTruncator **折行**，把后续整片行挤下去（M1 幽灵行的根因）。
+$longReply = str_repeat('这是一个很长的回复内容用于验证软换行是否生效', 6);
+$rc = new ChatModel($app = new App(), mockRegistry(18999)); // 端口不通，只做渲染，不发请求
+$rc->useProvider('mock');
+// 直接注入历史，不走网络
+$ref = new ReflectionClass($rc);
+$prop = $ref->getProperty('messages');
+$prop->setAccessible(true);
+$prop->setValue($rc, [
+    ['role' => 'user', 'content' => '问题一'],
+    ['role' => 'assistant', 'content' => $longReply],
+    ['role' => 'user', 'content' => '问题二'],
+    ['role' => 'assistant', 'content' => '短回复'],
+]);
+$app->chat = $rc;
+
+foreach ([[120, 40], [100, 30], [80, 24]] as [$W, $H]) {
+    $txt = renderText($renderer, $app, $W, $H);
+    $innerW = aiInnerWidth($app, $W, $H);
+    $maxLine = 0;
+    foreach (explode("\n", $txt) as $l) {
+        $maxLine = max($maxLine, mb_strwidth($l));
+    }
+    check($maxLine <= $W, "{$W}x{$H}：没有一屏行超过视口宽（最宽 {$maxLine} <= {$W}）—— 超宽会触发折行幽灵行");
+    check(str_contains($txt, '问题一'), "{$W}x{$H}：渲染出用户消息");
+    check(str_contains($txt, '短回复'), "{$W}x{$H}：渲染出助手回复");
+}
+
+// 逐行检查 ai_stream 区域：软换行后的每一行宽度必须 <= 内宽
+// （整屏检查会包含状态栏等其它面板，这里精确锁 AI 面板）
+{
+    $W = 80;
+    $H = 24;
+    $vp = TuiArea::fromDimensions($W, $H);
+    $a = $app->areas($vp);
+    $stream = $a['ai_stream'];
+    $buf = TuiBuffer::empty($vp);
+    $renderer->render($renderer, $app->render($vp), $buf, $buf->area());
+    $all = $buf->toLines();
+    $innerW = max(0, $stream->width - 2);
+    $bad = [];
+    for ($y = $stream->position->y + 1; $y < $stream->position->y + $stream->height - 1; $y++) {
+        $line = $all[$y] ?? '';
+        if (mb_strwidth($line) > $W) {
+            $bad[] = $y . ':' . mb_strwidth($line);
+        }
+    }
+    check($bad === [], 'AI 消息流区域内无超宽行（越界行：' . (implode(',', $bad) ?: '无') . '）');
+}
+
+// 状态栏显示当前 Provider/模型
+$txt = renderText($renderer, $app, 120, 40);
+check(str_contains($txt, 'Mock/mock-1'), '状态栏显示当前 Provider/模型（实际含 Mock/mock-1）');
+
+// ── 交互：Ctrl+P 切 Provider、Ctrl+N 切模型 ──
+$app2 = new App();
+$app2->chat = new ChatModel($app2, mockRegistry(18998));
+$app2->focusIndex = array_search('ai_input', App::PANELS, true);
+check($app2->focusPanel() === 'ai_input', '焦点可切到 ai_input');
+
+$p0 = $app2->chat->spec()?->id;
+$app2->handle(CharKeyEvent::new('p', KeyModifiers::CONTROL), TuiArea::fromDimensions(120, 40));
+check($app2->chat->spec()?->id !== $p0, 'Ctrl+P 切到另一个 Provider');
+$p1 = $app2->chat->spec()?->id;
+$app2->handle(CharKeyEvent::new('p', KeyModifiers::CONTROL), TuiArea::fromDimensions(120, 40));
+check($app2->chat->spec()?->id === $p0, '再按 Ctrl+P 环形切回（只有两个 Provider）');
+
+$app2->chat->useProvider('mock');
+$m0 = $app2->chat->spec()?->model;
+$app2->handle(CharKeyEvent::new('n', KeyModifiers::CONTROL), TuiArea::fromDimensions(120, 40));
+check($app2->chat->spec()?->model !== $m0, 'Ctrl+N 切到另一个模型（Ctrl+M 不能用，它是回车 0x0D）');
+
+// ── 交互：输入 → 回车发送 → 输入框清空 ──
+$vp2 = TuiArea::fromDimensions(120, 40);
+$app3 = new App();
+$app3->chat = new ChatModel($app3, mockRegistry(18997));
+$app3->focusIndex = array_search('ai_input', App::PANELS, true);
+foreach (mb_str_split('你好') as $ch) {
+    $app3->handle(CharKeyEvent::new($ch, 0), $vp2);
+}
+check($app3->ai->input() === '你好', '中文逐字输入进输入框');
+$app3->handle(CharKeyEvent::new("\r", 0), $vp2);
+check($app3->ai->input() === '', '回车后输入框清空');
+// 18997 没有服务端，curl 会立刻失败；必须轮询到结束，否则空的 assistant 占位还在
+drainChat($app3->chat);
+check(count($app3->chat->messages()) === 1, '回车后用户消息入列（请求失败后空的 assistant 占位被移除）');
+check(($app3->chat->messages()[0]['content'] ?? '') === '你好', '中文内容完整入列');
+
+// ── ↑/↓ prompt 历史 ──
+foreach (mb_str_split('第二条') as $ch) {
+    $app3->handle(CharKeyEvent::new($ch, 0), $vp2);
+}
+$app3->handle(CharKeyEvent::new("\r", 0), $vp2);
+check($app3->ai->history() === ['你好', '第二条'], '历史按发送顺序记录');
+$app3->handle(CodedKeyEvent::new(KeyCode::Up), $vp2);
+check($app3->ai->input() === '第二条', '↑ 取回最近一条 prompt');
+$app3->handle(CodedKeyEvent::new(KeyCode::Up), $vp2);
+check($app3->ai->input() === '你好', '再 ↑ 取回更早一条');
+$app3->handle(CodedKeyEvent::new(KeyCode::Up), $vp2);
+check($app3->ai->input() === '你好', '已在最旧一条时继续 ↑ 不越界');
+$app3->handle(CodedKeyEvent::new(KeyCode::Down), $vp2);
+check($app3->ai->input() === '第二条', '↓ 往回走');
+$app3->handle(CodedKeyEvent::new(KeyCode::Down), $vp2);
+check($app3->ai->input() === '', '↓ 到底部回到空输入（草稿为空）');
+
+// ── Ctrl+L 清空对话 ──
+$app3->handle(CharKeyEvent::new('l', KeyModifiers::CONTROL), $vp2);
+check($app3->chat->messages() === [], 'Ctrl+L 清空对话历史');
+
+// ── 滚轮滚动 ──
+$app4 = new App();
+$app4->chat = new ChatModel($app4, mockRegistry(18996));
+$rc4p = new ReflectionClass($app4->chat);
+$mp = $rc4p->getProperty('messages');
+$mp->setAccessible(true);
+$mp->setValue($app4->chat, [
+    ['role' => 'user', 'content' => 'Q'],
+    ['role' => 'assistant', 'content' => implode("\n", array_map(static fn($i) => "第{$i}行内容", range(1, 60)))],
+]);
+$app4->focusIndex = array_search('ai_stream', App::PANELS, true);
+$vp4 = TuiArea::fromDimensions(120, 40);
+renderText($renderer, $app4, 120, 40);
+check($app4->ai->isFollowing(), '初始状态贴底（follow=true）');
+$app4->handle(MouseEvent::new(MouseEventKind::ScrollUp, MouseButton::Left, 50, 5, 0), $vp4);
+check(!$app4->ai->isFollowing(), '往上滚 → 脱离跟随（否则新 token 会把用户拽回底部）');
+$app4->handle(MouseEvent::new(MouseEventKind::ScrollDown, MouseButton::Left, 50, 5, 0), $vp4);
+check($app4->ai->isFollowing() || $app4->ai->scroll() > 0, '往下滚 → 朝底部移动');
+
+// ── Esc 经 App 分发中断生成（不直接调 cancel，走真实按键路径）──
+echo "\n== Esc 中断（走 App 按键分发）==\n";
+$port5 = 18915;
+$srv5 = mockServer($port5);
+$app5 = new App();
+$app5->chat = new ChatModel($app5, mockRegistry($port5));
+$app5->chat->useProvider('mock');
+$vp5 = TuiArea::fromDimensions(120, 40);
+$app5->focusIndex = array_search('ai_input', App::PANELS, true);
+
+foreach (mb_str_split('开始') as $ch) {
+    $app5->handle(CharKeyEvent::new($ch, 0), $vp5);
+}
+$app5->handle(CharKeyEvent::new("\r", 0), $vp5);
+check($app5->chat->isStreaming(), '发送后进入生成中');
+
+// 收到一点内容再按 Esc
+$dl = microtime(true) + 15;
+while ($app5->chat->isStreaming() && microtime(true) < $dl) {
+    $app5->pollAi();
+    if (mb_strlen($app5->chat->messages()[1]['content'] ?? '') >= 5) {
+        break;
+    }
+    usleep(20000);
+}
+$app5->handle(CodedKeyEvent::new(KeyCode::Esc), $vp5);
+check(!$app5->chat->isStreaming(), 'Esc 中断生成（AI 焦点）');
+check($app5->quit === false || $app5->confirm === null, 'Esc 中断时**不会**顺带触发退出确认');
+check(mb_strlen($app5->chat->messages()[1]['content'] ?? '') > 0, '中断后已生成内容保留');
+stopServer($srv5);
+
+// 不生成时 Esc 应走全局退出（不能被 AI 面板吞掉）
+$app6 = new App();
+$app6->focusIndex = array_search('ai_input', App::PANELS, true);
+$app6->handle(CodedKeyEvent::new(KeyCode::Esc), TuiArea::fromDimensions(120, 40));
+check($app6->confirm !== null || $app6->quit === true, '未在生成时按 Esc → 走全局退出流程（不被 AI 面板吞掉）');
 
 exit($failed ? 1 : 0);

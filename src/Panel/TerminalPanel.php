@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Panel;
 
+use App\Core\KeyInput;
 use App\App;
 use App\Terminal\CommandRunner;
 use App\Terminal\TerminalBuffer;
@@ -221,7 +222,7 @@ final class TerminalPanel
             $this->deleteBackward();
             return true;
         }
-        if (strlen($e->char) === 1 && ord($e->char) >= 32 && !$ctrl) {
+        if (KeyInput::isPrintable($e->char) && !$ctrl) {
             $this->input = mb_substr($this->input, 0, $this->pos) . $e->char
                 . mb_substr($this->input, $this->pos);
             $this->pos++;

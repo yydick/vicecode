@@ -41,11 +41,20 @@ final class StatusBarPanel
         $file = $buf !== null ? basename((string) $buf->path) : '—';
         $dirty = $buf !== null && $buf->dirty ? ' ' . $this->shell->t('status.dirty') : '';
 
+        // M5：状态栏补上当前 Provider/模型（M6 R1 的四项信息之一）。
+        // 生成中也在这里体现——AI 面板标题只带一个省略号，容易被忽略。
+        $spec = $this->shell->chat->spec();
+        $ai = $spec === null
+            ? '—'
+            : $spec->label . '/' . $spec->model
+                . ($this->shell->chat->isStreaming() ? ' …' : '');
+
         return ' ' . $this->shell->t('app.title')
             . ' · ' . $this->shell->t('status.focus') . '=' . strtoupper($this->shell->focusPanel())
             . ' · ' . $this->shell->t('status.tab') . '=' . $this->shell->sidebar->tabLabel()
             . ' · ' . $this->shell->t('status.branch') . '=' . $this->shell->git->branch
             . ' · ' . $this->shell->t('status.file') . '=' . $file . $dirty
+            . ' · ' . $this->shell->t('status.provider') . '=' . $ai
             . ' · ' . $this->shell->t('status.locale') . '=' . $this->shell->locale()
             . ' · ' . $this->shell->message
             . ' · ' . $this->shell->t('status.quit');

@@ -28,6 +28,7 @@ return [
     'status.readonly'  => 'RO',
     'status.locale'    => 'lang',
     'status.branch'    => 'branch',
+    'status.provider'  => 'AI',
     'status.quit'      => 'Ctrl+Q quit',
 
     // AI 输入框提示

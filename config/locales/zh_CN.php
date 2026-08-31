@@ -24,6 +24,7 @@ return [
     'status.readonly'  => '只读',
     'status.locale'    => '语言',
     'status.branch'    => '分支',
+    'status.provider'  => 'AI',
     'status.quit'      => 'Ctrl+Q 退出',
 
     'ai.input_hint'    => '（回车发送）',

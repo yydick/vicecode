@@ -164,6 +164,11 @@ final class ChatModel
             return;
         }
 
+        // 用户消息**先入列再校验**：打错字或没配 key 时，用户也该看到自己刚才打了什么
+        // （否则输入框一清空，内容就像凭空消失了）。只有"生成中"这种没真发出去的情况才不入列。
+        $this->error = null;
+        $this->messages[] = ['role' => 'user', 'content' => $text];
+
         $spec = $this->spec();
         if ($spec === null) {
             $this->error = $this->shell->t('ai.no_provider');
@@ -179,7 +184,6 @@ final class ChatModel
         $this->error = null;
         $this->stderr = '';
         $this->parser = new SseParser();
-        $this->messages[] = ['role' => 'user', 'content' => $text];
         $this->messages[] = ['role' => 'assistant', 'content' => ''];
 
         // 历史 + 本次（本次已入列），整段发出去就是多轮上下文

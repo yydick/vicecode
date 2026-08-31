@@ -128,6 +128,48 @@ final class DisplayWidth
     }
 
     /**
+     * 按显示列宽软换行（AI 消息流、帮助页等长文本用）。
+     *
+     * ⚠️ 为什么必须自己换行：php-tui 的 `ParagraphWidget` 默认 `Wrap::None`，走
+     * `LineTruncator` —— 它名虽为 Truncator，**超宽时是折行不是截断**，一行超宽 1 列
+     * 就会把后续所有行整体挤下去（M1 的「幽灵行」bug，用户报的是「第 N 行出现别处的
+     * 字符串」）。所以任何可能超宽的文本，都必须在应用层先切成宽度合规的若干行。
+     *
+     * 先按显式 `\n` 分段，再对每段按显示列宽贪心切分；宽字符不会被劈开
+     * （放不下就整体挪到下一行，否则行宽会超出 1 列，又触发上面的折行）。
+     * 空段保留为一个空行，否则连续换行会被吃掉。
+     *
+     * @return string[] 每行 dispWidth() 都 <= $width（$width<=0 时返回 ['']）
+     */
+    public static function mbWrapDisp(string $s, int $width): array
+    {
+        if ($width <= 0) {
+            return [''];
+        }
+        $out = [];
+        foreach (explode("\n", $s) as $para) {
+            if ($para === '') {
+                $out[] = '';
+                continue;
+            }
+            $line = '';
+            $w = 0;
+            foreach (mb_str_split($para) as $g) {
+                $cw = self::dispWidth($g);
+                if ($line !== '' && $w + $cw > $width) {
+                    $out[] = $line;
+                    $line = '';
+                    $w = 0;
+                }
+                $line .= $g;
+                $w += $cw;
+            }
+            $out[] = $line;
+        }
+        return $out;
+    }
+
+    /**
      * 显示列宽 → 字符索引（反向切片，供鼠标点击定位）。
      * 给定绝对显示列 $dispCol，返回落在该显示列上的字素（grapheme）起始字符索引；
      * 落在某宽字素中间时，光标停在该字素起点（不劈开 CJK）。

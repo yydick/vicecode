@@ -165,14 +165,17 @@ function start(bool $sw): void
         // M2：每轮都调 pollTerminal() 排空命令管道——子进程的输出随时会到，不能只在
         // 有键事件时才读。命令运行中把 pop 超时压到 10ms，让输出跟手。
         while (!$app->quit) {
-            $busy = $app->termRunning() || $app->searchRunning();
+            $busy = $app->termRunning() || $app->searchRunning() || $app->aiStreaming();
             $ev = $ch->pop($busy ? 0.01 : 0.05);
             $gotOutput = $app->pollTerminal();
             $gotSearch = $app->pollSearch();
+            // M5：AI 流式 token 同样每轮排空。返回 true 表示有新 token，必须重绘，
+            // 否则界面会卡住不动、直到回复结束时一次性出现。
+            $gotAi = $app->pollAi();
             if ($ev === false) {
                 // 非阻塞查 R3 后台重绘信号：绝不能用 pop(0)（0 超时在 Swoole 中是永久阻塞！），
                 // 先 isEmpty() 判空再 pop 一个极小超时。
-                if ($gotOutput || $gotSearch || !$redraw->isEmpty()) {
+                if ($gotOutput || $gotSearch || $gotAi || !$redraw->isEmpty()) {
                     if (!$redraw->isEmpty()) {
                         $redraw->pop(0.001);
                     }
@@ -192,13 +195,15 @@ function start(bool $sw): void
     $display->draw($app->render($display->viewportArea()));
     while (!$app->quit) {
         $handled = false;
-        foreach ($events->drainTimeout(($app->termRunning() || $app->searchRunning()) ? 10000 : 50000) as $event) {
+        $busy = $app->termRunning() || $app->searchRunning() || $app->aiStreaming();
+        foreach ($events->drainTimeout($busy ? 10000 : 50000) as $event) {
             $app->handle($event, $display->viewportArea());
             $handled = true;
         }
         $gotOutput = $app->pollTerminal();
         $gotSearch = $app->pollSearch();
-        if ($handled || $gotOutput || $gotSearch) {
+        $gotAi = $app->pollAi();
+        if ($handled || $gotOutput || $gotSearch || $gotAi) {
             $display->draw($app->render($display->viewportArea()));
         }
     }

@@ -71,12 +71,15 @@ $click($a['ai_input']);
 check($app->focusPanel() === 'ai_input', '点击 AI 输入框 → 焦点切到 ai_input');
 
 echo "== AI 输入发送 ==\n";
-$before = count($app->ai->messages());
+// M5 起 AI 面板不再自带占位回复：消息归 ChatModel，发送会真的去调 Provider。
+// headless 下没有 API key，故这里断言的是"用户消息入列 + 输入框清空"，
+// 而不是 M0 时代的"+2 条（含假回复）"。
+$before = count($app->chat->messages());
 foreach (['h', 'i'] as $ch) {
     $app->handle(CharKeyEvent::new($ch, 0), $vp);
 }
 $app->handle(CharKeyEvent::new("\r", 0), $vp);
-check(count($app->ai->messages()) === $before + 2, '输入 "hi" + Enter → 聊天流新增 2 条');
+check(count($app->chat->messages()) === $before + 1, '输入 "hi" + Enter → 用户消息入列');
 check($app->ai->input() === '', '发送后输入框清空');
 
 echo "== 侧栏 tab 切换 ==\n";

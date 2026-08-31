@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Panel;
 
+use App\Core\KeyInput;
 use App\App;
 use App\Editor\Buffer;
 use App\Editor\Highlighter;
@@ -387,7 +388,7 @@ final class EditorPanel
             $this->followBoth($buf, $this->lastTextW);
             return true;
         }
-        if (strlen($e->char) === 1 && ord($e->char) >= 32 && !($e->modifiers & KeyModifiers::CONTROL)) {
+        if (KeyInput::isPrintable($e->char) && !($e->modifiers & KeyModifiers::CONTROL)) {
             $buf->insertChar($e->char);
             $this->followBoth($buf, $this->lastTextW);
             return true;

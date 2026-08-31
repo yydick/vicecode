@@ -3,10 +3,12 @@ declare(strict_types=1);
 
 namespace App;
 
+use App\Core\KeyInput;
 use App\Core\Config;
 use App\Core\Lifecycle;
 use App\Core\LayoutFactory;
 use App\Editor\Buffer;
+use App\Ai\ChatModel;
 use App\Git\GitModel;
 use App\I18n\Translator;
 use App\Panel\AiPanel;
@@ -103,6 +105,12 @@ class App
     /** SEARCH 面板状态（M4 R1–R3）：输入框 / 异步 grep / 结果列表，供 Sidebar 的 SEARCH tab 读取 */
     public SearchModel $search;
 
+    /**
+     * AI 对话状态（M5）：消息历史 / 流式生成 / Provider 选择。
+     * 面板（AiPanel）只读它，不持有内容——与 GitModel / SearchModel 同构。
+     */
+    public ChatModel $chat;
+
     /** 底部状态栏 */
     public StatusBarPanel $statusBar;
 
@@ -120,8 +128,10 @@ class App
         $this->statusBar = new StatusBarPanel($this);
         $this->git = new GitModel($this);
         $this->search = new SearchModel($this);
+        $this->chat = new ChatModel($this);
         // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function () {
+            $this->chat->shutdown();
             $this->search->shutdown();
             $this->terminal->shutdown();
         });
@@ -282,11 +292,20 @@ class App
             ->widgets($editor, $terminal);
 
         // ── AI Stream ──
+        // 标题带上当前 Provider/模型：切换后要能立刻看见生效的是谁
+        // （输入面板只有 1 行可用，放不下独立的状态行）
+        $spec = $this->chat->spec();
+        $aiTitle = ' ' . $this->i18n->t('panel.ai_chat')
+            . ($spec !== null ? ' · ' . $spec->label . '/' . $spec->model : '')
+            . ($this->chat->isStreaming() ? ' …' : '') . ' ';
         $aiStream = BlockWidget::default()
             ->borders(Borders::ALL)
             ->borderStyle($this->borderStyle($focus === 'ai_stream'))
-            ->titles(Title::fromString(' ' . $this->i18n->t('panel.ai_chat') . ' '))
-            ->widget($this->ai->streamContent());
+            ->titles(Title::fromString($aiTitle))
+            ->widget($this->ai->streamContent(
+                max(0, ($a['ai_stream']->width ?? 0) - 2),
+                max(0, ($a['ai_stream']->height ?? 0) - 2),
+            ));
 
         // ── AI Input ──
         $aiInput = BlockWidget::default()
@@ -342,6 +361,18 @@ class App
         return $this->search->poll();
     }
 
+    /** 是否有 AI 回复在生成（bin/vicecode.php 依赖此签名） */
+    public function aiStreaming(): bool
+    {
+        return $this->chat->isStreaming();
+    }
+
+    /** 排空 AI 流式管道；返回本帧是否产生了新 token（M5 R2） */
+    public function pollAi(): bool
+    {
+        return $this->chat->poll();
+    }
+
     // ── 事件分发 ──
     public function handle($event, Area $vp): void
     {
@@ -377,8 +408,10 @@ class App
                 $this->lifecycle->requestQuit();
                 return;
             }
-            // AI 输入框
-            if ($this->focusPanel() === 'ai_input') {
+            // AI 输入/消息流：键入进输入框；Ctrl+P 切 Provider、Ctrl+N 切模型、
+            // Ctrl+L 清空 —— 消息流聚焦时也要能用（不要求在输入框才能切）。
+            $f = $this->focusPanel();
+            if ($f === 'ai_input' || $f === 'ai_stream') {
                 $this->ai->onChar($event);
                 return;
             }
@@ -418,7 +451,7 @@ class App
                     return;
                 }
                 // 其余可打印字符进提交信息输入框
-                if (strlen($ch) === 1 && ord($ch) >= 32 && !($event->modifiers & KeyModifiers::CONTROL)) {
+                if (KeyInput::isPrintable($ch) && !($event->modifiers & KeyModifiers::CONTROL)) {
                     $this->git->commitMsg .= $ch;
                 }
                 return;
@@ -430,7 +463,7 @@ class App
                     return; // 交给 onKey → searchKey 统一处理
                 }
                 $ch = $event->char;
-                if (strlen($ch) === 1 && ord($ch) >= 32 && !($event->modifiers & KeyModifiers::CONTROL)) {
+                if (KeyInput::isPrintable($ch) && !($event->modifiers & KeyModifiers::CONTROL)) {
                     $this->search->query .= $ch;
                     $this->search->editingQuery = true;
                 }
@@ -456,6 +489,8 @@ class App
                 $this->sidebar->onScroll(MouseEventKind::ScrollDown);
             } elseif ($this->focusPanel() === 'terminal') {
                 $this->terminal->scrollBy(3);
+            } elseif ($this->focusPanel() === 'ai_stream' || $this->focusPanel() === 'ai_input') {
+                $this->ai->onScroll(MouseEventKind::ScrollDown);
             }
             return;
         }
@@ -466,6 +501,8 @@ class App
                 $this->sidebar->onScroll(MouseEventKind::ScrollUp);
             } elseif ($this->focusPanel() === 'terminal') {
                 $this->terminal->scrollBy(-3);
+            } elseif ($this->focusPanel() === 'ai_stream' || $this->focusPanel() === 'ai_input') {
+                $this->ai->onScroll(MouseEventKind::ScrollUp);
             }
             return;
         }
@@ -477,6 +514,8 @@ class App
                 $this->sidebar->onScrollH($step);
             } elseif ($this->focusPanel() === 'terminal') {
                 $this->terminal->onScrollH($step);
+            } elseif ($this->focusPanel() === 'ai_stream' || $this->focusPanel() === 'ai_input') {
+                $this->ai->onScrollH($step);
             }
             return;
         }
@@ -494,6 +533,8 @@ class App
         if ($focus === 'editor'   && $this->editor->onKey($e, $a))   return;
         if ($focus === 'terminal' && $this->terminal->onKey($e, $a)) return;
         if ($focus === 'sidebar'  && $this->sidebar->onKey($e, $a))   return;
+        // AI：↑/↓ 历史、PgUp/PgDn 滚动、Esc 停止生成（不生成时返回 false → 走全局退出）
+        if (($focus === 'ai_input' || $focus === 'ai_stream') && $this->ai->onKey($e, $a)) return;
 
         switch ($e->code) {
             case KeyCode::Esc:
@@ -512,10 +553,8 @@ class App
                 $this->focusIndex = ($this->focusIndex + 1) % count(self::PANELS);
                 break;
             case KeyCode::Backspace:
-                // AI 输入框退格（AiPanel 无 onKey，故留全局；终端退格已下沉到 TerminalPanel::onKey）
-                if ($focus === 'ai_input') {
-                    $this->ai->backspace();
-                }
+                // AI 输入框退格（AiPanel::onKey 已处理，这里是历史遗留的空分支，保留以防
+                // 将来改焦点分发时漏掉；终端退格已下沉到 TerminalPanel::onKey）
                 break;
         }
     }
