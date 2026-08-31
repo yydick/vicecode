@@ -91,4 +91,15 @@ return [
     'search.status_error'     => 'Search error: {msg}',
     'search.truncated'        => 'Truncated (first {n}), narrow your query',
     'search.empty_query'      => 'Type a search keyword',
+
+    'ai.no_provider'     => 'No provider configured',
+    'ai.no_key'          => 'Missing API key: set env {env}',
+    'ai.streaming'       => 'Generating…',
+    'ai.cancelled'       => 'Generation stopped',
+    'ai.error'           => 'AI request failed: {msg}',
+    'ai.http_error'      => 'HTTP {code}',
+    'ai.empty'           => '(model returned nothing)',
+    'ai.busy'            => 'Already generating, cannot start a new request',
+    'ai.switched'        => 'Switched to {provider} / {model}',
+    'ai.clear_hint'      => '(Ctrl+L clears the conversation)',
 ];

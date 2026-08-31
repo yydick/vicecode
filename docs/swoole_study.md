@@ -260,3 +260,61 @@ SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO & ~SWOOLE_HOOK_FILE & ~SWOOLE_HOOK_PROC
 
 > 不需要协程读管道：子进程 + 非阻塞管道本身就提供了「多进程、不阻塞主循环」，
 > 协程在这里只是换个读法，却带出 §8.1–8.3 三个坑。
+
+---
+
+## 9. 流式 HTTP（SSE）的实测结论（M5，2026-08-31）
+
+M5 要接 LLM 的 SSE 流式响应。里程碑文档原本写的是「Swoole 协程 curl + `CURLOPT_WRITEFUNCTION`」，
+**实测这条路是坏的**，下面是三轮探针（`tests/sse_probe*.php`，mock 服务端 `examples/sse_server.php`）
+的完整结论。判据两条：**流式**（chunk 数 > 1 且首块远早于结束）、**不阻塞**（请求期间并发协程能打点，
+12×120ms≈1440ms 的请求里打点应 ≈29）。
+
+### 9.0 先记住：`Swoole\Coroutine::run()` 这个静态方法**不存在**
+
+只有函数 `Swoole\Coroutine\run()`。写成 `Swoole\Coroutine::run(fn)` 会直接
+`Fatal: Call to undefined method Swoole\Coroutine::run()`。（`::set()` / `::create()` / `::sleep()`
+是真实方法，所以很容易顺手写错 `run`。）
+
+### 9.1 各方案实测结果
+
+| 方案 | chunk | 首块 | 打点 | 结论 |
+|---|---|---|---|---|
+| A1 libcurl + `WRITEFUNCTION`，**当前 flags（含 `NATIVE_CURL`）** | **0** | — | 1 | ❌ 回调被**静默吞掉**，63ms 就返回 |
+| A2 同上，关掉 CURL 系 hook | 7 | 60ms | **1** | ⚠️ 能流式，但**阻塞整个调度器** |
+| A3 同上，完全不开 hook（对照） | 7 | 1ms | 1 | 同 A2 |
+| B `Coroutine\Http\Client` + `recv()` | 0 | — | 1 | ❌ `execute()` 等完整响应；`recv()` 是 **WebSocket** 方法，HTTP 上恒返回 false（没有 `::on()` 方法） |
+| C1a `curl_multi` + `NATIVE_CURL` hook | — | — | — | ❌ **段错误（SIGSEGV）** |
+| C1b `curl_multi` + 关掉 CURL 系 hook，手动轮询 | 13 | 12ms | 29 | ✅ 流式 + 不阻塞 |
+| C2 `Coroutine\Socket` 手写 HTTP | 14 | 2ms | 29 | ✅ 流式 + 不阻塞 |
+| C3 `curl` 子进程 + 非阻塞管道 | 13 | 7ms | 29 | ✅ 流式 + 不阻塞 |
+
+### 9.2 逐条坑
+
+- **`SWOOLE_HOOK_NATIVE_CURL` 会静默吞掉 `WRITEFUNCTION`**：请求耗时和状态码都正常
+  （第二轮 4040ms 说明数据真在传），但回调一次都没进，也没有任何错误。
+  这是最危险的一类坑——不报错、只是没数据。
+- **`curl_multi` + `NATIVE_CURL` hook 直接段错误**。跑这类探针务必**每方案单起进程**，
+  否则第一个崩的会把后面所有用例一起带走。
+- **不开 CURL hook 时，`curl_exec` 是原生阻塞调用**：能流式，但会把整个协程调度器卡死
+  （并发协程打点恒为 1）。对 TUI 是致命的——请求期间界面完全僵死。
+- `Coroutine\Http\Client` **只有请求/响应模式，没有 HTTP 增量读的口子**。
+  别指望 `recv()`，那是 WebSocket 的。
+- `curl_multi_select()` 是 PHP 函数，**不会被 Swoole 协程化**，会阻塞整个进程。
+  轮询循环里要主动 `Swoole\Coroutine::sleep(0.005)` yield，不能用它当等待手段。
+
+### 9.3 M5 选型：C3（curl 子进程 + 非阻塞管道）
+
+三条 ✅ 里选 C3，理由：
+- **与 M2（终端命令）/ M4（搜索）同一个范式**，直接复用现成的 `CommandRunner`
+  （`start` / `poll(cb)` / `isRunning` / `exitCode` / `cancel` / `shutdown` 全套已验证），
+  **传输层零新代码**；
+- HTTPS 由 curl CLI 负责，不用自己搞 TLS；「停止生成」（R6）就是 `cancel()` → `proc_terminate`，
+  M2 R7 已验证；
+- C1b 要改全局 hook flags 并自己写 multi 句柄轮询；C2 要自己写 HTTP 解析 + TLS，
+  与「通用能力别自己写、优先成熟实现」相悖。
+
+代价：依赖 `curl` CLI 二进制。这与 M4 依赖 `grep` 是同一类取舍，项目已接受。
+
+命令行要点：`curl -N -sS --max-time <s> -H 'Accept: text/event-stream' <url>`。
+`-N` 关掉 curl 自己的缓冲，不加的话输出会被攒成一大块、流式退化成一次性返回。

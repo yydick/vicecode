@@ -83,4 +83,15 @@ return [
     'search.status_error'     => '搜索出错：{msg}',
     'search.truncated'        => '已截断（前 {n} 条），请缩小范围',
     'search.empty_query'      => '请输入搜索关键词',
+
+    'ai.no_provider'     => '未配置任何 Provider',
+    'ai.no_key'          => '缺少 API key：请设置环境变量 {env}',
+    'ai.streaming'       => '生成中…',
+    'ai.cancelled'       => '已停止生成',
+    'ai.error'           => 'AI 请求失败：{msg}',
+    'ai.http_error'      => 'HTTP {code}',
+    'ai.empty'           => '（模型没有返回内容）',
+    'ai.busy'            => '正在生成中，无法同时发起新请求',
+    'ai.switched'        => '已切换到 {provider} / {model}',
+    'ai.clear_hint'      => '（Ctrl+L 清空对话）',
 ];
