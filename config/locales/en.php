@@ -39,6 +39,8 @@ return [
     'editor.readonly'  => '(read-only)',
     'editor.too_large' => 'File too large to edit: {size} bytes (limit {limit})',
     'editor.binary'    => 'Binary file — not editable',
+    'editor.missing'    => 'File does not exist: {path}',
+    'editor.unreadable' => 'No read permission: {path}',
     'editor.saved'     => 'Saved',
     'editor.save_failed' => 'Save failed: {msg}',
     'editor.open'      => 'Open',

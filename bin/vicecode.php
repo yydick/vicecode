@@ -120,13 +120,28 @@ function start(bool $sw): void
     );
     $term->flush();
 
+    // ⚠️ 从这里到函数结束**任何**退出路径都要还原终端：
+    // 少了 finally 的话，一个未捕获异常就会把终端留在 raw mode + alternate screen
+    // （无回显、无光标，用户的 shell 直接废掉）—— 这正是 M0 早期"花屏"的根因。
+    // restoreTerminal 是幂等的（只是发几段转义序列），与 Swoole 分支的
+    // Coroutine\defer 重复调用也无害。
+    try {
+        startMain($app, $term, $sw);
+    } finally {
+        restoreTerminal($term);
+    }
+}
+
+function startMain(App $app, Terminal $term, bool $sw): void
+{
     $backend = PhpTermBackend::new($term);
     $display = DisplayBuilder::default($backend)->fullscreen()->build();
 
     if ($sw) {
         // ── Swoole 协程底座 ──
-        Swoole\Coroutine\defer(static fn() => restoreTerminal($term)); // 任何路径退出都还原
-
+        // 终端还原不再靠 Coroutine\defer：start() 的 try/finally 已覆盖正常返回与异常
+        // 两条路径，再挂 defer 会让还原序列在每次退出时发两遍（实测输出里
+        // `ESC[?1049l ... ESC[?25h` 连续出现两次）。
         $ch = new Swoole\Coroutine\Channel(64);   // 键鼠事件
         $redraw = new Swoole\Coroutine\Channel(8); // R3：后台协程完成信号
         $parser = EventParser::new();
@@ -207,7 +222,7 @@ function start(bool $sw): void
             $display->draw($app->render($display->viewportArea()));
         }
     }
-    restoreTerminal($term);
+    // 还原由 start() 的 finally 统一负责
 }
 
 $useSwoole = (getenv('TUI_USE_SWOOLE') ?: '1') === '1'
@@ -223,11 +238,19 @@ $useSwoole = (getenv('TUI_USE_SWOOLE') ?: '1') === '1'
 //  - SWOOLE_HOOK_PROC：接管后 proc_close() 返回值被改写（exit 42 → 0），且 proc_open
 //    只能在协程内调用，headless 测试驱动不了 runner。关掉即恢复原生语义。
 // 命令执行本就靠「子进程 + 非阻塞管道轮询」，不需要这两个 HOOK。
-if ($useSwoole) {
-    Swoole\Runtime::enableCoroutine(
-        SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO & ~SWOOLE_HOOK_FILE & ~SWOOLE_HOOK_PROC
-    );
-    Swoole\Coroutine\run(static fn() => start(true));
-} else {
-    start(false);
+// R3：顶层兜底。终端还原由 start() 的 finally 保证；这里只负责把致命错误
+// 翻译成人类可读的一行，而不是把栈追踪喷在用户刚恢复的屏幕上。
+try {
+    if ($useSwoole) {
+        Swoole\Runtime::enableCoroutine(
+            SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO & ~SWOOLE_HOOK_FILE & ~SWOOLE_HOOK_PROC
+        );
+        Swoole\Coroutine\run(static fn() => start(true));
+    } else {
+        start(false);
+    }
+} catch (Throwable $e) {
+    fwrite(STDERR, "\nViceCode 异常退出：" . $e->getMessage() . "\n");
+    fwrite(STDERR, '  ' . $e->getFile() . ':' . $e->getLine() . "\n");
+    exit(1);
 }

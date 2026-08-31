@@ -33,6 +33,8 @@ return [
     'editor.readonly'  => '（只读）',
     'editor.too_large' => '文件过大，无法编辑：{size} 字节（上限 {limit}）',
     'editor.binary'    => '二进制文件 — 不可编辑',
+    'editor.missing'    => '文件不存在：{path}',
+    'editor.unreadable' => '无读取权限，无法打开：{path}',
     'editor.saved'     => '已保存',
     'editor.save_failed' => '保存失败：{msg}',
     'editor.open'      => '打开',

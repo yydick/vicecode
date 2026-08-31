@@ -67,7 +67,22 @@ final class Buffer
         $b = new self();
         $b->path = $path;
 
+        // ⚠️ 所有失败路径都必须**先判状态再读**，不能靠 @ 压警告：
+        // TUI 跑在 alternate screen 里，PHP Warning 会直接写进屏幕把画面打花，
+        // 而且把它压掉也解决不了「用户看到空文件却不知道为什么」。
         if (!is_file($path)) {
+            $b->readOnly = true;
+            $b->noticeKey = 'editor.missing';
+            $b->noticeParams = ['path' => $path];
+            $b->lines = [''];
+            $b->recompute();
+            return $b;
+        }
+
+        if (!is_readable($path)) {
+            $b->readOnly = true;
+            $b->noticeKey = 'editor.unreadable';
+            $b->noticeParams = ['path' => $path];
             $b->lines = [''];
             $b->recompute();
             return $b;
@@ -91,7 +106,18 @@ final class Buffer
             return $b;
         }
 
-        $content = str_replace("\r\n", "\n", (string) file_get_contents($path));
+        // 上面已确认 is_file + is_readable，这里理论上不会失败；
+        // 但仍用「读前判状态 + 失败转提示」而不是裸调用，避免权限在两者之间被改掉时喷警告。
+        $raw = is_readable($path) ? file_get_contents($path) : false;
+        if ($raw === false) {
+            $b->readOnly = true;
+            $b->noticeKey = 'editor.unreadable';
+            $b->noticeParams = ['path' => $path];
+            $b->lines = [''];
+            $b->recompute();
+            return $b;
+        }
+        $content = str_replace("\r\n", "\n", $raw);
         $content = rtrim($content, "\n");
         $b->lines = $content === '' ? [''] : explode("\n", $content);
         $b->recompute();
@@ -276,11 +302,19 @@ final class Buffer
         $this->maxLineNoWidth = max(1, strlen((string) max(1, count($this->lines))));
     }
 
+    /**
+     * 是否二进制。**只应在确认可读之后调用**——打不开时返回 true 会把「权限不足」
+     * 误报成「二进制文件」（用户据此去查二进制问题，方向全错），而且 fopen 失败
+     * 的 Warning 会喷进 alternate screen 打花画面。
+     */
     private static function isBinary(string $path): bool
     {
+        if (!is_readable($path)) {
+            return false; // 读不了不是二进制；调用方已用 editor.unreadable 提示
+        }
         $fh = fopen($path, 'rb');
         if ($fh === false) {
-            return true;
+            return false;
         }
         $sample = fread($fh, 1024);
         fclose($fh);

@@ -407,6 +407,12 @@ final class EditorPanel
             $this->buffers[$path] = Buffer::fromFile($path);
         }
         $this->shell->buffer = $this->buffers[$path];
+        // 打不开（不存在/无权限/过大/二进制）时除了编辑器里的提示行，状态栏也带一句：
+        // 用户可能正看着别处，只靠编辑器内提示容易以为没反应。
+        $b = $this->shell->buffer;
+        if ($b->noticeKey !== null) {
+            $this->shell->setMessage($this->shell->t($b->noticeKey, $b->noticeParams));
+        }
         $this->scrollPinned = false; // 打开新文件：光标跟随（从列 0 显示）
         $this->shell->focus('editor');
     }
