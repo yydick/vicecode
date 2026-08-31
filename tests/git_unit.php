@@ -266,15 +266,50 @@ echo "== 异步刷新（真实 git 仓库） ==\n";
     check($app->git->branch !== '' && $app->git->branch !== '(none)', '分支名非空: ' . $app->git->branch);
     check(is_array($app->git->status), 'status 已解析为数组');
     check(is_array($app->git->log), 'log 已解析为数组');
-    // 本仓库当前有改动（已跟踪文件被修改），应能解析出至少 1 条状态；其中应有 modified
-    check(count($app->git->status) >= 1, 'status 解析到至少 1 条改动');
-    $hasModified = false;
+});
+
+// status 解析必须在**自己造的**仓库里验，不能依赖本项目此刻是否有未提交改动：
+// 一旦工作区是干净的，这类断言就会假失败（2026-08-31 提交完 M5 后踩到一次）。
+echo "== status 解析（独立临时 git 仓库）==\n";
+\Swoole\Coroutine\run(function () use (&$failed): void {
+    $root = getcwd();
+    $dir = sys_get_temp_dir() . '/vicecode_st_' . uniqid();
+    mkdir($dir);
+    chdir($dir);
+    // 先只提交一个文件，确保此时仓库是真的干净（untracked 文件要等"干净"断言之后再造）
+    exec('git init --initial-branch=main -q'
+        . ' && git config user.email t@t && git config user.name t'
+        . ' && echo a > tracked.txt'
+        . ' && git add tracked.txt && git commit -qm init');
+
+    // 干净仓库：status 应为空（不能把「无改动」误报成有改动）
+    $clean = new App();
+    $clean->git->refresh();
+    \Swoole\Coroutine\System::sleep(0.5);
+    check($clean->git->inRepo(), '临时仓库被识别为 git 仓库');
+    check(count($clean->git->status) === 0, '干净仓库 status 为空（实际 ' . count($clean->git->status) . ' 条）');
+
+    // 改一个已跟踪文件 + 暂存另一个新文件 → 应有 modified 与 staged 两类
+    file_put_contents('tracked.txt', "a\nmodified\n");
+    file_put_contents('staged.txt', 'new');
+    file_put_contents('untracked.txt', 'u');
+    exec('git add staged.txt');
+
+    $app = new App();
+    $app->git->refresh();
+    \Swoole\Coroutine\System::sleep(0.5);
+    check(count($app->git->status) === 3, 'status 解析出 3 条（modified + staged + untracked），实际 ' . count($app->git->status));
+
+    $cat = [];
     foreach ($app->git->status as $s) {
-        if (in_array($s->category(), [GitClient::STATUS_MODIFIED, GitClient::STATUS_STAGED], true)) {
-            $hasModified = true;
-        }
+        $cat[$s->category()] = ($cat[$s->category()] ?? 0) + 1;
     }
-    check($hasModified, 'status 含已修改/已暂存条目（本仓库有改动）');
+    check(($cat[GitClient::STATUS_MODIFIED] ?? 0) === 1, '解析出 1 条 modified');
+    check(($cat[GitClient::STATUS_STAGED] ?? 0) === 1, '解析出 1 条 staged（新增已暂存）');
+    check(($cat[GitClient::STATUS_UNTRACKED] ?? 0) === 1, '解析出 1 条 untracked');
+
+    chdir($root ?: '/');
+    exec('rm -rf ' . escapeshellarg($dir));
 });
 
 // ─────────────── 9) 分支切换真实切分支（独立临时 git 仓库） ───────────────
