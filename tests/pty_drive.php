@@ -10,9 +10,9 @@ declare(strict_types=1);
  */
 
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
-$proc = proc_open([PHP_BINARY, 'bin/tui.php'], $descs, $pipes);
+$proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes);
 if ($proc === false) {
-    echo "[FAIL] 无法启动 bin/tui.php\n";
+    echo "[FAIL] 无法启动 bin/vicecode.php\n";
     exit(1);
 }
 stream_set_blocking($pipes[0], false);

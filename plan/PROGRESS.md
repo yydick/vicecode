@@ -1,6 +1,6 @@
 # 进度总结（PROGRESS）
 
-> 最后更新：2026-08-30
+> 最后更新：2026-08-31
 > 配套文档：`plan/PLAN.md`（总计划）、`plan/MILESTONES.md`（M0–M7 里程碑）
 > 详细坑与 API 见记忆 `project_php_tui_facts.md`
 
@@ -24,7 +24,7 @@
 | `examples/snapshot.php` | 验收工具 | headless 渲染到 `Buffer::toLines()`，输出 ASCII 快照 |
 | `examples/lib.php` | 共享阻塞源 | `BlockingTtyEventProvider`（stream_select 阻塞等键），被 01~06 + minimal 复用，破解“非阻塞闪退” |
 
-旧 Swoole 版 M0（`src/App.php`、`src/Core/EventLoop.php`、`src/Core/InputParser.php`、`bin/tui.php`、`tests/smoke.php`）已被当前方向取代，**组装 M0 时优先基于 examples 重写**，不要修补旧 Swoole 代码。
+旧 Swoole 版 M0（`src/App.php`、`src/Core/EventLoop.php`、`src/Core/InputParser.php`、`bin/vicecode.php`、`tests/smoke.php`）已被当前方向取代，**组装 M0 时优先基于 examples 重写**，不要修补旧 Swoole 代码。
 
 ## 三、关键技术结论（避免重踩）
 
@@ -53,7 +53,7 @@ php examples/snapshot.php       # 渲染 6 个例子的初始画面
 直接用已验证的 6 个零件拼成了真实 M0（纯 php-tui/term 驱动，无 Swoole 终端驱动）：
 
 - `src/App.php` — 状态 + `areas()`（布局矩形）+ `render()/build()`（Sidebar[Explorer/GIT/Search] + Editor + Terminal + AI 聊天流 + AI 输入框 + StatusBar）+ `handle()`（键鼠分发：Tab/点击切焦点、侧栏 tab 切换、AI 输入打字+Enter 发送、↑/↓ 滚动文件列表、Ctrl+Q/q/Esc 退出）。
-- `bin/tui.php` — 终端生命周期（alternateScreen + enableMouseCapture + rawMode）+ 渲染循环（`draw` + `events()->next()`）+ 干净还原。
+- `bin/vicecode.php` — 终端生命周期（alternateScreen + enableMouseCapture + rawMode）+ 渲染循环（`draw` + `events()->next()`）+ 干净还原。
 - `tests/m0_smoke.php` — headless 验收（面板标题、点击命中、AI 发送、tab 切换、↑ 移动）。
 
 **验证结果**：headless smoke 全 PASS；pty 三种输入（q / Tab+点击 / 点击AI输入打字发送+q）均 `exit=0` 且终端干净还原。修掉两个真实 bug：① `CodedKeyEvent` 字段是 `$code` 非 `$keyCode`（examples 曾因只验 exit=0 漏掉，已全局修正）；② 零尺寸 pty 下 `str_repeat` 负数 → 宽度夹紧 ≥0。
@@ -136,11 +136,50 @@ Terminal 面板从占位变成真正能跑命令的终端。R1–R7 全做。
   - **已删除**旧的通用单行输入提示（App::$prompt / openPrompt / closePrompt）与 `c` 字母提交模态弹窗——用户明确要"输入框+按钮"而非模态。
 - 交互：GIT tab 内 `↑/↓` 移动、`Enter` 看 diff或提交、`L` 切 status/log、`R` 刷新；切到 GIT tab 自动触发异步刷新。
 
-**关键修复（2026-08-30）**：`GitClient::exec` 原本在协程内走 `Swoole\Coroutine\System::exec`，但该函数依赖 `SWOOLE_HOOK_PROC`，而 bin/tui.php 刻意关闭了该 HOOK（否则 `proc_close` 返回值被改写、headless 测不动 runner）。结果真实 pty 下 `System::exec` 返回 false → `refresh()` 全失败、`branch` 永远空、GIT 面板退化成"不是 git 仓库"占位，且**headless 单测全绿却 pty 漏判**（单测跑在协程外走 `@exec` 回退分支才过）。已统一改为原生 `cd <cwd> && git ... 2>&1` 的 `@exec`，协程内由独立 `\go` 子协程承载、不卡主循环。这是典型的 headless≠pty 落差，务必双跑验收。
+**关键修复（2026-08-30）**：`GitClient::exec` 原本在协程内走 `Swoole\Coroutine\System::exec`，但该函数依赖 `SWOOLE_HOOK_PROC`，而 bin/vicecode.php 刻意关闭了该 HOOK（否则 `proc_close` 返回值被改写、headless 测不动 runner）。结果真实 pty 下 `System::exec` 返回 false → `refresh()` 全失败、`branch` 永远空、GIT 面板退化成"不是 git 仓库"占位，且**headless 单测全绿却 pty 漏判**（单测跑在协程外走 `@exec` 回退分支才过）。已统一改为原生 `cd <cwd> && git ... 2>&1` 的 `@exec`，协程内由独立 `\go` 子协程承载、不卡主循环。这是典型的 headless≠pty 落差，务必双跑验收。
 
 **新增文件**：`src/Git/{GitClient,GitFileStatus,GitCommit,GitModel}.php`；`Buffer::fromString`（虚拟只读文档）；`EditorPanel::openVirtual`。
 **验收**：`tests/git_unit.php`（解析 + 渲染 + 键入/空消息拒绝 + 下拉/菜单命中 + ▦开文件/✕丢弃确认 + 真实异步刷新，全 PASS）；`tests/pty_git.php`（真实 pty 点 GIT tab→看分支 master/状态→键入提交信息→点 Commit▾ 展开四项下拉→点「提交」空消息被拒→点文件名开 diff→点 ▦ 开文件→点 ✕ 弹丢弃确认→n 取消→Ctrl+Q 退出，exit=0）。m0/m1/m1_edge/m2/m2_probe_runner/editor_render_check/diff_invariant2/coroutine_channel_test/pty_run 回归全绿。
 
-**待做（M3 出口标准里 R6，P2）**：
-- **R6 分支切换**：列出本地分支并可 `checkout/switch`，尚未实现。
+**R6 分支切换（2026-08-31 补完）**：状态栏分支名右侧 `▾` 下拉，列出本地分支、点击即 `git switch`，
+切换后异步刷新 status/log/分支名。下拉打开时字符键既不进提交框也不触发 `+/-`。至此 **M3 全部完成**。
+验收：`tests/git_unit.php` 增 `switchBranch` 往返切换用例；`tests/pty_git.php` 真实 pty PASS。
+
+## 九、M4 Search 面板已接入（2026-08-31）
+
+挂在 Sidebar 的 SEARCH tab。范围刻意收窄：**只搜内容、无大小写/正则开关、无替换**（R4–R6 不做）。
+
+- **R1 输入框**：聚焦 SEARCH tab 时键入即进 `SearchModel::$query`，回车触发。
+- **R2 非阻塞递归 grep**：`Search/SearchClient.php` 构造 `grep` 命令（排除 vendor/node_modules 等），
+  `Search/SearchModel.php` **复用 M2 的 `CommandRunner`**（子进程 + 非阻塞管道 + 主循环每轮 `poll()`）。
+  - ⚠️ **没有用协程**：搜索可能跑几秒，而 `\go()` + 阻塞 `@exec` 不是可让出的 I/O，会把整个事件循环
+    卡死，直接违背 R2「搜索期间界面仍可操作」。这点与 M3 的 `GitModel`（毫秒级 `git status`，阻塞无所谓）
+    不同——**长任务一律 `CommandRunner`，短任务才 `\go()` + `@exec`**。
+  - 增量分组（边读边聚，不等命令跑完）；`MAX_MATCHES=2000` 达限即 `cancel()` 杀进程并提示「已截断」。
+  - grep **退出码 1 = 无匹配（正常）**，2 = 真实错误。把 1 当报错会每次搜不到都误报。
+  - 跨 chunk 半行**保持原始字节**，凑齐 `\n` 后才 sanitize——提前清洗会把被 chunk 劈开的汉字「修」成替换符。
+- **R3 结果跳转**：按文件分组、可折叠；回车在 HEADER 上折叠、在 HIT 上 `openFile` + 设 `cursorRow` 定位。
+
+**关键设计**：`buildVisibleRows()` 每帧现算可见行，渲染与点击命中**都调它**、不缓存快照——
+折叠一变缓存就和屏幕对不上，点击会打开错误的行。
+
+**验收**：`tests/search_unit.php`（`parseLine` 对真实 grep 输出逐行正确 + 排除目录 + 折叠后行下标、
+`mbDispToCharIndex` 边界）、`tests/pty_search.php`（真实 pty exit=0）。回归全绿。
+
+## 十、面板横向滚动（2026-08-31）
+
+用户 2026-08-30 反馈「各窗口都无法横向移动」。编辑器 / 侧栏 / 终端三处已补上，**触发方式为鼠标横向滚轮**。
+
+- 新增 `DisplayWidth::mbSubDisp()`（按显示列切片，字素边界对齐、不劈开 CJK）与
+  `mbDispToCharIndex()`（显示列 → 字符索引）。
+- **根因（编辑器）**：`Buffer::$cursorCol` 是**字符索引**，`scrollLeft`/`textW` 是**显示列**，
+  原 `content()` 把字符索引当显示列比 → CJK 下光标被推出屏外、End 行尾不现；点击把鼠标显示列
+  直接赋给 `cursorCol` → 汉字错位。加上每帧把 `scrollLeft` 拉回光标，横滚等于无效。
+  → 引入 `scrollPinned`：滚轮横滚置 `true`（自由 pan），光标移动/点击/输入/开新文件置 `false`（恢复跟随）。
+- 上界按「本帧最宽行显示列 − 视口内宽」钳制（非 `maxW-1`，否则长行尾部永远看不到），且**渲染前**钳好。
+- 顺手补 `Buffer::moveLeft/moveRight` 跨行移动（行尾右移→下一行首，行首左移→上一行尾）。
+- **仍未做**：键盘触发（Editor 方向键被光标占用，键位留给 M6 快捷键体系统一约定）、边界指示符、AI 面板横滚。
+
+**验收**：`tests/hscroll_unit.php`（切片/反查/跨行移动边界）全 PASS；m0/m1/m1_edge/m2/git/search/
+editor_render_check/diff_invariant2/coroutine_channel_test 与全部 pty 测试回归全绿（19/19）。
 

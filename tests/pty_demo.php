@@ -3,7 +3,7 @@ declare(strict_types=1);
 // 延迟退出驱动：验证 TUI_DEMO=1 的后台协程重绘路径（isEmpty 查信号）在真实 pty 下
 // 不卡死、无致命错误、能干净退出。3.5s 后才发 q（让 2s 后台任务先完成并触发重绘）。
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
-$proc = proc_open([PHP_BINARY, 'bin/tui.php'], $descs, $pipes);
+$proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes);
 if ($proc === false) { echo "[FAIL] 无法启动\n"; exit(1); }
 usleep(3500000);          // 等后台协程完成重绘
 fwrite($pipes[0], 'q');   // 触发退出

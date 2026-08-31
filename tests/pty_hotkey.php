@@ -33,7 +33,7 @@ $readPty = static function ($stream, int $len) {
  */
 $tryHotkey = static function (array $steps, int $waitMs) use ($readPty): array {
     $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
-    $proc = proc_open([PHP_BINARY, 'bin/tui.php'], $descs, $pipes, null, array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40']));
+    $proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes, null, array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40']));
     if ($proc === false) {
         return [false, -1, ''];
     }

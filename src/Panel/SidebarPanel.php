@@ -8,6 +8,7 @@ use App\Explorer\FileTree;
 use App\Explorer\TreeNode;
 use App\Git\GitClient;
 use App\Git\GitModel;
+use App\Search\SearchRow;
 use App\Text\DisplayWidth;
 use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\KeyCode;
@@ -55,6 +56,12 @@ final class SidebarPanel
     // 故 gitContent 的实际屏幕行 = sidebar 顶 + 1(上边框) + 此偏移 + 行常量。
     private const GIT_CONTENT_OFFSET = 2;
 
+    // Search tab 内部分区行（inner 行号，0-based，相对 searchContent 起始）
+    private const SEARCH_INPUT_ROW = 0;   // 查询输入框
+    private const SEARCH_STATUS_ROW = 1;  // 状态行（搜索中 / N 个匹配 / 无结果 / 出错）
+    private const SEARCH_FIRST_ROW = 2;   // 首条结果（可见行）
+    private const SEARCH_CONTENT_OFFSET = 2; // 同 GIT：tab 行 + 分隔线
+
     private FileTree $tree;
 
     /** 树可视区首行的索引（保证选中项可见） */
@@ -62,6 +69,18 @@ final class SidebarPanel
 
     /** GIT 列表可视区首行索引（status / log 共用） */
     public int $gitOffset = 0;
+
+    /** 分支切换下拉列表可视区首行索引 */
+    public int $branchOffset = 0;
+
+    /** Search 结果列表可视区首行索引（单位是「可见行」，含分组标题） */
+    public int $searchOffset = 0;
+
+    /** 列表横向滚动偏移（显示列）：鼠标横向滚轮 / 触控板两指横滑调整，树/GIT/Search 列表共用 */
+    public int $hScroll = 0;
+
+    /** 当前帧列表最宽行的显示列（在渲染时统计，用于钳制 hScroll 上界） */
+    public int $maxHScroll = 0;
 
     public int $tabIndex = 0;
 
@@ -94,6 +113,10 @@ final class SidebarPanel
         // tab 行（配置了图标就只显示图标、不显示文字，省空间；选中用 [ ] 包裹）。
         // 按「显示列宽」预算分段，否则中文标签占 2 列会把段宽撑爆导致 ] 换行（M1 反馈的 bug）。
         $innerW = max(0, $sidebar->width - 2);
+        // 先按本帧列表内容算出最宽行的显示列宽（渲染各列表时也会累加，这里用预计算值
+        // 在「渲染之前」就把 hScroll 钳到合法上界，避免本帧用越界 hScroll 把行切成空串）。
+        $this->maxHScroll = $this->computeMaxHScroll($sidebar);
+        $this->hScroll = max(0, min($this->hScroll, max(0, $this->maxHScroll - $innerW)));
         $seg = max(1, intdiv(max(1, $innerW), 3)); // 每段可用显示列宽
         $tabLine = '';
         foreach (self::TABS as $i => $key) {
@@ -138,7 +161,9 @@ final class SidebarPanel
                     $style = $node->path === $this->shell->selectedPath
                         ? Style::default()->addModifier(Modifier::REVERSED)
                         : Style::default();
-                    $lines[] = Line::fromSpans(Span::styled($text, $style));
+                    $lines[] = Line::fromSpans(Span::styled(
+                        DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW), $style));
+                    $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
                 }
             } elseif (empty($visible)) {
                 $lines[] = Line::fromSpans(Span::styled('(empty)', Style::default()->fg(AnsiColor::DarkGray)));
@@ -146,14 +171,124 @@ final class SidebarPanel
         } elseif ($this->tabIndex === 1) {
             $this->gitContent($sidebar, $lines);
         } else {
-            $lines[] = Line::fromSpans(Span::styled($this->shell->t('search.placeholder'), Style::default()->fg(AnsiColor::DarkGray)));
-            $lines[] = Line::fromSpans(Span::styled($this->shell->t('search.prompt'), Style::default()->fg(AnsiColor::DarkGray)));
+            $this->searchContent($sidebar, $lines);
         }
+
+        // 横向滚动上界钳制：仅当最宽行超出视口时才允许右移，避免滚出空白
+        $this->hScroll = max(0, min($this->hScroll, max(0, $this->maxHScroll - $innerW)));
 
         if ($lines === []) {
             return ParagraphWidget::fromString('');
         }
         return ParagraphWidget::fromLines(...$lines);
+    }
+
+    /**
+     * 预计算本帧各列表「最宽行的显示列宽」，供 content() 在渲染前钳制 hScroll 上界。
+     * 必须与实际渲染行文本同构（前缀图标/缩进/着色不可见，不影响列宽），否则钳制会偏松/偏紧。
+     */
+    private function computeMaxHScroll(Area $sidebar): int
+    {
+        $innerW = max(0, $sidebar->width - 2);
+        $max = 0;
+        $w = fn(string $s): int => DisplayWidth::dispWidth($s);
+
+        if ($this->tabIndex === 0) {
+            foreach ($this->tree->visible() as $node) {
+                $marker = $node->path === $this->shell->selectedPath ? '» ' : '  ';
+                $prefix = $node->isDir ? ($node->expanded ? '▼ ' : '▶ ') : '  ';
+                $suffix = $node->isDir ? '/' : '';
+                $text = $marker . str_repeat('  ', $node->depth) . $prefix . $node->name . $suffix;
+                if ($w($text) > $max) {
+                    $max = $w($text);
+                }
+            }
+        } elseif ($this->tabIndex === 1) {
+            $git = $this->shell->git;
+            if ($git->branchDropdownOpen) {
+                foreach ($git->branches as $i => $b) {
+                    $text = ($b === $git->branch ? '● ' : '  ') . $b;
+                    if ($w($text) > $max) {
+                        $max = $w($text);
+                    }
+                }
+            } elseif ($git->dropdownOpen) {
+                foreach (GitModel::DROPDOWN as $i => $label) {
+                    $text = ($i === 0 ? '● ' : '  ') . $label;
+                    if ($w($text) > $max) {
+                        $max = $w($text);
+                    }
+                }
+            } elseif ($git->subView === 0) {
+                foreach ($git->status as $f) {
+                    $text = '▦ + - ✕ ' . ' ' . $f->badge() . ' ' . $f->displayPath();
+                    if ($w($text) > $max) {
+                        $max = $w($text);
+                    }
+                }
+            } else {
+                foreach ($git->log as $c) {
+                    $text = $c->hash . ' ' . $c->subject;
+                    if ($w($text) > $max) {
+                        $max = $w($text);
+                    }
+                }
+            }
+        } else {
+            foreach ($this->shell->search->buildVisibleRows() as $row) {
+                if ($row->kind === SearchRow::HEADER) {
+                    $mark = isset($this->shell->search->collapsed[$row->path]) ? '▶ ' : '▼ ';
+                    $text = $mark . $row->path . ' (' . ($row->group?->count() ?? 0) . ')';
+                } else {
+                    $text = '  ' . ($row->hit?->line ?? 0) . ': ' . ltrim($row->hit?->text ?? '');
+                }
+                if ($w($text) > $max) {
+                    $max = $w($text);
+                }
+            }
+        }
+        // 视口本身也参与：至少保证 hScroll 上界不为负（不影响主逻辑，防御性）
+        return max($max, $innerW);
+    }
+
+    /**
+     * 分支切换下拉（R6）：覆盖 GIT 内容区，列出本地分支。
+     * 行0 标题（⎇ 切换分支 (Esc)）· 行1 分隔 · 行2+ 分支列表（当前 ● / 选中 REVERSED）。
+     * 列表可视区按 branchSelIdx 自动滚动（与 status/log 列表同约定）。
+     * @param list<Line> $lines
+     */
+    private function gitBranchPicker(Area $sidebar, array &$lines): void
+    {
+        $git = $this->shell->git;
+        $innerW = max(0, $sidebar->width - 2);
+
+        $lines[] = Line::fromSpans(Span::styled(
+            DisplayWidth::mbCutDisp('⎇ ' . $this->shell->t('git.branch_pick') . ' (Esc)', $innerW),
+            Style::default()->fg(AnsiColor::Cyan)));
+        $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), Style::default()->fg(AnsiColor::Gray)));
+
+        $innerH = max(0, $sidebar->height - 2);
+        $itemRows = max(0, $innerH - 2); // 标题 + 分隔
+        if ($itemRows <= 0 || $git->branches === []) {
+            $lines[] = Line::fromSpans(Span::styled(
+                DisplayWidth::mbCutDisp($this->shell->t('git.no_branch'), $innerW),
+                Style::default()->fg(AnsiColor::DarkGray)));
+            return;
+        }
+
+        $this->clampBranchOffset(count($git->branches), $itemRows);
+        for ($i = $this->branchOffset; $i < min($this->branchOffset + $itemRows, count($git->branches)); $i++) {
+            $b = $git->branches[$i];
+            $cur = $b === $git->branch;
+            $sel = $i === $git->branchSelIdx;
+            $marker = $cur ? '● ' : '  ';
+            $text = $marker . $b;
+            $style = $sel
+                ? Style::default()->addModifier(Modifier::REVERSED)
+                : ($cur ? Style::default()->fg(AnsiColor::Green) : Style::default());
+            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW), $style));
+            $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
+        }
     }
 
     /**
@@ -176,12 +311,21 @@ final class SidebarPanel
             return;
         }
 
-        // 行0：分支 + 子视图标题
+        // 分支切换下拉展开：覆盖整个 GIT 内容区，列出本地分支（当前 ● / 选中 REVERSED）
+        if ($git->branchDropdownOpen) {
+            $this->gitBranchPicker($sidebar, $lines);
+            return;
+        }
+
+        // 行0：分支 + 子视图标题（分支名可点击，▾ 提示可展开切换下拉）
         $viewTitle = $git->subView === 0
             ? $this->shell->t('git.view_status', ['n' => count($git->status)])
             : $this->shell->t('git.view_log', ['n' => count($git->log)]);
+        $branchText = $git->branchDropdownOpen
+            ? '⎇ ' . $this->shell->t('git.branch_pick') . ' (Esc)'
+            : '⎇ ' . $git->branch . ' ▾  ' . $viewTitle;
         $lines[] = Line::fromSpans(Span::styled(
-            DisplayWidth::mbCutDisp('⎇ ' . $git->branch . '  ' . $viewTitle, $innerW),
+            DisplayWidth::mbCutDisp($branchText, $innerW),
             Style::default()->fg(AnsiColor::Cyan)));
         $lines[] = Line::fromSpans(Span::styled(str_repeat('─', $innerW), Style::default()->fg(AnsiColor::Gray)));
 
@@ -203,8 +347,9 @@ final class SidebarPanel
             foreach (GitModel::DROPDOWN as $label) {
                 $text = ($i === 0 ? '● ' : '  ') . $label;
                 $lines[] = Line::fromSpans(Span::styled(
-                    DisplayWidth::mbCutDisp($text, $innerW),
+                    DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW),
                     $i === 0 ? Style::default()->fg(AnsiColor::Green) : Style::default()));
+                $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
                 $i++;
             }
             return;
@@ -248,7 +393,8 @@ final class SidebarPanel
                     : Style::default()->fg($this->gitColor($f->category()));
                 // 行首图标：▦=打开文件，+ =暂存，- =取消暂存，✕ =丢弃工作区改动（不可逆）；点文件名=开 diff
                 $line = '▦ + - ✕ ' . $text;
-                $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($line, $innerW), $style));
+                $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($line, $this->hScroll, $innerW), $style));
+                $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($line));
             }
         } else {
             $items = $git->log;
@@ -266,8 +412,191 @@ final class SidebarPanel
                 $style = $sel
                     ? Style::default()->addModifier(Modifier::REVERSED)
                     : Style::default()->fg(AnsiColor::Gray);
-                $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($text, $innerW), $style));
+                $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW), $style));
+                $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
             }
+        }
+    }
+
+    /**
+     * Search tab 内容（M4/R1–R3）：
+     *   行0 查询输入框 · 行1 状态行 · 行2+ 按文件分组的结果（分组标题可折叠）。
+     *
+     * 结果行来自 SearchModel::buildVisibleRows()——渲染与点击命中共用这一份摊平列表，
+     * 折叠后「屏幕行号」与「命中下标」不再线性对应，各算一套必然点错行。
+     * 选中行 REVERSED；可视区按 selIdx 自动滚动（content() 非纯，与 Explorer/GIT 同约定）。
+     * @param list<Line> $lines
+     */
+    private function searchContent(Area $sidebar, array &$lines): void
+    {
+        $s = $this->shell->search;
+        $innerW = max(0, $sidebar->width - 2);
+
+        // 行0：查询输入框（默认聚焦，键入即进 query；空时显占位）
+        $q = $s->query;
+        $inputText = $q === '' ? $this->shell->t('search.placeholder') : $q;
+        $inputStyle = $q === '' ? Style::default()->fg(AnsiColor::DarkGray) : Style::default();
+        $lines[] = Line::fromSpans(Span::styled(
+            DisplayWidth::mbCutDisp('> ' . $inputText . '▏', $innerW), $inputStyle));
+
+        // 行1：状态行（搜索中 / N 个匹配 / 无结果 / 出错）
+        $lines[] = Line::fromSpans(Span::styled(
+            DisplayWidth::mbCutDisp($this->searchStatusText(), $innerW),
+            Style::default()->fg($s->running ? AnsiColor::Cyan : AnsiColor::Gray)));
+
+        // 行2+：结果列表
+        $innerH = max(0, $sidebar->height - 2);
+        $itemRows = max(0, $innerH - self::SEARCH_FIRST_ROW);
+        if ($itemRows <= 0) {
+            return;
+        }
+        $visible = $s->buildVisibleRows();
+        if ($visible === []) {
+            return; // 状态行已经说明了「无结果 / 还没搜」，这里不再重复占一行
+        }
+        $this->clampSearchOffset(count($visible), $itemRows);
+        for ($i = $this->searchOffset; $i < min($this->searchOffset + $itemRows, count($visible)); $i++) {
+            $row = $visible[$i];
+            $sel = $i === $s->selIdx;
+            if ($row->kind === SearchRow::HEADER) {
+                $mark = isset($s->collapsed[$row->path]) ? '▶ ' : '▼ ';
+                $text = $mark . $row->path . ' (' . ($row->group?->count() ?? 0) . ')';
+                $style = $sel
+                    ? Style::default()->addModifier(Modifier::REVERSED)
+                    : Style::default()->fg(AnsiColor::Yellow);
+            } else {
+                $text = '  ' . ($row->hit?->line ?? 0) . ': ' . ltrim($row->hit?->text ?? '');
+                $style = $sel
+                    ? Style::default()->addModifier(Modifier::REVERSED)
+                    : Style::default();
+            }
+            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW), $style));
+            $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
+        }
+    }
+
+    /** Search 状态行文案（搜索中优先，其次错误，再是无结果，最后是命中统计） */
+    private function searchStatusText(): string
+    {
+        $s = $this->shell->search;
+        if ($s->running) {
+            return $this->shell->t('search.status_searching');
+        }
+        if ($s->error !== null) {
+            return $this->shell->t('search.status_error', ['msg' => $s->error]);
+        }
+        if ($s->totalMatches === 0) {
+            // query 空着 = 还没搜过，状态行留空（输入框占位已说明用途），不报「无匹配」
+            if ($s->query === '') {
+                return '';
+            }
+            // query 非空但还在输入态 = 还没搜，提示「按回车搜索」而非「无匹配结果」（误导）
+            if ($s->editingQuery) {
+                return $this->shell->t('search.hint');
+            }
+            // 否则是「搜过了、确实没命中」
+            return $this->shell->t('search.status_no_results');
+        }
+        return $this->shell->t('search.results', [
+            'n' => (string) $s->totalMatches,
+            'files' => (string) $s->totalFiles,
+        ]);
+    }
+
+    /** 按选中行夹紧 Search 结果可视区首行（保证选中行可见） */
+    private function clampSearchOffset(int $n, int $rowsH): void
+    {
+        $idx = $this->shell->search->selIdx;
+        if ($idx < $this->searchOffset) {
+            $this->searchOffset = $idx;
+        } elseif ($idx >= $this->searchOffset + $rowsH) {
+            $this->searchOffset = $idx - $rowsH + 1;
+        }
+        if ($this->searchOffset < 0) {
+            $this->searchOffset = 0;
+        }
+        if ($this->searchOffset > max(0, $n - $rowsH)) {
+            $this->searchOffset = max(0, $n - $rowsH);
+        }
+    }
+
+    /** Search tab 各可点击元素的屏幕坐标（渲染与命中测试共用，保证一致） */
+    private function searchRects(Area $sb): array
+    {
+        $innerX = $sb->position->x + 1;
+        $innerW = max(0, $sb->width - 2);
+        $y = static fn (int $row): int => $sb->position->y + 1 + self::SEARCH_CONTENT_OFFSET + $row;
+        return [
+            'innerX' => $innerX,
+            'innerW' => $innerW,
+            'inputY' => $y(self::SEARCH_INPUT_ROW),
+            'statusY' => $y(self::SEARCH_STATUS_ROW),
+            'listY0' => $y(self::SEARCH_FIRST_ROW),
+        ];
+    }
+
+    /**
+     * Search tab 鼠标点击分发（M4/R1–R3）：
+     *   - 输入框行：聚焦并转回「编辑查询」语义（回车=重新搜索）；
+     *   - 状态行：无动作（吞掉，避免落到列表上）；
+     *   - 结果行：分组标题 = 折叠/展开，命中行 = 打开文件并定位到行。
+     * @param array<string,Area> $areas
+     */
+    private function searchClick(Position $pos, array $areas): bool
+    {
+        $s = $this->shell->search;
+        $r = $this->searchRects($areas['sidebar']);
+        $row = $pos->y;
+
+        if ($row === $r['inputY']) {
+            $s->editingQuery = true;
+            return true;
+        }
+        if ($row === $r['statusY']) {
+            return true;
+        }
+        if ($row >= $r['listY0']) {
+            $idx = ($row - $r['listY0']) + $this->searchOffset;
+            $visible = $s->buildVisibleRows();
+            if (!isset($visible[$idx])) {
+                return true;
+            }
+            $s->selIdx = $idx;
+            $s->editingQuery = false;
+            $target = $visible[$idx];
+            if ($target->kind === SearchRow::HEADER) {
+                $s->toggleGroup($target->path);
+            } elseif ($target->hit !== null) {
+                $s->openHit($target->hit->path, $target->hit->line);
+            }
+            return true;
+        }
+        return true;
+    }
+
+    /**
+     * Search tab 按键（M4）：↑/↓ 在结果间移动、Enter 搜索或打开、Backspace 删查询字。
+     * 可打印字符进 query 的分支在 App::handle 里（与 GIT 提交框同款，因共用 sidebar 焦点）。
+     */
+    private function searchKey(CodedKeyEvent $e): bool
+    {
+        $s = $this->shell->search;
+        switch ($e->code) {
+            case KeyCode::Up:
+                $s->moveSelection(-1);
+                return true;
+            case KeyCode::Down:
+                $s->moveSelection(1);
+                return true;
+            case KeyCode::Enter:
+                $s->triggerOrActivate();
+                return true;
+            case KeyCode::Backspace:
+                $s->query = mb_substr($s->query, 0, max(0, mb_strlen($s->query) - 1));
+                $s->editingQuery = true; // 一改查询词就回到「回车=重新搜索」语义
+                return true;
+            default:
+                return false; // Esc 等交全局处理
         }
     }
 
@@ -303,6 +632,23 @@ final class SidebarPanel
         }
     }
 
+    /** 按选中行夹紧分支列表可视区首行（保证选中行可见） */
+    private function clampBranchOffset(int $n, int $rowsH): void
+    {
+        $idx = $this->shell->git->branchSelIdx;
+        if ($idx < $this->branchOffset) {
+            $this->branchOffset = $idx;
+        } elseif ($idx >= $this->branchOffset + $rowsH) {
+            $this->branchOffset = $idx - $rowsH + 1;
+        }
+        if ($this->branchOffset < 0) {
+            $this->branchOffset = 0;
+        }
+        if ($this->branchOffset > max(0, $n - $rowsH)) {
+            $this->branchOffset = max(0, $n - $rowsH);
+        }
+    }
+
     /** GIT tab 各可点击元素的屏幕坐标（渲染与命中测试共用，保证一致） */
     private function gitRects(Area $sb): array
     {
@@ -325,6 +671,8 @@ final class SidebarPanel
             'itemDiscardX' => $innerX + 6,                   // 列表行 ✕ 在 inner 列 6（丢弃工作区改动）
             'itemNameX' => $innerX + 8,                     // 列表行 文件名起始列（点此=开 diff）
             'menuY0' => $y(self::GIT_HEADER_ROW),           // 下拉覆盖从标题行起
+            'branchRowY' => $y(0),                          // 分支行（GIT 内容行 0）：点击打开切换下拉
+            'branchListY0' => $y(2),                        // 分支下拉列表起始行（标题 + 分隔之后）
         ];
     }
 
@@ -343,6 +691,25 @@ final class SidebarPanel
         $r = $this->gitRects($areas['sidebar']);
         $col = $pos->x;
         $row = $pos->y;
+
+        // 分支切换下拉展开：点列表项即切换；点标题/别处关闭
+        if ($git->branchDropdownOpen) {
+            if ($row >= $r['branchListY0']) {
+                $idx = ($row - $r['branchListY0']) + $this->branchOffset;
+                if (isset($git->branches[$idx])) {
+                    $git->switchBranch($git->branches[$idx]);
+                    return true;
+                }
+            }
+            $git->branchDropdownOpen = false;
+            return true;
+        }
+
+        // 点分支行（左侧 ⎇ 区域）：打开分支切换下拉
+        if ($row === $r['branchRowY'] && !$git->branchDropdownOpen) {
+            $git->openBranchDropdown();
+            return true;
+        }
 
         // 下拉展开：菜单项命中或点别处关闭
         if ($git->dropdownOpen) {
@@ -444,6 +811,11 @@ final class SidebarPanel
             return $this->gitClick($pos, $areas);
         }
 
+        // SEARCH tab：交给 searchClick 处理（输入框/状态/结果列表）
+        if ($this->tabIndex === 2) {
+            return $this->searchClick($pos, $areas);
+        }
+
         // 树条目（inner 第 2 行起）
         if ($this->tabIndex !== 0 || !$sb->containsPosition($pos) || $pos->y < $sb->position->y + 3) {
             return false;
@@ -488,6 +860,10 @@ final class SidebarPanel
         if ($this->tabIndex === 1) {
             return $this->gitKey($e);
         }
+        // SEARCH tab 用自己的导航语义（↑/↓/Enter/Backspace）
+        if ($this->tabIndex === 2) {
+            return $this->searchKey($e);
+        }
         switch ($e->code) {
             case KeyCode::Enter:
                 $this->activate();
@@ -503,10 +879,34 @@ final class SidebarPanel
         }
     }
 
-    /** GIT tab 按键（M3/R5）：↑/↓ 移动、Enter 提交、Backspace 删字、Esc 关下拉 */
+    /** GIT tab 按键（M3/R5/R6）：↑/↓ 移动、Enter 提交/切换分支、Backspace 删字、Esc 关下拉 */
     private function gitKey(CodedKeyEvent $e): bool
     {
         $git = $this->shell->git;
+
+        // 分支切换下拉：专属导航，吞掉其它键（不污染提交信息框）
+        if ($git->branchDropdownOpen) {
+            switch ($e->code) {
+                case KeyCode::Up:
+                    $git->moveBranchSelection(-1);
+                    return true;
+                case KeyCode::Down:
+                    $git->moveBranchSelection(1);
+                    return true;
+                case KeyCode::Enter:
+                    $b = $git->branches[$git->branchSelIdx] ?? null;
+                    if ($b !== null) {
+                        $git->switchBranch($b);
+                    }
+                    return true;
+                case KeyCode::Esc:
+                    $git->branchDropdownOpen = false;
+                    return true;
+                default:
+                    return true;
+            }
+        }
+
         switch ($e->code) {
             case KeyCode::Up:
                 $git->moveSelection(-1);
@@ -537,6 +937,16 @@ final class SidebarPanel
      */
     public function activate(): void
     {
+        // SEARCH tab：Enter 触发搜索 / 激活当前行
+        if ($this->tabIndex === 2) {
+            $this->shell->search->triggerOrActivate();
+            return;
+        }
+        // 顺手修既有 bug：GIT tab 收到 \r 会误跑 Explorer 逻辑
+        if ($this->tabIndex !== 0) {
+            return;
+        }
+
         $visible = $this->tree->visible();
         if (empty($visible)) {
             return;
@@ -549,18 +959,27 @@ final class SidebarPanel
         }
     }
 
-    /** 滚轮：上下移动选中项 */
+    /** 滚轮：按当前 tab 上下移动对应列表的选中项（Explorer 树 / GIT 列表 / Search 结果） */
     public function onScroll(MouseEventKind $kind): bool
     {
-        if ($kind === MouseEventKind::ScrollDown) {
-            $this->moveSelection(1);
-            return true;
+        $delta = $kind === MouseEventKind::ScrollDown ? 1 : ($kind === MouseEventKind::ScrollUp ? -1 : 0);
+        if ($delta === 0) {
+            return false;
         }
-        if ($kind === MouseEventKind::ScrollUp) {
-            $this->moveSelection(-1);
-            return true;
+        if ($this->tabIndex === 2) {
+            $this->shell->search->moveSelection($delta);
+        } elseif ($this->tabIndex === 1) {
+            $this->shell->git->moveSelection($delta);
+        } else {
+            $this->moveSelection($delta);
         }
-        return false;
+        return true;
+    }
+
+    /** 横向滚动（触控板两指横滑 / Shift+滚轮）：delta<0 左移、>0 右移 */
+    public function onScrollH(int $delta): void
+    {
+        $this->hScroll = max(0, $this->hScroll + $delta);
     }
 
     // ── 内部 ────────────────────────────────────────

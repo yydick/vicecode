@@ -150,7 +150,7 @@ interface ChatProvider {
 ```
 tui/
   composer.json
-  bin/tui.php                  # 入口：启动 Swoole + App
+  bin/vicecode.php                  # 入口：启动 Swoole + App
   src/
     App.php
     Core/{EventLoop,KeyParser,State,LayoutFactory}.php

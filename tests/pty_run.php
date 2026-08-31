@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 /**
- * 真实 pty 冒烟：用伪终端启动 bin/tui.php，喂几个键后发 q 退出，
+ * 真实 pty 冒烟：用伪终端启动 bin/vicecode.php，喂几个键后发 q 退出，
  * 校验：进程 exit=0、无致命错误、能干净退出（验证 M1 的 App 在真实终端生命周期下可用）。
  *
  * 运行：php tests/pty_run.php
@@ -13,10 +13,10 @@ $descs = [
     1 => ['pty'],
     2 => ['pty'],
 ];
-$cmd = [PHP_BINARY, 'bin/tui.php'];
+$cmd = [PHP_BINARY, 'bin/vicecode.php'];
 $proc = proc_open($cmd, $descs, $pipes);
 if ($proc === false) {
-    echo "[FAIL] 无法启动 bin/tui.php\n";
+    echo "[FAIL] 无法启动 bin/vicecode.php\n";
     exit(1);
 }
 
@@ -74,5 +74,5 @@ if ($firstRunning) {
 $code = proc_close($proc);
 
 $ok = !$status['running'] && $code === 0;
-echo $ok ? "[OK] bin/tui.php 在 pty 下干净退出 (exit=0)\n" : "[FAIL] 退出异常 (running=" . var_export($firstRunning, true) . " code=$code)\n";
+echo $ok ? "[OK] bin/vicecode.php 在 pty 下干净退出 (exit=0)\n" : "[FAIL] 退出异常 (running=" . var_export($firstRunning, true) . " code=$code)\n";
 exit($ok ? 0 : 1);

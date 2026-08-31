@@ -193,13 +193,26 @@ final class Buffer
     {
         if ($this->cursorCol > 0) {
             $this->cursorCol--;
+            return;
+        }
+        if ($this->cursorRow > 0) {
+            // 行首继续左移 → 跳到上一行末尾（标准编辑器跨行光标移动）
+            $this->cursorRow--;
+            $this->cursorCol = mb_strlen($this->lines[$this->cursorRow]);
         }
     }
 
     public function moveRight(): void
     {
-        if ($this->cursorCol < mb_strlen($this->currentLine())) {
+        $len = mb_strlen($this->currentLine());
+        if ($this->cursorCol < $len) {
             $this->cursorCol++;
+            return;
+        }
+        if ($this->cursorRow < count($this->lines) - 1) {
+            // 行尾继续右移 → 跳到下一行开头（标准编辑器跨行光标移动）
+            $this->cursorRow++;
+            $this->cursorCol = 0;
         }
     }
 

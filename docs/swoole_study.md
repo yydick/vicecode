@@ -2,7 +2,7 @@
 
 > 版本基准：**Swoole 6.2.1 / PHP 8.3.20**（本机实测 `swoole_version()`）。
 > 来源：官方文档 `https://wiki.swoole.com/zh-cn/`（`github.com/swoole/docs` 的 `public/zh-cn/*.md` 原始 markdown）。
-> 目的：在写 `bin/tui.php` 的协程分支前，先把 Swoole 的真实 API 与范式吃透，避免"试 API 报错就换一个"的盲猜。
+> 目的：在写 `bin/vicecode.php` 的协程分支前，先把 Swoole 的真实 API 与范式吃透，避免"试 API 报错就换一个"的盲猜。
 
 ---
 
@@ -191,7 +191,7 @@ while (!$app->quit) {
 
 ---
 
-## 7. 与本项目 `bin/tui.php` 的映射
+## 7. 与本项目 `bin/vicecode.php` 的映射
 
 | 需求 | 正确做法（基于本文档） |
 | --- | --- |
@@ -201,7 +201,7 @@ while (!$app->quit) {
 | 后台耗时任务（R3 demo） | `go()` 起子协程，`sleep` 后 `push` 到 `$redraw` |
 | 回退分支（无 swoole） | 纯 `php-tui/term` 的 `BlockingTtyEventProvider`（`stream_select` 阻塞读）保持不变 |
 
-> 验证手段：真实 pty 必须用 `tests/pty_run.php` / `tests/pty_drive.php` + 外层 `timeout` 兜底，**禁止裸跑** `bin/tui.php`（曾 `kill -9`）。
+> 验证手段：真实 pty 必须用 `tests/pty_run.php` / `tests/pty_drive.php` + 外层 `timeout` 兜底，**禁止裸跑** `bin/vicecode.php`（曾 `kill -9`）。
 
 ---
 
@@ -219,7 +219,7 @@ Swoole\Error: must be forked outside the coroutine
 
 协程外 `start()` 正常，`Process::wait(true)` 返回 `{"pid":..,"code":3,"signal":0}`。
 本项目主循环跑在 `Swoole\Coroutine\run(fn() => start(true))` 里，**`start()` 整个函数体都在协程内**，
-所以「预 fork 常驻 worker」的方案要把 fork 提到 `bin/tui.php` 顶层，代价（IPC 帧协议 + worker 生命周期
+所以「预 fork 常驻 worker」的方案要把 fork 提到 `bin/vicecode.php` 顶层，代价（IPC 帧协议 + worker 生命周期
 + 僵尸回收）远超收益 —— M2 最终未采用，改用 `proc_open` + 非阻塞轮询。
 
 ### 8.2 `proc_close()` 的退出码会被 HOOK 改写 → 一律用 `proc_get_status()['exitcode']`

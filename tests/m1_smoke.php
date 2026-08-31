@@ -138,7 +138,7 @@ $renderer = new AggregateWidgetRenderer($renderers);
 $buffer = TuiBuffer::empty($vp);
 $renderer->render($renderer, $app->render($vp), $buffer, $buffer->area());
 $text = implode("\n", $buffer->toLines());
-foreach (['编辑器', '资源管理器', 'AI 对话', '终端', '工作台', '焦点'] as $needle) {
+foreach (['编辑器', '资源管理器', 'AI 对话', '终端', 'ViceCode', '焦点'] as $needle) {
     check(str_contains($text, $needle), "渲染输出包含: $needle");
 }
 

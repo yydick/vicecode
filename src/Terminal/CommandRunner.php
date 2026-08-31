@@ -14,7 +14,7 @@ namespace App\Terminal;
  *     headless 测试无法直接驱动 runner；
  *  3. HOOK_FILE 会接管管道 fd，proc_close 后延迟释放再次 close，往 stdout 吐
  *     `WARNING network::socket_free_defer()` —— 在 TUI 里直接打进 alternate screen 花屏。
- * 故 M2 关掉 HOOK_FILE/HOOK_PROC（见 bin/tui.php 的 M2_HOOK_FLAGS），这里全用原生调用。
+ * 故 M2 关掉 HOOK_FILE/HOOK_PROC（见 bin/vicecode.php 的 M2_HOOK_FLAGS），这里全用原生调用。
  *
  * 退出码一律取 proc_get_status()['exitcode']：它在有无 HOOK 两种环境下都正确，
  * 而 proc_close() 的返回值在 HOOK 下不可信。

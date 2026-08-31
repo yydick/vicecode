@@ -6,7 +6,7 @@ declare(strict_types=1);
  * zh_CN 包只需覆盖需要翻译的项；缺失的自动回退到此文件。
  */
 return [
-    'app.title'        => 'Workbench',
+    'app.title'        => 'ViceCode',
 
     // 面板标题
     'panel.sidebar'    => 'SIDEBAR',
@@ -77,7 +77,18 @@ return [
     'git.push_done'      => 'Pushed',
     'git.push_fail'      => 'Push failed: {msg}',
     'git.op_fail'        => 'Operation failed: {msg}',
+    'git.branch_pick'    => 'Switch branch',
+    'git.no_branch'      => '(no other branch)',
+    'git.switch_done'    => 'Switched to branch: {branch}',
+    'git.switch_fail'    => 'Switch branch failed: {msg}',
     'git.hint'           => '[a]stage all [s]stage [c]commit [p]push [L]log [Enter]diff [R]refresh',
-    'search.placeholder' => 'search (M4)',
-    'search.prompt'      => ' > ',
+    'search.placeholder'      => 'Search file contents…',
+    'search.hint'             => 'Press Enter to search…',
+    'search.prompt'           => ' > ',
+    'search.status_searching' => 'Searching…',
+    'search.status_no_results' => 'No matches',
+    'search.results'          => '{n} matches / {files} files',
+    'search.status_error'     => 'Search error: {msg}',
+    'search.truncated'        => 'Truncated (first {n}), narrow your query',
+    'search.empty_query'      => 'Type a search keyword',
 ];

@@ -8,7 +8,7 @@
 > - **P2（锦上添花）**：增强项，时间允许再做，不阻塞里程碑。
 
 **通用验证约定**
-- 手动验证：在真实终端（≥80×24，建议 120×40）运行 `php bin/tui.php`，按描述操作观察。
+- 手动验证：在真实终端（≥80×24，建议 120×40）运行 `php bin/vicecode.php`，按描述操作观察。
 - 纯逻辑单元验证：对 `Buffer` / `StreamParser` / `KeyParser` / `GitClient` 等无 I/O 依赖的纯函数写 PHPUnit 用例。
 - 协程验证：用 `Swoole\Coroutine\run()` 包裹，断言非阻塞（运行不卡死主线程）。
 - 干净退出：每次手动验证结束用 `Ctrl+Q` / `ESC` 退出，确认终端恢复正常（无乱码、无残留 raw mode）。
@@ -38,9 +38,9 @@
 目标：验证最大不确定性（Swoole 事件循环 ↔ php-tui 渲染/输入）跑得通，画出静态 VSCode 分屏，键鼠能切换焦点。
 
 ### R1 项目脚手架  [P0]
-- **需求描述**：Composer 初始化，PSR-4 自动加载，建立 `bin/tui.php` 入口与 `src/` 目录骨架（Core / Panels / Editor / AI / Git / Terminal）。安装 `php-tui/php-tui` 与 `php-tui/term`。
-- **达标项**：`composer install` 成功；`php bin/tui.php` 可启动；目录结构与 PLAN 七一致。
-- **验证方式**：执行 `composer validate`（无错误）；`php bin/tui.php` 能进入后续定义的界面（不报类找不到）；`composer dump-autoload` 后无缺失。
+- **需求描述**：Composer 初始化，PSR-4 自动加载，建立 `bin/vicecode.php` 入口与 `src/` 目录骨架（Core / Panels / Editor / AI / Git / Terminal）。安装 `php-tui/php-tui` 与 `php-tui/term`。
+- **达标项**：`composer install` 成功；`php bin/vicecode.php` 可启动；目录结构与 PLAN 七一致。
+- **验证方式**：执行 `composer validate`（无错误）；`php bin/vicecode.php` 能进入后续定义的界面（不报类找不到）；`composer dump-autoload` 后无缺失。
 
 ### R2 协程主循环与终端生命周期  [P0]
 - **需求描述**：`Swoole\Coroutine\run()` 内初始化 php-tui `Terminal`，进入 alternate screen + raw mode，启用鼠标捕获；用 `Swoole\Timer` 定时 `draw`；协程 `fread` 读 STDIN。退出时 `defer` 恢复终端。
@@ -67,7 +67,7 @@
 - **达标项**：`F12` 可开关调试层，信息实时更新。
 - **验证方式**：开启后做几次操作，确认事件类型/帧率显示正确，关闭后界面恢复。
 
-**M0 出口标准**：R1–R4 全达标，R5 至少基本可用，程序可稳定进入/退出，`php bin/tui.php` 显示静态分屏且键鼠能切焦点。
+**M0 出口标准**：R1–R4 全达标，R5 至少基本可用，程序可稳定进入/退出，`php bin/vicecode.php` 显示静态分屏且键鼠能切焦点。
 
 ---
 
@@ -150,7 +150,7 @@
 - **最终落地方案**（见 `docs/swoole_study.md`）：读键协程 `while (!$app->quit) { waitEvent(STDIN,READ,1.0); 可读则 fread; EventParser 解析后 push Channel }`；主循环 `while (!$app->quit) { $ev=$ch->pop(0.05); 超时则 isEmpty 查后台重绘信号再 continue; 否则 handle+draw }`；`Coroutine\defer` 还原终端；默认 `SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO`。
 
 ### R1 协程运行时底座  [P0]  ✅ 已达标
-- **需求**：`bin/tui.php` 改为在 `Swoole\Coroutine\run()` 内启动；STDIN 用协程读（不阻塞渲染/其他协程）；`draw` 由事件驱动。
+- **需求**：`bin/vicecode.php` 改为在 `Swoole\Coroutine\run()` 内启动；STDIN 用协程读（不阻塞渲染/其他协程）；`draw` 由事件驱动。
 - **达标**：真实 pty 下键鼠输入正常、画面随帧刷新、退出时终端干净还原（无花屏、回显恢复）。
 - **验证**：`tests/pty_run.php` + `tests/pty_drive.php` 真实 pty 干净退出（exit=0）；`tests/m1_smoke.php` headless 仍 PASS。
 
@@ -260,6 +260,11 @@
 
 **M3 出口标准**：R1–R3 全达标，能看到状态/日志/分支；R4–R5 至少基础可用。
 
+> 状态：**M3 全部完成（2026-08-31）**，R1–R6 全实现。R6 以状态栏分支名旁的 `▾` 下拉呈现
+> （VSCode 风格，与 R5 的 Commit 下拉同构），列出本地分支、点击即 `git switch`，
+> 切换后异步刷新 status/log/分支名。下拉打开时字符键既不进提交框也不触发 `+/-`。
+> 验收：`tests/git_unit.php` 含 `switchBranch` 往返切换用例；`tests/pty_git.php` 真实 pty PASS。
+
 ---
 
 ## M4 — 搜索面板
@@ -297,6 +302,21 @@
 - **验证方式**：替换一个串，确认文件改动与预览。
 
 **M4 出口标准**：R1–R3 全达标，能搜到结果并跳转。
+
+> 状态：**M4 R1–R3 完成（2026-08-31）**。R4/R5/R6 未做，范围明确限定为「只搜内容、
+> 无大小写/正则开关、无替换」。
+> - **R2 的执行底层不是协程**：`SearchModel` 复用 M2 的 `CommandRunner`
+>   （子进程 + 非阻塞管道 + 主循环每轮 `poll()`）。理由同 M2——搜索可能跑几秒，
+>   而 `\go()` + 阻塞 `@exec` 不是可让出的 I/O，会把整个事件循环卡死，
+>   直接违背 R2「搜索期间界面仍可操作」。长任务一律走 `CommandRunner`。
+> - grep **退出码 1 = 无匹配（正常）**，2 = 真实错误；把 1 当报错会每次搜不到都误报。
+> - `MAX_MATCHES=2000` 达限即 `cancel()` 杀进程，界面提示「已截断」，不让用户以为就这点结果。
+> - 结果按文件分组、可折叠；`buildVisibleRows()` 每帧现算，渲染与点击命中都调它，
+>   不缓存快照（折叠一变缓存就与屏幕对不上，点击会打开错误的行）。
+> - 跨 chunk 的半行**保持原始字节**，凑齐 `\n` 后才 `sanitize`——提前清洗会把被 chunk
+>   劈开的汉字「修」成替换符。
+> - 验收：`tests/search_unit.php`（真实 grep 解析 + 排除目录 + 折叠行下标）、
+>   `tests/pty_search.php`（真实 pty exit=0）。
 
 ---
 
@@ -522,6 +542,23 @@
   - 键位冲突：`Alt+字母` 在终端里是 `\e` + 字母 的转义序列，需确认 php-tui 的 `EventParser`
     能解析成带 `KeyModifiers::ALT` 的 `CharKeyEvent`（**先写最小样本验证，别假设**）。
   - 新面板占位会压缩其它面板高度，注意极小视口（40×10）下不能崩（`tests/m1_edge.php` 有压边界用例）。
+
+### 面板横向滚动 / 溢出内容可见（用户 2026-08-30 提出）
+
+- **需求**：各窗口无法横向移动，超出面板宽度的内容被裁掉、看不到。需要能横向滚动（pan）。
+- **状态**：**主体已完成（2026-08-31）**，编辑器 / 侧栏（EXPLORER+GIT+SEARCH）/ 终端三处均已支持。
+- **落地形态**：
+  - 触发方式：**鼠标横向滚轮 / 触控板**（`MouseEventKind::ScrollLeft` / `ScrollRight`），
+    按「当前焦点面板」分发到对应 `onScrollH()`。**键盘触发（Shift+←/→）未做**——
+    编辑器方向键已被光标移动占用，键位需整体重新约定，留到 M6 与快捷键体系（R2）一起定。
+  - 上界一律按「本帧最宽行显示列 − 视口内宽」钳制（不是 `maxW-1`，否则长行尾部永远看不到），
+    且**在渲染前**钳好，避免本帧用越界偏移把行切成空串。
+  - 编辑器额外有 `scrollPinned` 模型：滚轮横滚置 `true`（自由 pan，不把 `scrollLeft` 拉回光标）；
+    光标移动 / 点击 / 输入 / 打开新文件均置 `false`（恢复双向跟随）。没有它每帧回弹，横滚等于无效。
+  - 新增 `DisplayWidth::mbSubDisp()`（按显示列切片，字素边界对齐、不劈开 CJK）与
+    `mbDispToCharIndex()`（显示列→字符索引，供点击定位；`Buffer::$cursorCol` 是字符索引，
+    直接把鼠标显示列赋给它会导致 CJK 错位）。
+- **仍未做**：键盘触发、左右边界指示符、AI 对话/输入框的横滚。
 
 ---
 

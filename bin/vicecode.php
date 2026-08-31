@@ -11,7 +11,7 @@ declare(strict_types=1);
  *    screen / raw mode / mouse capture / 还原）仍交给 php-tui/term。
  *  - TUI_USE_SWOOLE=0（或未装 swoole）回退到纯 php-tui/term 阻塞读（M0 方案）。
  *
- * 运行：php bin/tui.php   （真实 pty 下；验收用 tests/pty_run.php / pty_drive.php）
+ * 运行：php bin/vicecode.php   （真实 pty 下；验收用 tests/pty_run.php / pty_drive.php）
  */
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -116,7 +116,7 @@ function start(bool $sw): void
         Actions::alternateScreenEnable(),
         Actions::enableMouseCapture(),
         Actions::cursorHide(),
-        Actions::setTitle('M1 Workbench')
+        Actions::setTitle('ViceCode')
     );
     $term->flush();
 
@@ -165,12 +165,14 @@ function start(bool $sw): void
         // M2：每轮都调 pollTerminal() 排空命令管道——子进程的输出随时会到，不能只在
         // 有键事件时才读。命令运行中把 pop 超时压到 10ms，让输出跟手。
         while (!$app->quit) {
-            $ev = $ch->pop($app->termRunning() ? 0.01 : 0.05);
+            $busy = $app->termRunning() || $app->searchRunning();
+            $ev = $ch->pop($busy ? 0.01 : 0.05);
             $gotOutput = $app->pollTerminal();
+            $gotSearch = $app->pollSearch();
             if ($ev === false) {
                 // 非阻塞查 R3 后台重绘信号：绝不能用 pop(0)（0 超时在 Swoole 中是永久阻塞！），
                 // 先 isEmpty() 判空再 pop 一个极小超时。
-                if ($gotOutput || !$redraw->isEmpty()) {
+                if ($gotOutput || $gotSearch || !$redraw->isEmpty()) {
                     if (!$redraw->isEmpty()) {
                         $redraw->pop(0.001);
                     }
@@ -190,12 +192,13 @@ function start(bool $sw): void
     $display->draw($app->render($display->viewportArea()));
     while (!$app->quit) {
         $handled = false;
-        foreach ($events->drainTimeout($app->termRunning() ? 10000 : 50000) as $event) {
+        foreach ($events->drainTimeout(($app->termRunning() || $app->searchRunning()) ? 10000 : 50000) as $event) {
             $app->handle($event, $display->viewportArea());
             $handled = true;
         }
         $gotOutput = $app->pollTerminal();
-        if ($handled || $gotOutput) {
+        $gotSearch = $app->pollSearch();
+        if ($handled || $gotOutput || $gotSearch) {
             $display->draw($app->render($display->viewportArea()));
         }
     }

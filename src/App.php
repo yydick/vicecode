@@ -14,6 +14,7 @@ use App\Panel\EditorPanel;
 use App\Panel\SidebarPanel;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
+use App\Search\SearchModel;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
 use PhpTui\Term\Event\CharKeyEvent;
@@ -99,6 +100,9 @@ class App
     /** GIT 面板状态（M3）：status / log / 分支，供 Sidebar 的 GIT tab 与 StatusBar 读取 */
     public GitModel $git;
 
+    /** SEARCH 面板状态（M4 R1–R3）：输入框 / 异步 grep / 结果列表，供 Sidebar 的 SEARCH tab 读取 */
+    public SearchModel $search;
+
     /** 底部状态栏 */
     public StatusBarPanel $statusBar;
 
@@ -115,8 +119,12 @@ class App
         $this->terminal = new TerminalPanel($this);
         $this->statusBar = new StatusBarPanel($this);
         $this->git = new GitModel($this);
+        $this->search = new SearchModel($this);
         // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
-        $this->lifecycle = new Lifecycle($this, fn() => $this->terminal->shutdown());
+        $this->lifecycle = new Lifecycle($this, function () {
+            $this->search->shutdown();
+            $this->terminal->shutdown();
+        });
         $roots = $this->sidebar->tree()->roots;
         if (!empty($roots)) {
             $this->selectedPath = $roots[0]->path;
@@ -201,7 +209,7 @@ class App
      * 六个面板的矩形（命中测试与渲染共用），约束的唯一真身在 LayoutFactory。
      *
      * 同一帧内 handle() 与 render() 会各调一次，原来算两遍；这里按视口尺寸缓存，
-     * 窗口 resize 时 key 自然失效、重新计算，对 bin/tui.php 零改动。
+     * 窗口 resize 时 key 自然失效、重新计算，对 bin/vicecode.php 零改动。
      *
      * 注意：返回的是缓存的那批 Area，调用方只读不写（php-tui 的 Area 属性并非 readonly，
      * 改了会污染后续帧）。
@@ -310,16 +318,28 @@ class App
     }
 
     // ── 终端面板（M2 命令运行器） ──────────────────────
-    /** 主循环每轮调用：排空命令管道（bin/tui.php 依赖此签名） */
+    /** 主循环每轮调用：排空命令管道（bin/vicecode.php 依赖此签名） */
     public function pollTerminal(): bool
     {
         return $this->terminal->poll();
     }
 
-    /** 是否有命令在跑（bin/tui.php 依赖此签名） */
+    /** 是否有命令在跑（bin/vicecode.php 依赖此签名） */
     public function termRunning(): bool
     {
         return $this->terminal->isRunning();
+    }
+
+    /** 是否有搜索在跑（bin/vicecode.php 依赖此签名） */
+    public function searchRunning(): bool
+    {
+        return $this->search->running;
+    }
+
+    /** 排空搜索管道；返回本帧是否有「搜索完成」事件需要重绘（M4 R2） */
+    public function pollSearch(): bool
+    {
+        return $this->search->poll();
     }
 
     // ── 事件分发 ──
@@ -382,6 +402,9 @@ class App
             // GIT tab 交互（focus=sidebar 且当前在 GIT tab）：可视化图标 + 输入框 + 按钮，
             // 不再用字母快捷键。默认输入进提交信息框；+/- 暂存/取消暂存选中；Enter 提交。
             if ($this->focusPanel() === 'sidebar' && $this->sidebar->tabIndex === 1) {
+                if ($this->git->branchDropdownOpen) {
+                    return; // 分支下拉打开时，字符键不进提交框、也不做 +/- 操作
+                }
                 if ($event instanceof CodedKeyEvent) {
                     return; // GIT 的 Coded 键（Backspace/Enter/Esc/方向）由下面统一分支处理
                 }
@@ -397,6 +420,19 @@ class App
                 // 其余可打印字符进提交信息输入框
                 if (strlen($ch) === 1 && ord($ch) >= 32 && !($event->modifiers & KeyModifiers::CONTROL)) {
                     $this->git->commitMsg .= $ch;
+                }
+                return;
+            }
+            // SEARCH tab 交互（focus=sidebar 且当前在 SEARCH tab）：可打印字符进搜索框，
+            // 随时重新进入编辑态；Coded 键（Backspace/Enter/方向）由 onKey/searchKey 处理。
+            if ($this->focusPanel() === 'sidebar' && $this->sidebar->tabIndex === 2) {
+                if ($event instanceof CodedKeyEvent) {
+                    return; // 交给 onKey → searchKey 统一处理
+                }
+                $ch = $event->char;
+                if (strlen($ch) === 1 && ord($ch) >= 32 && !($event->modifiers & KeyModifiers::CONTROL)) {
+                    $this->search->query .= $ch;
+                    $this->search->editingQuery = true;
                 }
                 return;
             }
@@ -430,6 +466,17 @@ class App
                 $this->sidebar->onScroll(MouseEventKind::ScrollUp);
             } elseif ($this->focusPanel() === 'terminal') {
                 $this->terminal->scrollBy(-3);
+            }
+            return;
+        }
+        if ($e->kind === MouseEventKind::ScrollLeft || $e->kind === MouseEventKind::ScrollRight) {
+            $step = $e->kind === MouseEventKind::ScrollRight ? 4 : -4;
+            if ($this->focusPanel() === 'editor') {
+                $this->editor->onScrollH($step);
+            } elseif ($this->focusPanel() === 'sidebar') {
+                $this->sidebar->onScrollH($step);
+            } elseif ($this->focusPanel() === 'terminal') {
+                $this->terminal->onScrollH($step);
             }
             return;
         }

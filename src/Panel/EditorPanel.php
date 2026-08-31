@@ -46,6 +46,16 @@ final class EditorPanel
     /** 标签栏命中矩形：x0 => [x0, x1, path]，渲染时重建 */
     private array $tabRects = [];
 
+    /** 最近一次渲染的编辑器文本宽度（显示列），供 onScrollH/onChar 做范围钳制 */
+    private int $lastTextW = 0;
+
+    /**
+     * 横滚是否被「滚轮/触控板」钉住：true 时 content() 只做范围钳制、不把 scrollLeft
+     * 拉回光标（否则滚轮右滚会被每帧的「保证光标可见」立刻清零，横滚看不到效果）。
+     * 一旦发生光标移动/点击/输入/打开文件，复位为 false 恢复「光标跟随」。
+     */
+    private bool $scrollPinned = false;
+
     public function __construct(private App $shell)
     {
     }
@@ -111,15 +121,19 @@ final class EditorPanel
         if ($buf->scrollTop < 0) {
             $buf->scrollTop = 0;
         }
-        // 水平滚动：保证光标列可见
-        if ($buf->cursorCol < $buf->scrollLeft) {
-            $buf->scrollLeft = $buf->cursorCol;
-        }
-        if ($buf->cursorCol >= $buf->scrollLeft + $textW) {
-            $buf->scrollLeft = $buf->cursorCol - $textW + 1;
-        }
-        if ($buf->scrollLeft < 0) {
-            $buf->scrollLeft = 0;
+        // 水平滚动：
+        //  - 滚轮横滚（scrollPinned=true）时只做范围钳制，不把 scrollLeft 拉回光标（横滚才看得到效果）；
+        //  - 否则跟随光标（显示列单位，双向），保证直接设置/移动的光标始终可见。
+        // 两者都不再把字符索引 cursorCol 与显示列 scrollLeft/textW 混用（CJK 下比例不同）。
+        $this->lastTextW = $textW;
+        $lineCur = $buf->lines[$buf->cursorRow] ?? '';
+        if ($this->scrollPinned) {
+            $buf->scrollLeft = max(0, min($buf->scrollLeft, max(0, DisplayWidth::dispWidth($lineCur) - $textW)));
+            if ($buf->scrollLeft < 0) {
+                $buf->scrollLeft = 0;
+            }
+        } else {
+            $this->followBoth($buf, $textW);
         }
 
         // 高亮缓存（按 Buffer 修订号；整文件高亮一次，scrivo 需完整上下文）
@@ -172,6 +186,56 @@ final class EditorPanel
         return ParagraphWidget::fromLines(...$lines);
     }
 
+    /**
+     * 光标跟随（向右）：仅当光标落在可见区右侧之外时，把 scrollLeft 右移使光标进入视口。
+     * 不处理「光标在左侧之外」——那样会把自由横滚（滚轮）强行拉回，故由 followLeft 单独负责。
+     * 全部使用显示列单位。
+     */
+    private function followRight(Buffer $buf, int $textW): void
+    {
+        $line = $buf->lines[$buf->cursorRow] ?? '';
+        $cursorDisp = DisplayWidth::dispWidth(mb_substr($line, 0, $buf->cursorCol));
+        $g = mb_substr($line, $buf->cursorCol, 1);
+        $gw = $g === '' ? 0 : DisplayWidth::dispWidth($g);
+        if ($cursorDisp + $gw > $buf->scrollLeft + $textW) {
+            $buf->scrollLeft = max(0, $cursorDisp + $gw - $textW);
+        }
+        $this->clampScrollRange($buf, $line, $textW);
+    }
+
+    /** 光标跟随（向左）：仅当光标落在可见区左侧之外时，把 scrollLeft 左移使光标进入视口。 */
+    private function followLeft(Buffer $buf): void
+    {
+        $line = $buf->lines[$buf->cursorRow] ?? '';
+        $cursorDisp = DisplayWidth::dispWidth(mb_substr($line, 0, $buf->cursorCol));
+        if ($cursorDisp < $buf->scrollLeft) {
+            $buf->scrollLeft = $cursorDisp;
+        }
+        if ($buf->scrollLeft < 0) {
+            $buf->scrollLeft = 0;
+        }
+    }
+
+    /** 把 scrollLeft 钳到合法范围 [0, max(0, 行显示宽 - 视口宽)]，避免越界或滚出空白 */
+    private function clampScrollRange(Buffer $buf, string $line, int $textW): void
+    {
+        $maxW = DisplayWidth::dispWidth($line);
+        $max = max(0, $maxW - $textW);
+        if ($buf->scrollLeft < 0) {
+            $buf->scrollLeft = 0;
+        }
+        if ($buf->scrollLeft > $max) {
+            $buf->scrollLeft = $max;
+        }
+    }
+
+    /** 光标跟随（双向）：输入类操作使用——既防光标跑出右边缘，也会在光标落在左边缘外时拉回视口 */
+    private function followBoth(Buffer $buf, int $textW): void
+    {
+        $this->followRight($buf, $textW);
+        $this->followLeft($buf);
+    }
+
     /** 顶部标签栏（一行）：已开文件 + dirty 标记，当前 REVERSED；同时记录命中矩形供点击。 */
     private function tabLine(Area $editor, int $W): Line
     {
@@ -219,6 +283,7 @@ final class EditorPanel
         }
 
         $this->positionCursorAtClick($pos, $editor);
+        $this->scrollPinned = false; // 点击定位后恢复「光标跟随」
         $this->shell->focus('editor');
         return true;
     }
@@ -244,6 +309,13 @@ final class EditorPanel
         }
         $page = max(1, $areas['editor']->height - 4);
 
+        // 文本宽度（显示列），供光标跟随钳制
+        $ea = $areas['editor'];
+        $einner = $ea->inner(new Margin(1, 1));
+        $eW = max(0, $einner->width);
+        $eGutter = min($eW, $buf->maxLineNoWidth + 1);
+        $textW = max(0, $eW - $eGutter);
+
         switch ($e->code) {
             case KeyCode::Up:
                 $buf->moveUp();
@@ -252,16 +324,24 @@ final class EditorPanel
                 $buf->moveDown();
                 return true;
             case KeyCode::Left:
+                $this->scrollPinned = false;
                 $buf->moveLeft();
+                $this->followLeft($buf);
                 return true;
             case KeyCode::Right:
+                $this->scrollPinned = false;
                 $buf->moveRight();
+                $this->followRight($buf, $textW);
                 return true;
             case KeyCode::Home:
+                $this->scrollPinned = false;
                 $buf->moveHome();
+                $this->followLeft($buf);
                 return true;
             case KeyCode::End:
+                $this->scrollPinned = false;
                 $buf->moveEnd();
+                $this->followRight($buf, $textW);
                 return true;
             case KeyCode::PageUp:
                 $buf->pageUp($page);
@@ -286,6 +366,7 @@ final class EditorPanel
         if ($buf === null) {
             return false;
         }
+        $this->scrollPinned = false; // 输入即光标移动，恢复「光标跟随」
         // Ctrl+W 关闭当前 buffer（dirty 时弹确认）
         if (($e->modifiers & KeyModifiers::CONTROL) && strtolower($e->char) === 'w') {
             $this->shell->requestClose((string) $buf->path);
@@ -298,14 +379,17 @@ final class EditorPanel
         }
         if ($e->char === "\r" || $e->char === "\n") {
             $buf->insertNewline();
+            $this->followBoth($buf, $this->lastTextW);
             return true;
         }
         if ($e->char === "\x7f" || $e->char === "\x08") {
             $buf->backspace();
+            $this->followBoth($buf, $this->lastTextW);
             return true;
         }
         if (strlen($e->char) === 1 && ord($e->char) >= 32 && !($e->modifiers & KeyModifiers::CONTROL)) {
             $buf->insertChar($e->char);
+            $this->followBoth($buf, $this->lastTextW);
             return true;
         }
         return false;
@@ -322,6 +406,7 @@ final class EditorPanel
             $this->buffers[$path] = Buffer::fromFile($path);
         }
         $this->shell->buffer = $this->buffers[$path];
+        $this->scrollPinned = false; // 打开新文件：光标跟随（从列 0 显示）
         $this->shell->focus('editor');
     }
 
@@ -329,6 +414,7 @@ final class EditorPanel
     {
         if (isset($this->buffers[$path])) {
             $this->shell->buffer = $this->buffers[$path];
+            $this->scrollPinned = false;
         }
     }
 
@@ -347,6 +433,7 @@ final class EditorPanel
             $b->recompute();
         }
         $this->shell->buffer = $this->buffers[$path];
+        $this->scrollPinned = false;
         $this->shell->focus('editor');
     }
 
@@ -406,14 +493,34 @@ final class EditorPanel
         }
         $buf->cursorRow = $row;
 
-        $col = ($pos->x - $inner->position->x - $gutterW) + $buf->scrollLeft;
-        if ($col < 0) {
-            $col = 0;
+        // 鼠标列是「显示列」：先换算成绝对显示列，再转成字符索引（CJK 占 2 列，
+        // 不能直接当字符索引，否则点汉字列会错位）。
+        $absDisp = ($pos->x - $inner->position->x - $gutterW) + $buf->scrollLeft;
+        if ($absDisp < 0) {
+            $absDisp = 0;
         }
-        $lineLen = mb_strlen($buf->lines[$row]);
-        if ($col > $lineLen) {
-            $col = $lineLen;
+        $buf->cursorCol = DisplayWidth::mbDispToCharIndex($buf->lines[$row] ?? '', $absDisp);
+    }
+
+    /**
+     * 横向滚动（鼠标横向滚轮 / 触控板两指横滑）：调整 scrollLeft 视口偏移。
+     * content() 已有「保证光标列可见」的钳制——光标在视口内时不会回弹，
+     * 所以手动横向滚动在光标可见范围内持久生效；光标移出时才会被钳回。
+     */
+    public function onScrollH(int $delta): void
+    {
+        $buf = $this->shell->buffer;
+        if ($buf === null) {
+            return;
         }
-        $buf->cursorCol = $col;
+        $this->scrollPinned = true; // 自由横滚：本帧 content() 不再把 scrollLeft 拉回光标
+        $maxW = 0;
+        foreach ($buf->lines as $line) {
+            $w = DisplayWidth::dispWidth($line);
+            if ($w > $maxW) {
+                $maxW = $w;
+            }
+        }
+        $buf->scrollLeft = max(0, min($buf->scrollLeft + $delta, max(0, $maxW - 1)));
     }
 }

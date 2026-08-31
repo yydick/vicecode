@@ -85,4 +85,70 @@ final class DisplayWidth
         }
         return $s . str_repeat(' ', $disp - $d);
     }
+
+    /**
+     * 按显示列宽切片（横向滚动用）：跳过前 $skipDisp 显示列，再取 $disp 显示列。
+     * 在字素边界对齐（跨越 skip 边界的那个字素整段跳过），不会劈开 CJK 字符。
+     */
+    public static function mbSubDisp(string $s, int $skipDisp, int $disp): string
+    {
+        if ($disp <= 0) {
+            return '';
+        }
+        if ($skipDisp <= 0) {
+            return self::mbCutDisp($s, $disp);
+        }
+        $w = 0;
+        $out = '';
+        $collecting = false;
+        foreach (mb_str_split($s) as $g) {
+            $cw = self::dispWidth($g);
+            if (!$collecting) {
+                if ($w >= $skipDisp) {
+                    // 起点已落在 skip 边界（精确对齐）→ 从这里开始收集
+                    $collecting = true;
+                } elseif ($w + $cw <= $skipDisp) {
+                    // 整段落在 skip 区内 → 跳过
+                    $w += $cw;
+                    continue;
+                } else {
+                    // 宽字符跨越 skip 边界：整段跳过，保持字素边界干净
+                    $w += $cw;
+                    $collecting = true;
+                    continue;
+                }
+            }
+            if ($w + $cw > $skipDisp + $disp) {
+                break;
+            }
+            $out .= $g;
+            $w += $cw;
+        }
+        return $out;
+    }
+
+    /**
+     * 显示列宽 → 字符索引（反向切片，供鼠标点击定位）。
+     * 给定绝对显示列 $dispCol，返回落在该显示列上的字素（grapheme）起始字符索引；
+     * 落在某宽字素中间时，光标停在该字素起点（不劈开 CJK）。
+     * $dispCol <= 0 返回 0；$dispCol 超出行尾返回字符总数（光标落在行末之后）。
+     */
+    public static function mbDispToCharIndex(string $s, int $dispCol): int
+    {
+        if ($dispCol <= 0) {
+            return 0;
+        }
+        $w = 0;
+        $i = 0;
+        foreach (mb_str_split($s) as $g) {
+            $gw = self::dispWidth($g);
+            if ($w + $gw > $dispCol) {
+                // 点击落在字素 $i 的显示区间内 → 光标停在该字素起点
+                return $i;
+            }
+            $w += $gw;
+            $i++;
+        }
+        return $i; // 点击超出末尾 → 落在行末之后
+    }
 }

@@ -54,7 +54,7 @@ $renderer->render($renderer, $app->render($vp), $buffer, $buffer->area());
 $text = implode("\n", $buffer->toLines());
 
 echo "== 面板标题渲染 ==\n";
-foreach (['SIDEBAR', 'EDITOR', 'TERMINAL', 'AI CHAT', 'AI INPUT', 'Workbench · focus'] as $needle) {
+foreach (['SIDEBAR', 'EDITOR', 'TERMINAL', 'AI CHAT', 'AI INPUT', 'ViceCode · focus'] as $needle) {
     check(str_contains($text, $needle), "渲染输出包含标题: $needle");
 }
 

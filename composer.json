@@ -1,5 +1,5 @@
 {
-    "name": "yydick/tui",
+    "name": "yydick/vicecode",
     "type": "project",
     "require": {
         "php": ">=8.3",

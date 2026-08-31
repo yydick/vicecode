@@ -6,7 +6,7 @@ declare(strict_types=1);
  *
  * 分两组对照跑，因为 proc_close() 的退出码语义会被 Swoole HOOK 改写（见 C2）：
  *   A 组：无 HOOK
- *   B 组：SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO（bin/tui.php 实际使用的 flags）
+ *   B 组：SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO（bin/vicecode.php 实际使用的 flags）
  *
  * 运行：php tests/m2_probe_runner.php
  */
@@ -243,7 +243,7 @@ if (!$withHook && $flagVal === null) {
     exit($failed ? 1 : 0);
 }
 
-// 子进程分支：bin/tui.php 的主循环本就跑在 Coroutine\run 里，故照包一层
+// 子进程分支：bin/vicecode.php 的主循环本就跑在 Coroutine\run 里，故照包一层
 $flags = $flagVal ?? (SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO);
 Swoole\Runtime::enableCoroutine($flags);
 Swoole\Coroutine\run(static function (): void {

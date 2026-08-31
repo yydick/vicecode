@@ -52,6 +52,9 @@ final class TerminalPanel
 
     public int $scroll = 0;
 
+    /** 输出区横向滚动偏移（显示列），鼠标横向滚轮/触控板调整 */
+    public int $hScroll = 0;
+
     /** 视口是否贴住输出末尾（有手动滚动时置 false） */
     public bool $follow = true;
 
@@ -126,6 +129,18 @@ final class TerminalPanel
         $off = $this->follow ? $maxOff : min(max(0, $this->scroll), $maxOff);
         $this->scroll = $off;
 
+        // 横向滚动上界：当前视口内最宽行的显示列（多则截断、少则归零）
+        $maxW = 0;
+        foreach (array_slice($rows, $off, $outH) as $r) {
+            $w = DisplayWidth::dispWidth($r['text'] ?? '');
+            if ($w > $maxW) {
+                $maxW = $w;
+            }
+        }
+        // 上界钳到「最宽行 - 视口宽」：滚到最右时窗口正好停在行尾（含尾段 token），
+        // 若钳到 maxW-1 则只露出最后 1 列，长行尾部内容永远看不到。
+        $this->hScroll = max(0, min($this->hScroll, max(0, $maxW - $W)));
+
         $lines = [];
         foreach (array_slice($rows, $off, $outH) as $row) {
             $kind = $row['kind'] ?? ($row['err'] ? 'err' : 'out');
@@ -135,7 +150,7 @@ final class TerminalPanel
                 'hint' => Style::default()->fg(AnsiColor::DarkGray),
                 default => Style::default(),
             };
-            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbCutDisp($row['text'], $W), $style));
+            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($row['text'], $this->hScroll, $W), $style));
         }
         // 输出不足一屏时补空行，把输入行顶到面板底部
         while (count($lines) < $outH) {
@@ -307,6 +322,12 @@ final class TerminalPanel
     {
         $this->follow = false;
         $this->scroll = max(0, $this->scroll + $delta);
+    }
+
+    /** 横向滚动（鼠标横向滚轮 / 触控板）：调整输出区 hScroll，上界由 content() 按最宽行钳制 */
+    public function onScrollH(int $delta): void
+    {
+        $this->hScroll = max(0, $this->hScroll + $delta);
     }
 
     /** Ctrl+L：清空输出 */

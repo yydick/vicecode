@@ -10,7 +10,7 @@ declare(strict_types=1);
  *  - 最后 Esc 干净退出，终端还原。
  *
  * 运行：timeout 90 php tests/pty_term.php
- * 注意：禁止裸跑 bin/tui.php，一律走本脚本（外层加 timeout 兜底）。
+ * 注意：禁止裸跑 bin/vicecode.php，一律走本脚本（外层加 timeout 兜底）。
  */
 
 // pty 默认没有窗口尺寸，php-tui 会拿到 0×0 从而渲染不出任何内容
@@ -18,9 +18,9 @@ declare(strict_types=1);
 // 显式给 COLUMNS/LINES，让画面真的画出来，命令输出才可见、可断言。
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
 $env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40']);
-$proc = proc_open([PHP_BINARY, 'bin/tui.php'], $descs, $pipes, null, $env);
+$proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes, null, $env);
 if ($proc === false) {
-    echo "[FAIL] 无法启动 bin/tui.php\n";
+    echo "[FAIL] 无法启动 bin/vicecode.php\n";
     exit(1);
 }
 stream_set_blocking($pipes[0], false);

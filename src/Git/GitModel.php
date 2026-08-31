@@ -32,6 +32,15 @@ final class GitModel
     /** 当前子视图内的选中行 */
     public int $selIdx = 0;
 
+    /** 本地分支列表（分支切换下拉用） */
+    public array $branches = [];
+
+    /** 分支切换下拉是否展开 */
+    public bool $branchDropdownOpen = false;
+
+    /** 分支列表内选中行 */
+    public int $branchSelIdx = 0;
+
     /** 提交信息输入框内容（顶部输入框 + Commit 按钮方案，非模态提示） */
     public string $commitMsg = '';
 
@@ -97,6 +106,12 @@ final class GitModel
                 $this->log = GitClient::parseLog($logR['output']);
             }
 
+            // 本地分支列表（分支切换下拉用），随主刷新一起拉取
+            $brR = GitClient::exec($cwd, ['branch', '--format=%(refname:short)']);
+            if ($brR['code'] === 0) {
+                $this->branches = GitClient::parseBranches($brR['output']);
+            }
+
             $this->loading = false;
         });
     }
@@ -109,6 +124,75 @@ final class GitModel
             if ($r['code'] === 0) {
                 $this->branch = GitClient::parseBranch($r['output']);
             }
+        });
+    }
+
+    // ── R6 分支切换：列出本地分支 + 切换 ──
+
+    /** 拉取本地分支列表（分支切换下拉打开时调用） */
+    public function refreshBranches(): void
+    {
+        \go(function (): void {
+            $r = GitClient::exec($this->cwd(), ['branch', '--format=%(refname:short)']);
+            if ($r['code'] === 0) {
+                $this->branches = GitClient::parseBranches($r['output']);
+                // 选中行默认定位到当前分支
+                foreach ($this->branches as $i => $b) {
+                    if ($b === $this->branch) {
+                        $this->branchSelIdx = $i;
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /** 打开分支切换下拉（与提交下拉互斥）。分支列表已由 refresh() 随主刷新拉取。 */
+    public function openBranchDropdown(): void
+    {
+        $this->dropdownOpen = false;
+        $this->branchDropdownOpen = true;
+        $this->branchSelIdx = 0;
+        foreach ($this->branches as $i => $b) {
+            if ($b === $this->branch) {
+                $this->branchSelIdx = $i;
+                break;
+            }
+        }
+    }
+
+    /** 分支列表内移动选中行 */
+    public function moveBranchSelection(int $delta): void
+    {
+        $n = count($this->branches);
+        if ($n === 0) {
+            return;
+        }
+        $this->branchSelIdx = max(0, min($n - 1, $this->branchSelIdx + $delta));
+    }
+
+    /**
+     * 切换到指定本地分支（git switch）。
+     * 与当前分支相同、或为空则直接关闭下拉；失败提示错误（如未提交改动阻挡切换）。
+     * 成功后刷新分支名 + status + 分支列表，并关闭下拉。
+     */
+    public function switchBranch(string $name): void
+    {
+        if ($name === '' || $name === $this->branch) {
+            $this->branchDropdownOpen = false;
+            return;
+        }
+        \go(function () use ($name): void {
+            $r = GitClient::exec($this->cwd(), ['switch', $name]);
+            if ($r['code'] !== 0) {
+                $this->shell->setMessage($this->shell->t('git.switch_fail', ['msg' => $r['output'] ?: 'code ' . $r['code']]));
+                return;
+            }
+            $this->shell->setMessage($this->shell->t('git.switch_done', ['branch' => $name]));
+            $this->branchDropdownOpen = false;
+            $this->refreshBranch();
+            $this->refresh();
+            $this->refreshBranches();
         });
     }
 

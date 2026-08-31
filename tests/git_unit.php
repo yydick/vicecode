@@ -76,6 +76,13 @@ echo "== parseBranch ==\n";
 check(GitClient::parseBranch("feature/x\n") === 'feature/x', '分支名去尾部换行');
 check(GitClient::parseBranch('') === '(none)', '空分支回退 (none)');
 
+// ─────────────── 3b) parseBranches（R6） ───────────────
+echo "== parseBranches ==\n";
+$branchOut = implode("\n", ['main', 'dev', 'feature/x']) . "\n";
+$branches = GitClient::parseBranches($branchOut);
+check($branches === ['main', 'dev', 'feature/x'], '解析出 3 个本地分支（无 * 标记）');
+check(GitClient::parseBranches("  \nmain\n\n") === ['main'], '空行被忽略');
+
 // ─────────────── 4) GitFileStatus 显示 ───────────────
 echo "== GitFileStatus 显示 ==\n";
 $r = new GitFileStatus('b.php', 'R', '', 'a.php');
@@ -223,6 +230,29 @@ $app2->confirm = ['kind' => 'discard', 'path' => '/nonexistent/path/xyz.php'];
 $app2->handle(CharKeyEvent::new('y', 0), $vp);
 check($app2->confirm === null, 'y 确认后关闭确认框（丢弃已派发）');
 
+// ─────────────── 7h) R6 分支切换下拉 ───────────────
+echo "== R6 分支切换下拉 ==\n";
+$app3 = new App();
+$app3->sidebar->tabIndex = 1;
+$app3->git->setInRepo(true);
+$app3->git->branch = 'main';
+$app3->git->branches = ['main', 'dev', 'feature/x'];
+$sb3 = $app3->areas($vp)['sidebar'];
+$branchRow = $sb3->position->y + 1 + 2 + 0; // 上边框 + tab/分隔偏移 + GIT 内容行0
+$app3->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $sb3->position->x + 1, $branchRow, 0), $vp);
+check($app3->git->branchDropdownOpen, '点分支行打开分支切换下拉');
+$bufB = TuiBuffer::empty($vp);
+$renderer->render($renderer, $app3->render($vp), $bufB, $bufB->area());
+$txtB = implode("\n", $bufB->toLines());
+check(str_contains($txtB, 'main') && str_contains($txtB, 'feature/x'), '下拉渲染出本地分支列表');
+check(str_contains($txtB, '切换分支'), '下拉标题显示「切换分支」');
+// 键盘 ↓ 移动选中
+$app3->handle(CodedKeyEvent::new(KeyCode::Down, 0), $vp);
+check($app3->git->branchSelIdx === 1, '↓ 在分支下拉内移动选中到 dev');
+// Esc 关闭
+$app3->handle(CodedKeyEvent::new(KeyCode::Esc, 0), $vp);
+check(!$app3->git->branchDropdownOpen, 'Esc 关闭分支下拉');
+
 echo $failed ? "\nM3 单测 FAIL\n" : "\nM3 单测全部 PASS\n";
 
 // ─────────────── 6) 异步刷新真跑 git（协程内，非 tty） ───────────────
@@ -245,6 +275,32 @@ echo "== 异步刷新（真实 git 仓库） ==\n";
         }
     }
     check($hasModified, 'status 含已修改/已暂存条目（本仓库有改动）');
+});
+
+// ─────────────── 9) 分支切换真实切分支（独立临时 git 仓库） ───────────────
+echo "== 分支切换（真实 git 仓库） ==\n";
+\Swoole\Coroutine\run(function () use (&$failed): void {
+    $dir = sys_get_temp_dir() . '/vicecode_br_' . uniqid();
+    mkdir($dir);
+    chdir($dir);
+    exec('git init --initial-branch=main -q'
+        . ' && git config user.email t@t && git config user.name t'
+        . ' && echo a > f && git add f && git commit -qm init'
+        . ' && git branch feature');
+    $app = new App();
+    $app->git->refresh();
+    $app->git->refreshBranches();
+    \Swoole\Coroutine\System::sleep(0.4);
+    check($app->git->branch === 'main', 'temp repo 当前分支 main: ' . $app->git->branch);
+    check(in_array('feature', $app->git->branches, true), '检测到 feature 分支: ' . implode(',', $app->git->branches));
+    $app->git->switchBranch('feature');
+    \Swoole\Coroutine\System::sleep(0.4);
+    check($app->git->branch === 'feature', 'switchBranch 切到 feature: ' . $app->git->branch);
+    $app->git->switchBranch('main');
+    \Swoole\Coroutine\System::sleep(0.4);
+    check($app->git->branch === 'main', 'switchBranch 切回 main: ' . $app->git->branch);
+    chdir('/');
+    exec('rm -rf ' . escapeshellarg($dir));
 });
 
 echo $failed ? "\nM3 单测 FAIL\n" : "\nM3 单测全部 PASS\n";

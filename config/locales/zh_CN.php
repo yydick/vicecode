@@ -5,7 +5,7 @@ declare(strict_types=1);
  * 简体中文语言包。只覆盖需要翻译的项；缺失 key 由 Translator 回退到 en.php。
  */
 return [
-    'app.title'        => '工作台',
+    'app.title'        => 'ViceCode',
 
     'panel.sidebar'    => '侧栏',
     'panel.editor'     => '编辑器',
@@ -69,7 +69,18 @@ return [
     'git.push_done'      => '已推送',
     'git.push_fail'      => '推送失败：{msg}',
     'git.op_fail'        => '操作失败：{msg}',
+    'git.branch_pick'    => '切换分支',
+    'git.no_branch'      => '（无其它分支）',
+    'git.switch_done'    => '已切换到分支：{branch}',
+    'git.switch_fail'    => '切换分支失败：{msg}',
     'git.hint'           => '[a]全暂存 [s]暂存 [c]提交 [p]推送 [L]日志 [Enter]diff [R]刷新',
-    'search.placeholder' => '搜索（M4 接入）',
-    'search.prompt'      => ' > ',
+    'search.placeholder'      => '搜索文件内容…',
+    'search.hint'             => '按回车搜索…',
+    'search.prompt'           => ' > ',
+    'search.status_searching' => '搜索中…',
+    'search.status_no_results' => '无匹配结果',
+    'search.results'          => '{n} 个匹配 / {files} 个文件',
+    'search.status_error'     => '搜索出错：{msg}',
+    'search.truncated'        => '已截断（前 {n} 条），请缩小范围',
+    'search.empty_query'      => '请输入搜索关键词',
 ];

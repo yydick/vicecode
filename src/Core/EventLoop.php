@@ -55,7 +55,7 @@ final class EventLoop
             Actions::alternateScreenEnable(),
             Actions::enableMouseCapture(),
             Actions::cursorHide(),
-            Actions::setTitle('TUI Workbench')
+            Actions::setTitle('ViceCode')
         );
         $this->terminal->flush();
 

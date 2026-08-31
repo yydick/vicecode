@@ -82,9 +82,9 @@ $oc = $openCol + 1; $or = $itemRow + 1;
 $dc = $discardCol + 1; $dr = $itemRow + 1;
 
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
-$proc = proc_open([PHP_BINARY, 'bin/tui.php'], $descs, $pipes, null, $env);
+$proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes, null, $env);
 if ($proc === false) {
-    echo "[FAIL] 无法启动 bin/tui.php\n";
+    echo "[FAIL] 无法启动 bin/vicecode.php\n";
     exit(1);
 }
 stream_set_blocking($pipes[0], false);
@@ -138,9 +138,24 @@ check(true, '点列表文件名打开 diff 未崩溃');
 // 点行首 ▦ = 在编辑器打开文件（焦点切到 editor）
 fwrite($pipes[0], "\x1b[<0;{$oc};{$or}M");
 fwrite($pipes[0], "\x1b[<0;{$oc};{$or}m");
-usleep(400000);
-$outOpen = normalize($readPty($pipes[1], 8192));
-check(str_contains($outOpen, 'editor'), '点 ▦ 在编辑器打开文件（焦点=EDITOR）');
+usleep(250000);
+// 多次读取累积，避免只抓到半屏重绘（pty 输出是增量帧）
+$outOpen = '';
+for ($i = 0; $i < 4; $i++) {
+    $outOpen .= normalize($readPty($pipes[1], 16384));
+    usleep(200000);
+}
+// 编辑器会显示打开的文件名；用首条 git status 计算期望值（与 normalize 同归一化），
+// 比依赖状态栏焦点指示更稳（删除/重命名类文件打开后编辑器近空，状态栏可能未入帧）。
+$firstStatus = trim((string) shell_exec('git status --porcelain 2>/dev/null | head -1'));
+$firstPath = '';
+if ($firstStatus !== '') {
+    $firstPath = preg_split('/\s+/', trim($firstStatus), 2)[1] ?? '';
+}
+$expectName = $firstPath !== '' ? basename($firstPath) : '';
+$expectNorm = $expectName !== '' ? normalize($expectName) : '';
+check($expectNorm !== '' && str_contains($outOpen, $expectNorm),
+    '点 ▦ 在编辑器打开文件（捕获到文件名: ' . $expectName . '）');
 
 // 点行首 ✕ = 丢弃工作区改动，弹 y/n 确认框（不可逆，这里只取消、绝不确认 y）
 fwrite($pipes[0], "\x1b[<0;{$dc};{$dr}M");
