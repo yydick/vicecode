@@ -29,6 +29,10 @@ return [
     'status.mode'      => '模式',
     'status.mode_edit' => '编辑',
     'status.quit'      => 'Ctrl+Q 退出',
+    'status.l_sidebar' => '侧栏',
+    'status.l_ai'      => 'AI',
+    'status.l_editor'  => '编辑',
+    'status.l_input'   => '输入',
 
     'ai.input_hint'    => '（回车发送）',
 

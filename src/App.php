@@ -8,6 +8,7 @@ use App\Core\KeyBindings;
 use App\Core\KeyInput;
 use App\Core\Lifecycle;
 use App\Core\LayoutFactory;
+use App\Core\LayoutConfig;
 use App\Core\Theme;
 use App\Editor\Buffer;
 use App\Ai\ChatModel;
@@ -86,6 +87,9 @@ class App
      */
     private const DOUBLE_CLICK_MS = 400;
 
+    /** 分隔条命中容差（列/行）：鼠标落在边界 ±1 内即算抓住分隔条，太窄不好点 */
+    private const DRAG_TOL = 1;
+
     /** @var array<string,Buffer> */
     private array $buffers = [];
     public ?Buffer $buffer = null;
@@ -113,6 +117,18 @@ class App
 
     /** 当前配色主题（M6 R4）。面板一律通过 $this->theme->style('role') 取色，不硬编码颜色。 */
     public Theme $theme;
+
+    /**
+     * 可变布局配置（R5 拖拽分隔条）。侧栏宽 / AI 宽 / 编辑器比例 / AI 输入框高都从这里读，
+     * 拖拽分隔条时整体替换本引用。仅本次会话有效，持久化留给 R7。
+     */
+    public LayoutConfig $layout;
+
+    /**
+     * 拖拽分隔条进行中的状态：null=未拖拽；否则 ['which'=>分隔条名,'horizontal'=>是否水平分隔条]。
+     * which ∈ {'sidebar','ai','center','ai_input'}。由 handleMouse 的 Down/Drag/Up 维护。
+     */
+    private ?array $drag = null;
 
     /** 帮助页覆盖层（M6 R2）：全屏居中，打开期间独占键盘 */
     public HelpPanel $help;
@@ -147,6 +163,7 @@ class App
         $this->help = new HelpPanel($this);
         $this->menuBar = new MenuBarPanel($this);
         $this->theme = Theme::default();
+        $this->layout = new LayoutConfig();
         // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function () {
             $this->chat->shutdown();
@@ -253,7 +270,7 @@ class App
         );
         if ($key !== $this->areaKey) {
             $this->areaKey = $key;
-            $this->areaCache = LayoutFactory::split($vp);
+            $this->areaCache = LayoutFactory::split($vp, $this->layout);
         }
         return $this->areaCache;
     }
@@ -325,7 +342,7 @@ class App
 
         $center = GridWidget::default()
             ->direction(Direction::Vertical)
-            ->constraints(...LayoutFactory::centerConstraints())
+            ->constraints(...LayoutFactory::centerConstraints($this->layout))
             ->widgets($editor, $terminal);
 
         // ── AI Stream ──
@@ -353,13 +370,13 @@ class App
 
         $ai = GridWidget::default()
             ->direction(Direction::Vertical)
-            ->constraints(...LayoutFactory::aiConstraints())
+            ->constraints(...LayoutFactory::aiConstraints($this->layout))
             ->widgets($aiStream, $aiInput);
 
         // ── 主区 ──
         $main = GridWidget::default()
             ->direction(Direction::Horizontal)
-            ->constraints(...LayoutFactory::mainConstraints())
+            ->constraints(...LayoutFactory::mainConstraints($this->layout))
             ->widgets($sidebar, $center, $ai);
 
         // ── StatusBar ──
@@ -539,7 +556,7 @@ class App
         // 会顺带移动编辑器光标、按 Enter 会插进文档。Esc/方向/Enter 全归菜单自己。
         if ($this->menuBar->isOpen()) {
             if ($event instanceof MouseEvent) {
-                $this->handleMouse($event, $a); // 点击命中由 handleMouse 内部判定
+                $this->handleMouse($event, $a, $vp); // 点击命中由 handleMouse 内部判定
                 return;
             }
             if ($event instanceof CodedKeyEvent && $this->menuBar->onKey($event)) {
@@ -588,7 +605,7 @@ class App
         }
 
         if ($event instanceof MouseEvent) {
-            $this->handleMouse($event, $a);
+            $this->handleMouse($event, $a, $vp);
             return;
         }
 
@@ -697,8 +714,25 @@ class App
         }
     }
 
-    private function handleMouse(MouseEvent $e, array $a): void
+    private function handleMouse(MouseEvent $e, array $a, Area $vp): void
     {
+        // ── 拖拽分隔条（R5）：按住左键移动 = Drag，松开 = Up ──
+        // 这两类在 Down 之前拦截：Drag 时若正处于拖拽则更新布局；Up 一律结束拖拽。
+        // 没按按钮的 Moved 悬停不触发拖拽（避免误拖）。
+        if ($e->kind === MouseEventKind::Drag) {
+            if ($this->drag !== null) {
+                $this->updateDrag($e, $a, $vp);
+            }
+            return;
+        }
+        if ($e->kind === MouseEventKind::Up) {
+            $this->drag = null;
+            return;
+        }
+        if ($e->kind === MouseEventKind::Moved) {
+            return;
+        }
+
         if ($e->kind === MouseEventKind::ScrollDown) {
             if ($this->focusPanel() === 'editor') {
                 $this->buffer?->pageDown(3);
@@ -748,8 +782,125 @@ class App
                     return;
                 }
             }
+            // 分隔条拖拽优先于普通点击：命中任一条分隔条就进入拖拽，不触发聚焦/打开。
+            if ($this->tryStartDrag($e, $a)) {
+                return;
+            }
             $this->handleClick($e, $a);
         }
+    }
+
+    /**
+     * 判定鼠标按下是否命中某条分隔条。命中则记下拖拽目标并返回 true（调用方据此不再走点击逻辑）。
+     * 四条可拖边界：侧栏右、AI 左（竖直）；编辑器下、AI 输入框上（水平）。
+     * 命中窗口取边界 ±DRAG_TOL，且限制在对应面板的范围内，避免误抓相邻面板内部。
+     * @param array<string,Area> $a
+     */
+    private function tryStartDrag(MouseEvent $e, array $a): bool
+    {
+        $tol = self::DRAG_TOL;
+        $mainTop = $a['sidebar']->position->y;
+        $mainBottom = $a['status']->position->y; // 状态栏起始 = 主区底部
+
+        // 竖分隔条①：侧栏右边界（x = sidebar.x + sidebar.width）
+        $sidebarEdge = $a['sidebar']->position->x + $a['sidebar']->width;
+        if (abs($e->column - $sidebarEdge) <= $tol
+            && $e->row >= $mainTop && $e->row < $mainBottom) {
+            $this->drag = ['which' => 'sidebar', 'horizontal' => false];
+            return true;
+        }
+
+        // 竖分隔条②：AI 列左边界（x = ai_stream.x）
+        $aiEdge = $a['ai_stream']->position->x;
+        if (abs($e->column - $aiEdge) <= $tol
+            && $e->row >= $mainTop && $e->row < $mainBottom) {
+            $this->drag = ['which' => 'ai', 'horizontal' => false];
+            return true;
+        }
+
+        // 横分隔条①：编辑器下边界（y = editor.y + editor.height），且仅在中间列水平范围内
+        $centerX = $a['editor']->position->x;
+        $centerW = $a['editor']->width;
+        $editorEdge = $a['editor']->position->y + $a['editor']->height;
+        if (abs($e->row - $editorEdge) <= $tol
+            && $e->column >= $centerX && $e->column < $centerX + $centerW) {
+            $this->drag = ['which' => 'center', 'horizontal' => true];
+            return true;
+        }
+
+        // 横分隔条②：AI 消息流下边界（y = ai_stream.y + ai_stream.height），且在 AI 列水平范围内
+        $aiX = $a['ai_stream']->position->x;
+        $aiW = $a['ai_stream']->width;
+        $aiEdgeY = $a['ai_stream']->position->y + $a['ai_stream']->height;
+        if (abs($e->row - $aiEdgeY) <= $tol
+            && $e->column >= $aiX && $e->column < $aiX + $aiW) {
+            $this->drag = ['which' => 'ai_input', 'horizontal' => true];
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * 拖拽进行中：按当前鼠标坐标更新 LayoutConfig。任何交叉约束（侧栏+AI 不能挤没中间列、
+     * AI 输入框不能吞掉消息流）都在这里用视口/相邻面板几何算好上下界，再喂进 with*。
+     * 末尾使布局矩形缓存失效，下一帧 render 即按新尺寸重算。
+     * @param array<string,Area> $a
+     */
+    private function updateDrag(MouseEvent $e, array $a, Area $vp): void
+    {
+        switch ($this->drag['which']) {
+            case 'sidebar':
+                // 新宽度 = 鼠标列 - 侧栏起点；上界受「视口 - AI 宽 - 中间列最小宽」限制
+                $maxW = $vp->width - $this->layout->aiWidth - LayoutConfig::MIN_CENTER;
+                $w = max(LayoutConfig::MIN_SIDEBAR, min($e->column - $a['sidebar']->position->x, $maxW));
+                $this->layout = $this->layout->withSidebarWidth($w);
+                break;
+            case 'ai':
+                // 新宽度 = 视口右沿 - 鼠标列
+                $maxW = $vp->width - $this->layout->sidebarWidth - LayoutConfig::MIN_CENTER;
+                $w = max(LayoutConfig::MIN_AI, min(($vp->position->x + $vp->width) - $e->column, $maxW));
+                $this->layout = $this->layout->withAiWidth($w);
+                break;
+            case 'center':
+                // 比例 = 鼠标行到编辑器顶 / 中间列总高
+                $centerH = $a['editor']->height + $a['terminal']->height;
+                $ratio = $centerH > 0 ? ($e->row - $a['editor']->position->y) / $centerH : 0.5;
+                $this->layout = $this->layout->withEditorRatio($ratio);
+                break;
+            case 'ai_input':
+                // 新高度 = AI 列底沿 - 鼠标行；上界受「AI 列总高 - 消息流最小行」限制
+                $aiH = $a['ai_stream']->height + $a['ai_input']->height;
+                $maxH = $aiH - LayoutConfig::MIN_AI_STREAM;
+                $h = max(LayoutConfig::MIN_AI_INPUT, min(($a['ai_stream']->position->y + $aiH) - $e->row, $maxH));
+                $this->layout = $this->layout->withAiInputHeight($h);
+                break;
+        }
+        // 视口未变但布局变了：清缓存，下一帧 areas() 用新 layout 重算矩形
+        $this->areaKey = '';
+    }
+
+    /** 是否正在拖拽分隔条（供状态栏决定是否显示尺寸） */
+    public function isDragging(): bool
+    {
+        return $this->drag !== null;
+    }
+
+    /** 拖拽时状态栏显示的布局摘要（如「侧栏30 AI45 编辑60% 输入3」），走 i18n */
+    public function layoutSummary(): string
+    {
+        $c = $this->layout;
+        return sprintf(
+            '%s%d %s%d %s%d%% %s%d',
+            $this->t('status.l_sidebar'),
+            $c->sidebarWidth,
+            $this->t('status.l_ai'),
+            $c->aiWidth,
+            $this->t('status.l_editor'),
+            (int) round($c->editorRatio * 100),
+            $this->t('status.l_input'),
+            $c->aiInputHeight,
+        );
     }
 
     private function handleCoded(CodedKeyEvent $e, array $a): void

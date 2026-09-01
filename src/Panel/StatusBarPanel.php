@@ -112,6 +112,10 @@ final class StatusBarPanel
             ? '—'
             : $spec->label . '/' . $spec->model . ($this->shell->chat->isStreaming() ? ' …' : '');
 
+        // R5 拖拽分隔条时：把当前各面板尺寸显示在状态栏（高优先级，确保可见）。
+        // 非拖拽时 t 为空，join() 会跳过，不占空间。
+        $layout = $this->shell->isDragging() ? $this->shell->layoutSummary() : '';
+
         return [
             // k=标识, p=丢弃优先级(大者留), o=显示顺序(小者靠左)
             //
@@ -130,6 +134,8 @@ final class StatusBarPanel
             // ⚠️ tab 不能排太低：侧栏 tab **只显示图标不显示文字**，状态栏这行是它
             // 唯一的文字标识，丢了用户就分不清当前在哪个 tab。
             ['k' => 'tab',     'p' => 75,  'o' => 6, 't' => $t('status.tab') . '=' . $this->shell->sidebar->tabLabel()],
+            // 拖拽尺寸段：排最右、优先级最高，拖拽时必定显示，松手即消失。
+            ['k' => 'layout',  'p' => 95,  'o' => 11, 't' => $layout],
         ];
     }
 

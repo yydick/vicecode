@@ -33,6 +33,10 @@ return [
     'status.mode'      => 'Mode',
     'status.mode_edit' => 'Edit',
     'status.quit'      => 'Ctrl+Q quit',
+    'status.l_sidebar' => 'side',
+    'status.l_ai'      => 'AI',
+    'status.l_editor'  => 'edit',
+    'status.l_input'   => 'input',
 
     // AI 输入框提示
     'ai.input_hint'    => '(Enter send)',
