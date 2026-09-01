@@ -16,6 +16,7 @@ use App\I18n\Translator;
 use App\Panel\AiPanel;
 use App\Panel\EditorPanel;
 use App\Panel\HelpPanel;
+use App\Panel\MenuBarPanel;
 use App\Panel\SidebarPanel;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
@@ -24,6 +25,7 @@ use App\Text\DisplayWidth;
 use App\Text\SpanClip;
 use PhpTui\Term\Event\CharKeyEvent;
 use PhpTui\Term\Event\CodedKeyEvent;
+use PhpTui\Term\Event\FunctionKeyEvent;
 use PhpTui\Term\Event\MouseEvent;
 use PhpTui\Term\KeyCode;
 use PhpTui\Term\KeyModifiers;
@@ -115,6 +117,9 @@ class App
     /** 帮助页覆盖层（M6 R2）：全屏居中，打开期间独占键盘 */
     public HelpPanel $help;
 
+    /** 顶部菜单栏（Backlog 接入）：F10 或点击激活，不进入焦点循环 */
+    public MenuBarPanel $menuBar;
+
     /**
      * AI 对话状态（M5）：消息历史 / 流式生成 / Provider 选择。
      * 面板（AiPanel）只读它，不持有内容——与 GitModel / SearchModel 同构。
@@ -140,6 +145,7 @@ class App
         $this->search = new SearchModel($this);
         $this->chat = new ChatModel($this);
         $this->help = new HelpPanel($this);
+        $this->menuBar = new MenuBarPanel($this);
         $this->theme = Theme::default();
         // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function () {
@@ -260,16 +266,25 @@ class App
     public function render(Area $vp): Widget
     {
         $base = $this->build($this->areas($vp));
-        if (!$this->help->isOpen()) {
+        $overlays = [];
+        // 菜单下拉是覆盖层：底层 UI 先画，下拉浮在主区之上（与帮助页同机制）。
+        // 菜单与帮助同一时刻只有一个打开，故叠加顺序无所谓。
+        if ($this->menuBar->isOpen()) {
+            $overlays[] = $this->menuBar->dropdownWidget($vp->width, $vp->height);
+        }
+        if ($this->help->isOpen()) {
+            $overlays[] = $this->help->widget($vp->width, $vp->height);
+        }
+        if ($this->help->isAboutOpen()) {
+            $overlays[] = $this->help->aboutWidget($vp->width, $vp->height);
+        }
+        if ($overlays === []) {
             return $base;
         }
         // 覆盖层：CompositeWidget 把多个 widget 渲染到**同一个 area**
         // （php-tui 注释原话是 "useful for showing dialogues"），底层 UI 先画、
-        // 帮助页再浮在上面。这样底下仍看得见自己在哪个面板。
-        return CompositeWidget::fromWidgets(
-            $base,
-            $this->help->widget($vp->width, $vp->height),
-        );
+        // 覆盖层再浮在上面。这样底下仍看得见自己在哪个面板。
+        return CompositeWidget::fromWidgets($base, ...$overlays);
     }
 
     public function build(array $a): Widget
@@ -354,9 +369,24 @@ class App
             ->borders(Borders::NONE)
             ->widget($this->statusBar->content(max(0, ($a['status']->width ?? 0))));
 
+        // 根 Grid 的段数必须与 split() 切出的矩形数量一致：矮视口不画菜单栏时
+        // split() 只返回 main+status 两段，这里也必须只放两个 widget，否则 php-tui
+        // 会用多余约束去切不存在的 area（抛 OutOfBoundsException）。
+        $withMenu = isset($a['menu']);
+        if ($withMenu) {
+            $menu = BlockWidget::default()
+                ->borders(Borders::NONE)
+                ->widget($this->menuBar->content($a['menu']));
+            // 有菜单栏时 rootConstraints() 默认按高视口返回 3 段（menu/main/status），与 3 个 widget 对应
+            return GridWidget::default()
+                ->direction(Direction::Vertical)
+                ->constraints(...LayoutFactory::rootConstraints())
+                ->widgets($menu, $main, $status);
+        }
+        // 矮视口不画菜单栏：rootConstraints(0) 返回 2 段（main/status），与 2 个 widget 对应
         return GridWidget::default()
             ->direction(Direction::Vertical)
-            ->constraints(...LayoutFactory::rootConstraints())
+            ->constraints(...LayoutFactory::rootConstraints(0))
             ->widgets($main, $status);
     }
 
@@ -419,6 +449,71 @@ class App
         $this->setMessage($this->t('status.theme') . '=' . $this->theme->label);
     }
 
+    // ── 语言（顶部菜单「视图 → 语言」）────────────────────
+
+    /** 在可用语言间环形切换；setMessage 提示当前语言。 */
+    public function toggleLocale(): void
+    {
+        $langs = $this->i18n->available();
+        $cur = array_search($this->i18n->locale(), $langs, true);
+        $next = $langs[(($cur === false ? 0 : $cur) + 1) % count($langs)];
+        $this->i18n->setLocale($next);
+        $this->setMessage($this->t('status.lang') . '=' . $next);
+    }
+
+    // ── 菜单动作（顶部菜单栏每项都对应这里一个真实方法）──
+
+    /** 执行菜单项 action（见 MenuBarPanel::definitions 的 action 字段）。 */
+    public function menuAction(string $id): void
+    {
+        switch ($id) {
+            case 'file.open':
+                $this->focus('sidebar');
+                break;
+            case 'file.save':
+                $this->editor->save();
+                break;
+            case 'file.close':
+                if ($this->buffer !== null) {
+                    $this->requestClose((string) $this->buffer->path);
+                }
+                break;
+            case 'file.quit':
+                $this->lifecycle->requestQuit();
+                break;
+            case 'view.theme':
+                $this->cycleTheme();
+                break;
+            case 'view.focus.editor':
+                $this->focus('editor');
+                break;
+            case 'view.focus.terminal':
+                $this->focus('terminal');
+                break;
+            case 'view.focus.explorer':
+                $this->focus('sidebar');
+                break;
+            case 'view.focus.ai':
+                $this->focus('ai_stream');
+                break;
+            case 'view.lang':
+                $this->toggleLocale();
+                break;
+            case 'term.cancel':
+                $this->terminal->cancel();
+                break;
+            case 'term.clear':
+                $this->terminal->clear();
+                break;
+            case 'help.shortcuts':
+                $this->help->open();
+                break;
+            case 'help.about':
+                $this->help->openAbout();
+                break;
+        }
+    }
+
     public function handle($event, Area $vp): void
     {
         // 未保存确认进行中：拦截所有输入，只响应 y/n/Esc（及 Ctrl+Q 视为确认）
@@ -429,15 +524,57 @@ class App
 
         $a = $this->areas($vp);
 
-        // 帮助页打开期间**独占键盘**：不往下层面板分发，否则在帮助页里按 q 会顺带
-        // 把应用退了（q 是全局"非输入态退出"）。滚轮也交给它翻页。
-        if ($this->help->isOpen()) {
+        // F10 激活/收起菜单栏：真实 pty 下是 **FunctionKeyEvent**（独立类，带 number 属性），
+        // 不是 CodedKeyEvent——php-tui 把 F1..F12 都归到 FunctionKeyEvent(number=N)，
+        // 而 KeyCode 枚举没有 F1..F12 成员。故这里必须用 FunctionKeyEvent 判定，
+        // 放在菜单独占拦截之前，确保「打开时再按 F10 收起」也能命中。
+        // （之前误写成 CodedKeyEvent + $event->number，而 CodedKeyEvent 根本没有 number，
+        //  导致 F10 在真实 pty 下完全不生效——只有 headless 单测喂 FunctionKeyEvent 才暴露。）
+        if ($event instanceof FunctionKeyEvent && $event->number === 10) {
+            $this->menuBar->toggle();
+            return;
+        }
+
+        // 菜单栏打开期间**独占键盘**（模态）：不往下层面板分发，否则在菜单里按方向键
+        // 会顺带移动编辑器光标、按 Enter 会插进文档。Esc/方向/Enter 全归菜单自己。
+        if ($this->menuBar->isOpen()) {
+            if ($event instanceof MouseEvent) {
+                $this->handleMouse($event, $a); // 点击命中由 handleMouse 内部判定
+                return;
+            }
+            if ($event instanceof CodedKeyEvent && $this->menuBar->onKey($event)) {
+                return;
+            }
+            // 孤立 ESC 在真实 pty 下常被解析成 CharKeyEvent(char="\x1b") 而非 CodedKeyEvent
+            // （解析器要等一会儿才区分「独立 Esc」与「转义序列开头」），故补一路：
+            // 把「ESC 字符」当作 Esc 键关掉菜单，否则菜单关不掉。
+            if ($event instanceof CharKeyEvent && $event->char === "\x1b") {
+                $this->menuBar->close();
+                return;
+            }
+            return; // 其余字符键一律吞掉
+        }
+
+        // 帮助页/关于页打开期间**独占键盘**：不往下层面板分发，否则在帮助页里按 q
+        // 会顺带把应用退了（q 是全局"非输入态退出"）。滚轮交给帮助页翻页。
+        if ($this->help->isOpen() || $this->help->isAboutOpen()) {
             $viewH = $this->help->viewHeightFor($vp->width, $vp->height);
             if ($event instanceof MouseEvent) {
-                if ($event->kind === MouseEventKind::ScrollUp) {
-                    $this->help->scrollBy(-3);
-                } elseif ($event->kind === MouseEventKind::ScrollDown) {
-                    $this->help->scrollBy(3);
+                if ($this->help->isOpen()) {
+                    if ($event->kind === MouseEventKind::ScrollUp) {
+                        $this->help->scrollBy(-3);
+                    } elseif ($event->kind === MouseEventKind::ScrollDown) {
+                        $this->help->scrollBy(3);
+                    }
+                }
+                return;
+            }
+            // 关于页：Esc/?/q 关闭；其它键吞掉
+            if ($this->help->isAboutOpen()) {
+                if ($event instanceof CharKeyEvent && (KeyBindings::HELP_KEY === $event->char || strtolower($event->char) === 'q')) {
+                    $this->help->closeAbout();
+                } elseif ($event instanceof CodedKeyEvent && $event->code === \PhpTui\Term\KeyCode::Esc) {
+                    $this->help->closeAbout();
                 }
                 return;
             }
@@ -554,6 +691,8 @@ class App
         }
 
         if ($event instanceof CodedKeyEvent) {
+            // ⚠️ F10 的激活/收起已在上方作为 FunctionKeyEvent 单独处理（php-tui 把功能键
+            // 归到 FunctionKeyEvent，而非 CodedKeyEvent，见 App::handle 顶部的注释）。
             $this->handleCoded($event, $a);
         }
     }
@@ -598,6 +737,17 @@ class App
             return;
         }
         if ($e->kind === MouseEventKind::Down) {
+            // 菜单栏点击：菜单打开时点下拉条目/空白关闭；关闭时点菜单标签激活。
+            // 菜单栏在第 0 行，与 PANELS 各面板不重叠（split 已把它切到独立区域）。
+            if ($this->menuBar->isOpen()) {
+                $this->menuBar->clickDropdown($e->column, $e->row);
+                return;
+            }
+            if (isset($a['menu']) && $e->row === $a['menu']->position->y) {
+                if ($this->menuBar->clickBar($e->column)) {
+                    return;
+                }
+            }
             $this->handleClick($e, $a);
         }
     }

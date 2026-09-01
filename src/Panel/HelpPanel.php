@@ -43,6 +43,8 @@ final class HelpPanel
 {
     private bool $open = false;
 
+    private bool $about = false;
+
     private int $scroll = 0;
 
     /** 面板内容宽度（列），受视口约束 */
@@ -80,6 +82,22 @@ final class HelpPanel
     {
         $this->open = true;
         $this->scroll = 0;
+    }
+
+    /** 「关于」浮层（顶部菜单「帮助 → 关于」）。与快捷键帮助页共用叠加机制。 */
+    public function openAbout(): void
+    {
+        $this->about = true;
+    }
+
+    public function isAboutOpen(): bool
+    {
+        return $this->about;
+    }
+
+    public function closeAbout(): void
+    {
+        $this->about = false;
     }
 
     /**
@@ -239,6 +257,59 @@ final class HelpPanel
             ->direction(Direction::Horizontal)
             ->constraints(Constraint::length($left), Constraint::length($this->panelW), Constraint::length($right))
             ->widgets($this->spacer(), $panel, $this->spacer());
+    }
+
+    /**
+     * 「关于」浮层：居中面板，列出应用信息。复用本类的居中定位技巧。
+     * 极小视口不画（与 widget() 同一守卫逻辑）。
+     */
+    public function aboutWidget(int $vpW, int $vpH): Widget
+    {
+        if ($vpW < 8 || $vpH < 5) {
+            return $this->spacer();
+        }
+        $lines = [
+            $this->shell->t('about.title'),
+            '',
+            $this->shell->t('about.line1'),
+            $this->shell->t('about.line2'),
+            '',
+            $this->shell->t('about.line3'),
+            $this->shell->t('help.close'),
+        ];
+        $longest = 0;
+        foreach ($lines as $l) {
+            $longest = max($longest, DisplayWidth::dispWidth($l));
+        }
+        $panelW = max(3, min($vpW - 2, $longest + 4));
+        $panelH = max(3, min($vpH - 2, count($lines) + 2));
+        $this->panelW = $panelW; // centerRow() 读实例宽度
+        $this->panelH = $panelH;
+
+        $innerW = max(0, $panelW - 2);
+        $innerH = max(0, $panelH - 2);
+        $out = [];
+        foreach (array_slice($lines, 0, $innerH) as $text) {
+            $out[] = \PhpTui\Tui\Text\Line::fromSpans(\PhpTui\Tui\Text\Span::styled(
+                DisplayWidth::mbCutDisp($text, $innerW),
+                Style::default()
+            ));
+        }
+        while (count($out) < $innerH) {
+            $out[] = \PhpTui\Tui\Text\Line::fromSpans(\PhpTui\Tui\Text\Span::styled('', Style::default()));
+        }
+        $panel = BlockWidget::default()
+            ->borders(Borders::ALL)
+            ->borderType(BorderType::Rounded)
+            ->titles(Title::fromString(' ' . $this->shell->t('about.title') . ' '))
+            ->widget(ParagraphWidget::fromLines(...$out));
+
+        $top = max(0, intdiv($vpH - $panelH, 2));
+        $bottom = max(0, $vpH - $panelH - $top);
+        return GridWidget::default()
+            ->direction(Direction::Vertical)
+            ->constraints(Constraint::length($top), Constraint::length($panelH), Constraint::length($bottom))
+            ->widgets($this->spacer(), $this->centerRow($vpW, $panel), $this->spacer());
     }
 
     private function buildPanel(): Widget

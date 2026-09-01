@@ -41,6 +41,7 @@ final class KeyBindings
                 ['q', 'help.g_q'],
                 [self::HELP_KEY, 'help.g_help'],
                 ['Ctrl+T', 'help.g_theme'],
+                ['F10', 'help.g_menu'],
                 ['滚轮', 'help.g_wheel'],
                 ['横向滚轮', 'help.g_wheel_h'],
                 ['单击', 'help.g_click'],

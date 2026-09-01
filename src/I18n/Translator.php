@@ -20,12 +20,14 @@ final class Translator
     private array $messages;
 
     private string $locale;
+    private string $baseDir;
     private const FALLBACK = 'en';        // 缺失 key 的兜底语言
     private const DEFAULT_LOCALE = 'zh_CN'; // 未设置 APP_LOCALE 时的默认界面语言
 
     public function __construct(string $locale, string $baseDir)
     {
         $this->locale = $locale;
+        $this->baseDir = $baseDir;
         $this->messages = $this->load($baseDir, $locale);
         if ($locale !== self::FALLBACK) {
             // 英文作为兜底，保证任何语言下字符串都不为空
@@ -45,6 +47,27 @@ final class Translator
     public function locale(): string
     {
         return $this->locale;
+    }
+
+    /**
+     * 运行时切换语言（顶部菜单「视图 → 语言」用）。
+     *
+     * 重新加载目标语言包并合并英文兜底，与构造时完全一致——不保留旧语言残留条目。
+     */
+    public function setLocale(string $locale): void
+    {
+        $this->locale = $locale;
+        $this->messages = $this->load($this->baseDir, $locale);
+        if ($locale !== self::FALLBACK) {
+            $this->messages += $this->load($this->baseDir, self::FALLBACK);
+        }
+    }
+
+    /** 当前已加载的语言包里所有 key（供 toggle 列出可选语言） */
+    public function available(): array
+    {
+        // 已知两语言；后续新增语言包在这里加即可
+        return ['zh_CN', 'en'];
     }
 
     /** @param array<string,mixed> $params */

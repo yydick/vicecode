@@ -164,6 +164,12 @@ final class Theme
                 'searchStateRunning' => AnsiColor::Cyan,
                 'searchStateIdle' => AnsiColor::Gray,
                 'searchGroup' => AnsiColor::Yellow,
+
+                // 顶部菜单栏
+                'menuInactive' => AnsiColor::Gray,
+                'menuActive' => AnsiColor::Black,   // 高亮底反显：用 REVERSED 见 style()
+                'menuDrop' => AnsiColor::Gray,
+                'menuSel' => AnsiColor::Black,
             ],
             syntax: [
                 'comment' => [AnsiColor::DarkGray, false],
@@ -247,6 +253,12 @@ final class Theme
                 'searchStateRunning' => AnsiColor::LightCyan,
                 'searchStateIdle' => AnsiColor::Gray,
                 'searchGroup' => AnsiColor::LightYellow,
+
+                // 顶部菜单栏
+                'menuInactive' => AnsiColor::Blue,
+                'menuActive' => AnsiColor::White,
+                'menuDrop' => AnsiColor::Blue,
+                'menuSel' => AnsiColor::White,
             ],
             syntax: [
                 'comment' => [AnsiColor::Blue, false],

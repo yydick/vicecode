@@ -22,10 +22,27 @@ use PhpTui\Tui\Widget\Direction;
  */
 final class LayoutFactory
 {
-    /** 外层：主区 + 状态栏 1 行。 @return Constraint[] */
-    public static function rootConstraints(): array
+    /**
+     * 外层：菜单行 1 + 主区 + 状态栏 1。 @return Constraint[]
+     *
+     * ⚠️ 视口太矮时不画菜单行：三段里主区是 min(1)，高度 < 5 时会被挤成 0 高，
+     * php-tui 往 0 高 area 里写会抛 OutOfBoundsException。此时宁可不要菜单栏，
+     * 也不能让整个界面崩掉。
+     */
+    public static function rootConstraints(int $viewportHeight = 1000): array
     {
-        return [Constraint::min(1), Constraint::length(1)];
+        if ($viewportHeight < self::MIN_HEIGHT_WITH_MENU) {
+            return [Constraint::min(1), Constraint::length(1)];
+        }
+        return [Constraint::length(1), Constraint::min(1), Constraint::length(1)];
+    }
+
+    /** 低于这个高度就不显示菜单栏（见 rootConstraints 的说明） */
+    public const MIN_HEIGHT_WITH_MENU = 5;
+
+    public static function hasMenuBar(int $viewportHeight): bool
+    {
+        return $viewportHeight >= self::MIN_HEIGHT_WITH_MENU;
     }
 
     /** 主区：侧栏 30 列 / 中间自适应 / AI 45 列。 @return Constraint[] */
@@ -53,15 +70,19 @@ final class LayoutFactory
     public static function split(Area $vp): array
     {
         $root = Layout::default()
-            ->constraints(self::rootConstraints())
+            ->constraints(self::rootConstraints($vp->height))
             ->direction(Direction::Vertical)
             ->split($vp);
-        $status = $root->get(1);
+
+        // 有菜单栏时 root 是 3 段（menu/main/status），否则是 2 段（main/status）
+        $withMenu = self::hasMenuBar($vp->height);
+        $menu = $withMenu ? $root->get(0) : null;
+        $status = $root->get($withMenu ? 2 : 1);
 
         $main = Layout::default()
             ->constraints(self::mainConstraints())
             ->direction(Direction::Horizontal)
-            ->split($root->get(0));
+            ->split($root->get($withMenu ? 1 : 0));
         $sidebar = $main->get(0);
 
         $center = Layout::default()
@@ -78,7 +99,7 @@ final class LayoutFactory
         $aiStream = $ai->get(0);
         $aiInput = $ai->get(1);
 
-        return [
+        $areas = [
             'sidebar' => $sidebar,
             'editor' => $editor,
             'terminal' => $terminal,
@@ -86,5 +107,9 @@ final class LayoutFactory
             'ai_input' => $aiInput,
             'status' => $status,
         ];
+        if ($menu !== null) {
+            $areas['menu'] = $menu;
+        }
+        return $areas;
     }
 }

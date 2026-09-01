@@ -150,16 +150,27 @@ function startMain(App $app, Terminal $term, bool $sw): void
         // 确认可读后再整块 fread（避免单字节误判 ESC 序列）。解析后推 Channel。
         go(static function () use ($ch, $parser, $app): void {
             while (!$app->quit) {
-                $readable = \Swoole\Coroutine::waitEvent(STDIN, SWOOLE_EVENT_READ, 1.0);
+                // 空闲超时设短（150ms）：既让出调度器，也定期冲刷解析器里「还在等后续字节」
+                // 的残局（典型如孤立的 ESC）。若不主动 flush，孤立 Esc 要等下个键才发得出去，
+                // 表现为「单独按 Esc 关不了菜单/帮助页」且有明显延迟。
+                $readable = \Swoole\Coroutine::waitEvent(STDIN, SWOOLE_EVENT_READ, 0.15);
                 if ($readable === false) {
-                    continue; // 超时，继续等（也顺带让出调度器）
+                    // 超时无输入：告诉 parser「没有更多字节了」($more=false)，
+                    // 让缓冲区里孤立的 ESC（单独 \x1b）冲刷成 Esc 事件——否则 parser 会
+                    // 一直把它当「转义序列开头」等待后续，孤立 Esc 永远发不出去（菜单关不掉）。
+                    $parser->advance('', false);
+                    foreach ($parser->drain() as $ev) {
+                        $ch->push($ev);
+                    }
+                    continue; // 也顺带让出调度器
                 }
                 $bytes = fread(STDIN, 4096);
                 if ($bytes === '' || $bytes === false) {
                     break; // EOF（终端关闭）
                 }
                 $parser->advance($bytes, false);
-                foreach ($parser->drain() as $ev) {
+                $evs = $parser->drain();
+                foreach ($evs as $ev) {
                     $ch->push($ev);
                 }
             }
