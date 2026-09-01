@@ -110,7 +110,7 @@ final class Theme
     {
         return new self(
             id: 'dark',
-            label: '深色',
+            label: 'theme.dark',
             ui: [
                 // 通用
                 'border' => AnsiColor::Gray,
@@ -206,7 +206,7 @@ final class Theme
     {
         return new self(
             id: 'midnight',
-            label: '午夜蓝',
+            label: 'theme.midnight',
             ui: [
                 'border' => AnsiColor::Blue,
                 'borderFocus' => AnsiColor::LightCyan,

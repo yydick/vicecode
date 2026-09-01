@@ -44,6 +44,7 @@ return [
     'editor.unreadable' => '无读取权限，无法打开：{path}',
     'editor.saved'     => '已保存',
     'editor.save_failed' => '保存失败：{msg}',
+    'editor.save_no_permission' => '保存失败：权限不足或路径不可写',
     'editor.open'      => '打开',
     'editor.untitled'  => '未命名',
 
@@ -83,6 +84,10 @@ return [
     'git.no_branch'      => '（无其它分支）',
     'git.switch_done'    => '已切换到分支：{branch}',
     'git.switch_fail'    => '切换分支失败：{msg}',
+    'git.action_commit'       => '提交',
+    'git.action_commit_all'   => '提交变更',
+    'git.action_commit_push'  => '提交和推送',
+    'git.action_commit_sync'  => '提交和同步',
     'git.hint'           => '[a]全暂存 [s]暂存 [c]提交 [p]推送 [L]日志 [Enter]diff [R]刷新',
     'search.placeholder'      => '搜索文件内容…',
     'search.hint'             => '按回车搜索…',
@@ -115,7 +120,7 @@ return [
     'help.group_ai'        => 'AI 对话',
     'help.g_quit'          => '退出（有未保存改动先确认）',
     'help.g_focus'         => '切换焦点面板',
-    'help.g_esc'           => '退出；面板有各自语义时先走面板',
+    'help.g_esc'           => '退出；若面板自身有语义则先由面板处理',
     'help.g_q'             => '非输入态退出',
     'help.g_help'          => '打开/关闭本帮助',
     'help.g_menu'           => '打开顶部菜单栏',
@@ -152,7 +157,7 @@ return [
     'help.gi_stage'        => '暂存选中文件',
     'help.gi_unstage'      => '取消暂存选中文件',
     'help.gi_esc'          => '关闭下拉菜单',
-    'help.gi_icons'        => '暂存 / 取消暂存 / 丢弃 / 查看 diff',
+    'help.gi_icons'        => '暂存 / 取消暂存 / 丢弃改动 / 查看 diff',
     'help.s_type'          => '输入搜索关键词',
     'help.s_enter'         => '搜索 / 打开选中命中',
     'help.s_backspace'     => '删除关键词末字符',
@@ -193,4 +198,18 @@ return [
     'about.line2'            => 'Swoole 协程驱动 · 多 Provider LLM',
     'about.line3'            => 'F10 打开菜单 · ? 查看快捷键 · Ctrl+Q 退出',
     'status.lang'            => '语言',
+
+    // 主题名（状态栏 / 菜单显示，跟随语言包）
+    'theme.dark'             => '深色',
+    'theme.midnight'         => '午夜蓝',
+
+    // 帮助页「触发方式」列（鼠标 / 输入描述）
+    'keys.wheel'             => '滚轮',
+    'keys.hwheel'            => '横向滚轮',
+    'keys.click'             => '单击',
+    'keys.printable'         => '可打印字符',
+    'keys.click_file'        => '单击文件',
+    'keys.click_triangle'    => '单击行首三角',
+    'keys.dblclick_dir'      => '双击目录',
+    'keys.click_icon'        => '点击图标',
 ];

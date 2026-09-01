@@ -160,20 +160,44 @@ final class HelpPanel
     /** @return string[] 帮助页的全部内容行（未裁剪、未滚动） */
     public function contentLines(): array
     {
-        $t = fn(string $k): string => $this->shell->t($k);
         $lines = [];
-        $lines[] = $t('help.title');
+        $lines[] = $this->shell->t('help.title');
         $lines[] = '';
-        foreach (KeyBindings::all() as $g) {
-            $lines[] = $t($g['group']);
+        foreach ($this->translatedGroups() as $g) {
+            $lines[] = $g['group'];
             foreach ($g['items'] as $it) {
-                $lines[] = $this->formatItem($it['keys'], $t($it['desc']));
+                $lines[] = $this->formatItem($it['keys'], $it['desc']);
             }
             $lines[] = '';
         }
-        $lines[] = $t('help.scroll_hint');
-        $lines[] = $t('help.close');
+        $lines[] = $this->shell->t('help.scroll_hint');
+        $lines[] = $this->shell->t('help.close');
         return $lines;
+    }
+
+    /**
+     * 全部分组，键位列与说明列均按当前语言翻译。
+     *
+     * 键位列（如 'keys.wheel'）之前是硬编码中文，切换英文时整页混排；改走 i18n 后
+     * 这里统一翻译。注意：键位列的"显示宽度"必须按**翻译后**字符串算（见 keyColWidth），
+     * 否则 key 与渲染文字宽度不一致会让右列说明错位。
+     *
+     * @return array<int,array{group:string,items:array<int,array{keys:string,desc:string}>}>
+     */
+    private function translatedGroups(): array
+    {
+        $t = fn(string $k): string => $this->shell->t($k);
+        $out = [];
+        foreach (KeyBindings::all() as $g) {
+            $out[] = [
+                'group' => $t($g['group']),
+                'items' => array_map(
+                    static fn(array $it): array => ['keys' => $t($it['keys']), 'desc' => $t($it['desc'])],
+                    $g['items']
+                ),
+            ];
+        }
+        return $out;
     }
 
     public function contentLineCount(): int
@@ -197,7 +221,7 @@ final class HelpPanel
     private function keyColWidth(): int
     {
         $max = 0;
-        foreach (KeyBindings::all() as $g) {
+        foreach ($this->translatedGroups() as $g) {
             foreach ($g['items'] as $it) {
                 $max = max($max, DisplayWidth::dispWidth($it['keys']));
             }

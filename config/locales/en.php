@@ -50,6 +50,7 @@ return [
     'editor.unreadable' => 'No read permission: {path}',
     'editor.saved'     => 'Saved',
     'editor.save_failed' => 'Save failed: {msg}',
+    'editor.save_no_permission' => 'Save failed: no write permission or path not writable',
     'editor.open'      => 'Open',
     'editor.untitled'  => 'untitled',
 
@@ -91,6 +92,10 @@ return [
     'git.no_branch'      => '(no other branch)',
     'git.switch_done'    => 'Switched to branch: {branch}',
     'git.switch_fail'    => 'Switch branch failed: {msg}',
+    'git.action_commit'       => 'Commit',
+    'git.action_commit_all'   => 'Commit changes',
+    'git.action_commit_push'  => 'Commit & push',
+    'git.action_commit_sync'  => 'Commit & sync',
     'git.hint'           => '[a]stage all [s]stage [c]commit [p]push [L]log [Enter]diff [R]refresh',
     'search.placeholder'      => 'Search file contents…',
     'search.hint'             => 'Press Enter to search…',
@@ -160,7 +165,7 @@ return [
     'help.gi_stage'        => 'Stage selected file',
     'help.gi_unstage'      => 'Unstage selected file',
     'help.gi_esc'          => 'Close dropdown',
-    'help.gi_icons'        => 'Stage / unstage / discard / view diff',
+    'help.gi_icons'        => 'Stage / unstage / discard changes / view diff',
     'help.s_type'          => 'Type search keyword',
     'help.s_enter'         => 'Search / open selected hit',
     'help.s_backspace'     => 'Delete last char of keyword',
@@ -201,4 +206,18 @@ return [
     'about.line2'            => 'Swoole coroutine driven · multi-provider LLM',
     'about.line3'            => 'F10 menu · ? shortcuts · Ctrl+Q quit',
     'status.lang'            => 'Lang',
+
+    // Theme names (status bar / menu)
+    'theme.dark'             => 'Dark',
+    'theme.midnight'         => 'Midnight',
+
+    // Help page "trigger" column (mouse / input descriptors)
+    'keys.wheel'             => 'Wheel',
+    'keys.hwheel'            => 'Horizontal wheel',
+    'keys.click'             => 'Click',
+    'keys.printable'         => 'Printable char',
+    'keys.click_file'        => 'Click file',
+    'keys.click_triangle'    => 'Click row triangle',
+    'keys.dblclick_dir'      => 'Double-click dir',
+    'keys.click_icon'        => 'Click icon',
 ];

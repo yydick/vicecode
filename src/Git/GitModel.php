@@ -366,12 +366,12 @@ final class GitModel
         $this->refresh();
     }
 
-    // 下拉菜单项 → 动作映射（顺序即渲染顺序）
+    // 下拉菜单项 → 动作映射（顺序即渲染顺序）。值为 i18n key，渲染处过 t()。
     public const DROPDOWN = [
-        'commit'        => '提交',
-        'commitAll'     => '提交变更',
-        'commitAndPush' => '提交和推送',
-        'commitAndSync' => '提交和同步',
+        'commit'        => 'git.action_commit',
+        'commitAll'     => 'git.action_commit_all',
+        'commitAndPush' => 'git.action_commit_push',
+        'commitAndSync' => 'git.action_commit_sync',
     ];
 
     /** 下拉菜单某项被点击：按 key 派发 */

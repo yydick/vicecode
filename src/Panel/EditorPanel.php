@@ -472,7 +472,7 @@ final class EditorPanel
         }
         $path = $buf->path;
         if ($path === null || (!is_writable($path) && !is_writable(dirname($path)))) {
-            $this->shell->setMessage($this->shell->t('editor.save_failed', ['msg' => '权限不足或路径不可写']));
+            $this->shell->setMessage($this->shell->t('editor.save_no_permission'));
             return;
         }
         $ok = $buf->save();

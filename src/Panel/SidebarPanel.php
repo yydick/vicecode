@@ -213,8 +213,8 @@ final class SidebarPanel
                     }
                 }
             } elseif ($git->dropdownOpen) {
-                foreach (GitModel::DROPDOWN as $i => $label) {
-                    $text = ($i === 0 ? '● ' : '  ') . $label;
+                foreach (GitModel::DROPDOWN as $i => $labelKey) {
+                    $text = ($i === 0 ? '● ' : '  ') . $this->shell->t($labelKey);
                     if ($w($text) > $max) {
                         $max = $w($text);
                     }
@@ -344,8 +344,8 @@ final class SidebarPanel
         // 下拉菜单：覆盖从标题行起，点击项触发对应动作
         if ($git->dropdownOpen) {
             $i = 0;
-            foreach (GitModel::DROPDOWN as $label) {
-                $text = ($i === 0 ? '● ' : '  ') . $label;
+            foreach (GitModel::DROPDOWN as $labelKey) {
+                $text = ($i === 0 ? '● ' : '  ') . $this->shell->t($labelKey);
                 $lines[] = Line::fromSpans(Span::styled(
                     DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW),
                     $i === 0 ? $this->shell->theme->style('gitSelMark') : Style::default()));

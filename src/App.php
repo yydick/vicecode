@@ -479,7 +479,7 @@ class App
         foreach ($this->editor->buffers() as $buf) {
             $buf->hlRev = -1; // 强制下一帧重算高亮
         }
-        $this->setMessage($this->t('status.theme') . '=' . $this->theme->label);
+        $this->setMessage($this->t('status.theme') . '=' . $this->t($this->theme->label));
     }
 
     // ── 语言（顶部菜单「视图 → 语言」）────────────────────
