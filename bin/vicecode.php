@@ -104,10 +104,20 @@ function restoreTerminal(Terminal $term): void
 
 /**
  * @param bool $sw 是否使用 Swoole 协程底座
+ * @param list<string> $argv 命令行参数（首个可读文件作为初始打开文件）
  */
-function start(bool $sw): void
+function start(bool $sw, array $argv): void
 {
     $app = new App();
+
+    // 命令行首个可读文件作为初始打开文件（验收 / 日常 `vicecode <file>` 都可用）。
+    // 注意跳过 $argv[0]（脚本自身路径，也是合法文件，不能当待打开文件）。
+    foreach (array_slice($argv, 1) as $arg) {
+        if ($arg !== '' && $arg[0] !== '-' && is_file($arg) && is_readable($arg)) {
+            $app->editor->openFile($arg);
+            break;
+        }
+    }
 
     // ── 进入终端（终端动作仍走 php-tui/term）──
     $term = Terminal::new();
@@ -191,6 +201,11 @@ function startMain(App $app, Terminal $term, bool $sw): void
         //
         // M2：每轮都调 pollTerminal() 排空命令管道——子进程的输出随时会到，不能只在
         // 有键事件时才读。命令运行中把 pop 超时压到 10ms，让输出跟手。
+
+        // ⚠️ 先画一帧初始界面：否则主循环只在「有事件/有输出」时才 draw，
+        // 真实 pty 下首屏会空白到用户按第一个键才出现（回退分支在循环前有同样的初始 draw）。
+        $display->draw($app->render($display->viewportArea()));
+
         while (!$app->quit) {
             $busy = $app->termRunning() || $app->searchRunning() || $app->aiStreaming();
             $ev = $ch->pop($busy ? 0.01 : 0.05);
@@ -257,9 +272,9 @@ try {
         Swoole\Runtime::enableCoroutine(
             SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO & ~SWOOLE_HOOK_FILE & ~SWOOLE_HOOK_PROC
         );
-        Swoole\Coroutine\run(static fn() => start(true));
+        Swoole\Coroutine\run(static fn() => start(true, $argv));
     } else {
-        start(false);
+        start(false, $argv);
     }
 } catch (Throwable $e) {
     fwrite(STDERR, "\nViceCode 异常退出：" . $e->getMessage() . "\n");

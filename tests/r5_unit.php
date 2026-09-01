@@ -17,6 +17,10 @@ declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
 
+// 隔离配置：pty 验收（pty_r5/r7/hscroll_key）退出时会写 ~/.vicerc，
+// 若不隔离，这里 new App() 会加载被污染的布局而非默认布局，导致默认值断言失准。
+putenv('VICECODE_CONFIG=' . tempnam(sys_get_temp_dir(), 'vc_r5cfg'));
+
 use App\App;
 use PhpTui\Term\Event\MouseEvent;
 use PhpTui\Term\MouseEventKind;

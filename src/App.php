@@ -774,16 +774,7 @@ class App
             return;
         }
         if ($e->kind === MouseEventKind::ScrollLeft || $e->kind === MouseEventKind::ScrollRight) {
-            $step = $e->kind === MouseEventKind::ScrollRight ? 4 : -4;
-            if ($this->focusPanel() === 'editor') {
-                $this->editor->onScrollH($step);
-            } elseif ($this->focusPanel() === 'sidebar') {
-                $this->sidebar->onScrollH($step);
-            } elseif ($this->focusPanel() === 'terminal') {
-                $this->terminal->onScrollH($step);
-            } elseif ($this->focusPanel() === 'ai_stream' || $this->focusPanel() === 'ai_input') {
-                $this->ai->onScrollH($step);
-            }
+            $this->hScrollByFocus($e->kind === MouseEventKind::ScrollRight ? 4 : -4);
             return;
         }
         if ($e->kind === MouseEventKind::Down) {
@@ -945,6 +936,15 @@ class App
 
     private function handleCoded(CodedKeyEvent $e, array $a): void
     {
+        // 键盘横向滚动（Shift+←/→）：与鼠标 ScrollLeft/ScrollRight 同源，按焦点分发到 onScrollH(±4)。
+        // 必须在各面板 onKey 之前拦截——编辑器的 ←/→ 已被光标移动占用，Shift+方向键单独用作横滚；
+        // 菜单打开时由上方菜单独占分支吞掉，不会落到这里。
+        if (($e->modifiers & KeyModifiers::SHIFT)
+            && ($e->code === KeyCode::Left || $e->code === KeyCode::Right)) {
+            $this->hScrollByFocus($e->code === KeyCode::Right ? 4 : -4);
+            return;
+        }
+
         $focus = $this->focusPanel();
 
         // 焦点面板优先消费自己的按键；返回 false 的键（全局键 Esc/Tab、以及非本面板键）
@@ -975,6 +975,23 @@ class App
                 // AI 输入框退格（AiPanel::onKey 已处理，这里是历史遗留的空分支，保留以防
                 // 将来改焦点分发时漏掉；终端退格已下沉到 TerminalPanel::onKey）
                 break;
+        }
+    }
+
+    /**
+     * 按当前焦点面板分发横向滚动。键盘 Shift+←/→ 与鼠标横滚共用，步进一致（±4 列）。
+     */
+    private function hScrollByFocus(int $step): void
+    {
+        $f = $this->focusPanel();
+        if ($f === 'editor') {
+            $this->editor->onScrollH($step);
+        } elseif ($f === 'sidebar') {
+            $this->sidebar->onScrollH($step);
+        } elseif ($f === 'terminal') {
+            $this->terminal->onScrollH($step);
+        } elseif ($f === 'ai_stream' || $f === 'ai_input') {
+            $this->ai->onScrollH($step);
         }
     }
 

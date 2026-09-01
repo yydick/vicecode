@@ -2,26 +2,23 @@
 declare(strict_types=1);
 
 /**
- * 真实 pty 验收：R5 拖拽分隔条。
+ * 真实 pty 验收：键盘横向滚动（Shift+←/→，步进 ±4）。
  *
- * 为什么必须走 pty：headless 单测（tests/r5_unit.php）已确定性覆盖命中/跟随/clamp/交叉约束，
- * 但这里要确认「真实终端发来的 SGR 拖拽序列（cb=32 的 motion bit → Drag，m 结尾 → Up）
- * 能被 EventParser 正确解析、并驱动 App 改变布局」——这是 headless 构造 MouseEvent 绕不过去的。
+ * 为什么必须走 pty：headless 单测（tests/hscroll_key_unit.php）直接 new 出
+ * CodedKeyEvent(Right, SHIFT) 喂给 App::handle，跳过了「真实终端发来的
+ * \e[1;2C 序列能否被 EventParser 正确解码成带 SHIFT 修饰的 Right」这一环——
+ * 这正是 feedback 里 headless≠pty 落差 #1（事件类型可能不同）。这里走真实
+ * pty + bin/vicecode.php，用 argv 打开一个含远端标记行的文件，按真实 Shift+→
+ * 把标记滚入视口、再按 Shift+← 滚出，验证端到端链路。
  *
- * 断言点选「状态栏尺寸摘要」：拖拽中状态栏固定显示如 "side50 ai45 edit76% input3"（en locale），
- * rebuildScreen 重建最终帧后 grep 该数字，既避开差分渲染的「文本残留」坑，也直接证明布局真的变了。
- *
- * 前提：bin/vicecode.php 已启用 SGR 鼠标报告（tests/pty_menu.php 测试 5「点击 Help 标签」已 PASS
- * 即证明 Down 解析可用；Drag 是同一协议的 motion 变体，EventParser::parseCb 明确支持）。
- *
- * 运行：timeout 120 php tests/pty_r5.php
+ * 运行：timeout 120 php tests/pty_hscroll_key.php
  */
 
 $env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40', 'APP_LOCALE' => 'en']);
 // 隔离配置：pty 退出会写 ~/.vicerc，落到临时文件避免污染真实家目录配置。
-$env['VICECODE_CONFIG'] = tempnam(sys_get_temp_dir(), 'vc_r5cfg');
+$env['VICECODE_CONFIG'] = tempnam(sys_get_temp_dir(), 'vc_hkcfg');
 
-/** ANSI 屏幕重建：同 tests/pty_menu.php，按光标/擦除序列重建最终可见帧（详见该文件注释） */
+/** ANSI 屏幕重建：同 tests/pty_r5.php，剥转义后只保留字母数字与汉字做归一化比对 */
 function rebuildScreen(string $raw, int $w, int $h): string
 {
     $grid = array_fill(0, $h, array_fill(0, $w, ' '));
@@ -85,7 +82,7 @@ $readPty = static function ($stream, int $len) {
     try { return fread($stream, $len); } finally { restore_error_handler(); }
 };
 
-/** 持续读取直到 pty 安静（连续若干次空读），返回累计原始输出（捕获完整帧，规避异步绘制竞态） */
+/** 持续读取直到 pty 安静（连续若干次空读），返回期间累计的原始输出（捕获完整帧，规避异步绘制竞态） */
 $drain = static function ($stream) use ($readPty): string {
     $acc = '';
     $empty = 0;
@@ -103,14 +100,14 @@ $drain = static function ($stream) use ($readPty): string {
 };
 
 /**
- * 跑一个拖拽序列：Down → Drag → Up，每步 drain 到安静再读；最后 Ctrl+Q 退出。
- * @param array<int,array{0:string,1:int,2:string}> $seq [bytes, us, tag]
+ * 打开 file，发送一串按键序列（每个 [bytes, us, tag]），每步 drain 到安静再读；最后 Ctrl+Q 退出。
+ * @param array<int,array{0:string,1:int,2:string}> $seq
  * @return array<string,string> tag => 该步读取到的原始输出
  */
-function runDrag(array $env, callable $drain, array $seq): array
+function runKeys(array $env, callable $drain, string $file, array $seq): array
 {
     $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
-    $proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes, null, $env);
+    $proc = proc_open([PHP_BINARY, 'bin/vicecode.php', $file], $descs, $pipes, null, $env);
     if ($proc === false) { return []; }
     stream_set_blocking($pipes[0], false);
     stream_set_blocking($pipes[1], false);
@@ -138,36 +135,44 @@ function check(bool $cond, string $msg): void
     if (!$cond) { $failed = true; }
 }
 
-// SGR 鼠标（1-based 坐标，EventParser 会减 1）：cb=0 左键，cb=32 加 motion bit → Drag，结尾 m = Up
-// 视口 120x40：菜单栏 row0；主区 y=1；侧栏宽30(x0..29)、中间列 x30..74、AI x75..119。
-$sideDown = "\x1b[<0;31;11M";   // col31(0based30=侧栏右边界) row11(0based10=主区内)
-$sideDrag = "\x1b[<32;51;11M";  // 拖到 col51(0based50) → 侧栏宽 50
-$sideUp   = "\x1b[<0;51;11m";
+// 构造含远端标记行的文件：44 个 x + "MARK" + 收尾，标记落在第 44~47 列。
+// 实测编辑器可见宽度约 13 列；ScrollLeft=40 时可见窗口约 [40,53)，恰好覆盖第 44 列，
+// 故 10 次 Shift+→（scrollLeft 0→40）可把标记滚入视口，10 次 Shift+← 滚出。
+$line = str_repeat('x', 44) . 'MARK' . str_repeat('x', 40);
+$tf = tempnam(sys_get_temp_dir(), 'vc_hk');
+file_put_contents($tf, $line);
 
-$editDown = "\x1b[<0;53;24M";   // col53(0based52，在中间列[30..74]内) row24(0based23，编辑器下边界±1)
-$editDrag = "\x1b[<32;53;31M";   // 拖到 row31(0based30) → 比例 (30-1)/38≈0.763 → edit76%
-$editUp   = "\x1b[<0;53;31m";
+$SR = "\x1b[1;2C"; // Shift+Right
+$SL = "\x1b[1;2D"; // Shift+Left
 
-echo "== 1) 真实 pty 拖拽侧栏分隔条（竖拖，宽度 30→50）==\n";
-$out = runDrag($env, $drain, [
-    [$sideDown, 200000, 'down'],
-    [$sideDrag, 350000, 'drag'],
-    [$sideUp,   200000, 'up'],
+echo "== 真实 pty 键盘横向滚动（Shift+←/→ 步进 ±4）==\n";
+$out = runKeys($env, $drain, $tf, [
+    // 先按 10 次 Shift+→（scrollLeft 0→40），标记应滚入视口
+    [$SR, 60000, 'r1'], [$SR, 60000, 'r2'], [$SR, 60000, 'r3'], [$SR, 60000, 'r4'], [$SR, 60000, 'r5'],
+    [$SR, 60000, 'r6'], [$SR, 60000, 'r7'], [$SR, 60000, 'r8'], [$SR, 60000, 'r9'], [$SR, 60000, 'r10'],
+    // 再按 10 次 Shift+←（scrollLeft 40→0），标记应滚出视口
+    [$SL, 60000, 'l1'], [$SL, 60000, 'l2'], [$SL, 60000, 'l3'], [$SL, 60000, 'l4'], [$SL, 60000, 'l5'],
+    [$SL, 60000, 'l6'], [$SL, 60000, 'l7'], [$SL, 60000, 'l8'], [$SL, 60000, 'l9'], [$SL, 60000, 'l10'],
 ]);
-// 差分渲染只发增量，状态栏摘要（拖拽中才显示）需对 init+down+drag 累计输出重建才能稳定捕获。
-$screen = rebuildScreen(implode('', array_slice($out, 0, 3)), 120, 40);
-check(isset($out['drag']), '拖拽中能读到终端输出');
-check(str_contains($screen, 'side50'), "拖拽中状态栏显示侧栏宽 50（实际含 'side50'：{$screen}）");
 
-echo "== 2) 真实 pty 拖拽编辑器/终端分隔条（横拖，比例 60%→76%）==\n";
-$out2 = runDrag($env, $drain, [
-    [$editDown, 200000, 'down'],
-    [$editDrag, 350000, 'drag'],
-    [$editUp,   200000, 'up'],
-]);
-$screen2 = rebuildScreen(implode('', array_slice($out2, 0, 3)), 120, 40);
-check(isset($out2['drag']), '拖拽中能读到终端输出');
-check(str_contains($screen2, 'edit76'), "拖拽中状态栏显示编辑器比例 76%（实际含 'edit76'：{$screen2}）");
+$init = rebuildScreen($out['init'] ?? '', 120, 40);
+// pty 差分渲染：单帧读取只含增量，标记列暴露后不再被重绘，故需对「整段累计输出」重建。
+// 右滚态 = init..r10 的累计；左滚态 = init..l10 的全部累计（最终 scrollLeft=0，标记被 x 覆盖）。
+// 注：rebuildScreen 归一化会把 MARK 转成小写（/u 正则遇非法 UTF-8 字节回退 strtolower），
+// 故断言统一用小写比较。
+$rawRight = implode('', array_slice($out, 0, 11));
+$rawLeft = implode('', $out);
+$afterRight = strtolower(rebuildScreen($rawRight, 120, 40));
+$afterLeft = strtolower(rebuildScreen($rawLeft, 120, 40));
+$initLow = strtolower($init);
 
-echo $failed ? "\npty R5 验收 FAIL\n" : "\npty R5 验收全部 PASS\n";
+check(isset($out['init']) && $out['init'] !== '', '应用启动后有终端输出');
+check(str_contains($initLow, 'x'), '初始编辑器已渲染文件内容（含 x）');
+check(!str_contains($initLow, 'mark'), '初始（scrollLeft=0）标记 MARK 不在视口');
+check(str_contains($afterRight, 'mark'), 'Shift+→×10 后 MARK 滚入视口');
+check(!str_contains($afterLeft, 'mark'), 'Shift+←×10 后 MARK 滚出视口（回到 scrollLeft=0）');
+
+unlink($tf);
+
+echo $failed ? "\npty 键盘横向滚动验收 FAIL\n" : "\npty 键盘横向滚动验收全部 PASS\n";
 exit($failed ? 1 : 0);
