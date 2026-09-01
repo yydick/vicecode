@@ -128,6 +128,7 @@ function start(bool $sw): void
     try {
         startMain($app, $term, $sw);
     } finally {
+        $app->saveConfig();       // R7：退出前把偏好落盘（~/.vicerc），内部容错不抛
         restoreTerminal($term);
     }
 }

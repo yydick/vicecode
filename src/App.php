@@ -9,6 +9,7 @@ use App\Core\KeyInput;
 use App\Core\Lifecycle;
 use App\Core\LayoutFactory;
 use App\Core\LayoutConfig;
+use App\Core\ConfigStore;
 use App\Core\Theme;
 use App\Editor\Buffer;
 use App\Ai\ChatModel;
@@ -150,7 +151,24 @@ class App
 
     public function __construct()
     {
-        $this->i18n = Translator::fromEnv(__DIR__ . '/../config/locales');
+        // R7：从 ~/.vicerc 加载持久化偏好。优先级 env > 配置文件 > 默认；
+        // 配置文件缺失/损坏时 ConfigStore::load 返回空数组，下面全部走默认分支。
+        $locDir = __DIR__ . '/../config/locales';
+        $cfg = ConfigStore::load();
+        $themeId = getenv('APP_THEME');
+        if ($themeId === false || $themeId === '') {
+            $themeId = $cfg['theme'] ?? null;
+        }
+        $this->theme = is_string($themeId) && $themeId !== '' ? Theme::byId($themeId) : Theme::default();
+        $loc = getenv('APP_LOCALE');
+        if ($loc === false || $loc === '') {
+            $loc = $cfg['locale'] ?? null;
+        }
+        $this->i18n = is_string($loc) && $loc !== ''
+            ? new Translator($loc, $locDir)
+            : Translator::fromEnv($locDir);
+        $this->layout = LayoutConfig::fromArray($cfg);
+
         $this->icons = Config::loadPhp(__DIR__ . '/../config/icons.php');
         $this->sidebar = new SidebarPanel($this);
         $this->editor = new EditorPanel($this);
@@ -162,8 +180,6 @@ class App
         $this->chat = new ChatModel($this);
         $this->help = new HelpPanel($this);
         $this->menuBar = new MenuBarPanel($this);
-        $this->theme = Theme::default();
-        $this->layout = new LayoutConfig();
         // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function () {
             $this->chat->shutdown();
@@ -901,6 +917,30 @@ class App
             $this->t('status.l_input'),
             $c->aiInputHeight,
         );
+    }
+
+    /**
+     * 退出时把当前偏好写入 ~/.vicerc（R7）。由 bin/vicecode.php 的退出 finally 调用，
+     * 因此「拖拽改布局 / Ctrl+T 切主题 / 切语言」这些运行时变更都能在下次启动恢复。
+     * 失败静默吞掉——配置没存成只是不恢复，绝不该妨碍退出或终端还原。
+     * @return bool 是否写入成功（测试用）
+     */
+    public function saveConfig(): bool
+    {
+        try {
+            return ConfigStore::save([
+                'layout' => [
+                    'sidebarWidth' => $this->layout->sidebarWidth,
+                    'aiWidth' => $this->layout->aiWidth,
+                    'editorRatio' => $this->layout->editorRatio,
+                    'aiInputHeight' => $this->layout->aiInputHeight,
+                ],
+                'theme' => $this->theme->id,
+                'locale' => $this->i18n->locale(),
+            ]);
+        } catch (\Throwable $e) {
+            return false;
+        }
     }
 
     private function handleCoded(CodedKeyEvent $e, array $a): void

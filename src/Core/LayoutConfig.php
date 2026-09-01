@@ -97,4 +97,23 @@ final class LayoutConfig
         return max($lo, min($v, $hi));
     }
 
+    /**
+     * 从配置数组恢复（R7 读 ~/.vicerc 用）。缺字段走默认，并经 with* 链 clamp，
+     * 坏数据（越界/类型错）不会污染布局——保证切出的矩形永远合法。
+     * @param array<string,mixed> $a
+     */
+    public static function fromArray(array $a): self
+    {
+        $base = new self();
+        $layout = $a['layout'] ?? [];
+        if (!is_array($layout)) {
+            $layout = [];
+        }
+        return $base
+            ->withSidebarWidth((int) ($layout['sidebarWidth'] ?? self::DEFAULT_SIDEBAR))
+            ->withAiWidth((int) ($layout['aiWidth'] ?? self::DEFAULT_AI))
+            ->withEditorRatio((float) ($layout['editorRatio'] ?? self::DEFAULT_EDITOR_RATIO))
+            ->withAiInputHeight((int) ($layout['aiInputHeight'] ?? self::DEFAULT_AI_INPUT));
+    }
+
 }
