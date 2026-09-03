@@ -1,169 +1,159 @@
 # ViceCode
 
-VSCode 风格的多面板终端工作台（TUI）。基于 **PHP 8.3 + php-tui/php-tui 0.2.1 + Swoole 6.2.1**，在终端里提供 Explorer / 编辑器 / 终端 / GIT / 搜索 / AI 对话 六面板协同的工作环境。
+A VSCode-style multi-panel terminal workspace (TUI). Built on **PHP 8.3 + php-tui/php-tui 0.2.1 + Swoole 6.2.1**, it provides a coordinated six-panel environment in your terminal: Explorer / Editor / Terminal / GIT / Search / AI Chat.
 
 ```
 ┌───────────┬────────────────────────────┬──────────────┐
 │ Sidebar   │  Editor                    │ Terminal     │
-│ Explorer  │  (语法高亮/多标签/...)      │ (命令/交互)   │
+│ Explorer  │  (highlight/multi-tab/...) │ (cmd/inter)  │
 │ GIT       │                            │              │
 │ Search    │                            │              │
 ├───────────┴────────────────────────────┴──────────────┤
-│ AI 对话流                                  │ AI 输入框  │
+│ AI Chat Stream                            │ AI Input   │
 ├───────────────────────────────────────────┴────────────┤
 │ StatusBar                                                  │
 └───────────────────────────────────────────────────────────┘
 ```
 
-顶栏菜单栏用 **F10** 打开（File / View / Terminal / Help）。
+The top menu bar opens with **F10** (File / View / Terminal / Help).
 
-## 界面预览
+## Preview
 
-> 下方为文本示意（在真实终端里运行效果一致）。终端面板按 **F2** 可在「命令运行器」与「交互式 PTY」两种模式间切换——后者把按键直接转发给真实 shell，可跑 `vim` / `top` / `ssh` 等全屏程序。
+> Text mockups below (identical layout in a real terminal). Press **F2** in the Terminal panel to switch between "Command Runner" and "Interactive PTY" modes — the latter forwards keystrokes directly to a real shell, so full-screen programs like `vim` / `top` / `ssh` work.
 
-**命令运行器模式（终端面板默认）**
+**Command Runner mode (Terminal panel default)**
 
 ```
-┌─ 命令运行器模式（终端面板默认） ──────────────────────────────────────────────┐
+┌─ Command Runner mode (Terminal panel default) ───────────────────────────────┐
 ┌──────────────┬──────────────────────────────────────┬──────────────────────┐
-│ 侧栏         │ 编辑器                               │ 终端                 │
+│ Sidebar      │ Editor                               │ Terminal             │
 ├──────────────┼──────────────────────────────────────┼──────────────────────┤
-│ > 项目       │ <?php                                │ $ ls src             │
+│ > Project    │ <?php                                │ $ ls src             │
 │   src        │ final class App {                    │ app.php  panel/ ...  │
 │   tests      │   public function run() {            │ $ grep -r TODO .     │
-│   vendor     │     // 编辑代码                      │ ... 3 hits           │
+│   vendor     │     // edit code                     │ ... 3 hits           │
 │              │   }                                  │ $ ▏                  │
 │ GIT          │ }                                    │                      │
 │  * main      │                                      │                      │
 └──────────────┴──────────────────────────────────────┴──────────────────────┘
 ┌────────────────────────────────────────────────────┬────────────────────────┐
-│ AI 对话                                            │ AI 输入                │
+│ AI Chat                                            │ AI Input                │
 ├────────────────────────────────────────────────────┼────────────────────────┤
-│ (模型输出流式出现)                                 │ 输入消息后回车发送     │
-│ (在此处)                                           │                        │
-│                                                    │                        │
-│                                                    │                        │
-│                                                    │                        │
-│                                                    │                        │
-│                                                    │                        │
+│ (model output streams in)                          │ type message, Enter to  │
+│ (here)                                             │ send                   │
 └────────────────────────────────────────────────────┴────────────────────────┘
 └──────────────────────────────────────────────────────────────────────────────┘
-│ 焦点:编辑  分支:main  语言:zh_CN  主题:midnight  Ctrl+Q 退出                 │
+│ Focus:Edit  Branch:main  Lang:en  Theme:midnight  Ctrl+Q quit                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**交互式 PTY 模式（终端面板按 F2 进入捕获）**
+**Interactive PTY mode (Terminal panel, press F2 to capture)**
 
 ```
-┌─ 交互式 PTY 模式（终端面板按 F2 进入捕获） ───────────────────────────────────┐
+┌─ Interactive PTY mode (Terminal panel, F2 to capture) ────────────────────────┐
 ┌──────────────┬──────────────────────────────────────┬──────────────────────┐
-│ 侧栏         │ 编辑器                               │ 终端                 │
+│ Sidebar      │ Editor                               │ Terminal             │
 ├──────────────┼──────────────────────────────────────┼──────────────────────┤
-│ > 项目       │ <?php                                │ $ vim README.md      │
+│ > Project    │ <?php                                │ $ vim README.md      │
 │   src        │ final class App {                    │ ~                VIM │
-│   tests      │   // 编辑器照常可用                  │ ~  阅读/编辑中…      │
+│   tests      │   // editor still usable             │ ~  reading/editing…   │
 │   vendor     │ }                                    │ ~                    │
 │              │                                      │ :wq                  │
 │ GIT          │                                      │ $ top                │
-│  * main      │                                      │ 交互终端 · F2 退出捕获│
+│  * main      │                                      │ Interactive · F2 exit │
 └──────────────┴──────────────────────────────────────┴──────────────────────┘
 ┌────────────────────────────────────────────────────┬────────────────────────┐
-│ AI 对话                                            │ AI 输入                │
+│ AI Chat                                            │ AI Input                │
 ├────────────────────────────────────────────────────┼────────────────────────┤
-│ (交互式 shell 接管                                 │ 交互模式下 AI 暂停     │
-│ 按键全部转发给 PTY)                                │                        │
-│                                                    │                        │
-│                                                    │                        │
-│                                                    │                        │
-│                                                    │                        │
-│                                                    │                        │
+│ (interactive shell takes over                      │ AI paused in interactive│
+│  all keys forwarded to PTY)                        │ mode                   │
 └────────────────────────────────────────────────────┴────────────────────────┘
 └──────────────────────────────────────────────────────────────────────────────┘
-│ 焦点:终端  交互终端 · 捕获中  Ctrl+Q 退出                                    │
+│ Focus:Terminal  Interactive · Capturing  Ctrl+Q quit                           │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 环境要求
+## Requirements
 
 - PHP **>= 8.3**
-- 扩展：**swoole**（推荐，提供协程底座）；未安装时自动回退到纯阻塞读模式
-- 依赖：php-tui/php-tui `^0.2`、scrivo/highlight.php `^9.18`（由 Composer 安装）
+- Extension: **swoole** (recommended, provides the coroutine runtime); falls back to a pure blocking-read mode automatically when not installed
+- Dependencies: php-tui/php-tui `^0.2`, scrivo/highlight.php `^9.18` (installed via Composer)
 
-## 安装
+## Installation
 
 ```bash
 composer install
 ```
 
-## 运行
+## Running
 
 ```bash
-php bin/vicecode.php                 # 启动（默认走 Swoole 协程底座）
-php bin/vicecode.php path/to/file    # 启动并直接打开指定文件（可跟多个）
-TUI_USE_SWOOLE=0 php bin/vicecode.php   # 强制回退到纯 php-tui/term 阻塞读模式
+php bin/vicecode.php                 # launch (uses the Swoole coroutine runtime by default)
+php bin/vicecode.php path/to/file    # launch and open the given file directly (multiple allowed)
+TUI_USE_SWOOLE=0 php bin/vicecode.php   # force fallback to the pure php-tui/term blocking-read mode
 ```
 
-> 必须在真实终端（pty）里运行；管道/重定向下尺寸感知与 raw mode 不可用。
+> Must run in a real terminal (pty); size detection and raw mode are unavailable under a pipe/redirection.
 
-## 通用快捷键
+## General shortcuts
 
-| 键 | 作用 |
+| Key | Action |
 | --- | --- |
-| `Tab` | 在面板间循环切换焦点 |
-| `Ctrl+Q` | 退出应用（有未保存改动先确认） |
-| `Esc` | 退出当前模态（菜单/帮助）；在终端空输入时退出应用 |
-| `?` | 打开/关闭快捷键帮助页 |
-| `F10` | 打开/收起顶部菜单栏 |
-| `Ctrl+T` | 切换主题 |
-| `Shift+←` / `Shift+→` | 横向滚动（覆盖编辑器/终端/AI/侧栏） |
-| 鼠标滚轮 / 拖拽 | 滚动内容；拖拽面板分隔条调整布局（仅会话内） |
+| `Tab` | cycle focus between panels |
+| `Ctrl+Q` | quit the app (confirm first if there are unsaved changes) |
+| `Esc` | exit the current modal (menu/help); quits the app when the terminal input is empty |
+| `?` | toggle the shortcut help page |
+| `F10` | open/close the top menu bar |
+| `Ctrl+T` | switch theme |
+| `Shift+←` / `Shift+→` | horizontal scroll (covers editor/terminal/AI/sidebar) |
+| mouse wheel / drag | scroll content; drag panel dividers to resize the layout (session-only) |
 
-编辑器（`Enter` 换行、`Ctrl+S` 保存、`Ctrl+W` 关闭、`Ctrl+Tab` 切标签等）、资源管理器（单击打开文件、双击目录展开折叠、行首三角展开折叠）、GIT / 搜索 面板的用法见应用内 `?` 帮助页。
+For the Editor (`Enter` newline, `Ctrl+S` save, `Ctrl+W` close, `Ctrl+Tab` switch tab, etc.), Explorer (single-click to open a file, double-click a directory to expand/collapse, click the leading triangle to expand/collapse), and GIT / Search panel usage, see the in-app `?` help page.
 
-## 终端面板
+## Terminal panel
 
-终端面板有两种模式，按 **F2** 在两者之间切换：
+The Terminal panel has two modes, toggled with **F2**:
 
-### 1. 命令运行器模式（默认）
+### 1. Command Runner mode (default)
 
-像普通命令面板一样跑命令：
+Run commands like a normal command palette:
 
-- 在底部输入行键入命令，`Enter` 执行；输出实时流式显示。
-- `↑` / `↓` 浏览命令历史；`Home` / `End` 跳到行首/行尾。
-- `Ctrl+C` 中断正在运行的命令；`Ctrl+L` 清空输出。
-- `PageUp` / `PageDown` 回看历史输出（自动退出「贴底跟随」）。
+- Type a command in the input line at the bottom and press `Enter`; output streams in real time.
+- `↑` / `↓` browse command history; `Home` / `End` jump to line start/end.
+- `Ctrl+C` interrupts the running command; `Ctrl+L` clears the output.
+- `PageUp` / `PageDown` review past output (auto-disables "stick to bottom").
 
-### 2. 交互式 PTY 模式（F2 进入）
+### 2. Interactive PTY mode (F2 to enter)
 
-按 **F2** 分配一个**真实 PTY** 并启动交互式 shell（bash），所有按键被直接转发给 shell——因此可以跑 `vim`、`top`、`less`、`ssh`、TUI 程序等任何依赖完整终端的程序。内置轻量 VT100/ANSI 仿真器负责解析光标定位、着色、擦除、滚动、交替屏等。
+Press **F2** to allocate a **real PTY** and launch an interactive shell (bash); all keystrokes are forwarded directly to the shell — so you can run `vim`, `top`, `less`, `ssh`, TUI programs, or anything that needs a full terminal. A built-in lightweight VT100/ANSI emulator handles cursor positioning, coloring, erasing, scrolling, and the alternate screen.
 
-- **进入捕获**：终端面板聚焦时按 `F2` → 进入捕获态，按键全部转发给 PTY。
-- **退出捕获**（shell 仍在后台跑）：捕获态下按 `Esc` 或再次 `F2`。退出后焦点回到应用导航，可用 `PgUp/PgDn`、方向键浏览终端回退内容。
-- **重新进入**：退出捕获后（shell 还没退）再按 `F2` 即可重新捕获。
-- **退出 shell 回到运行器**：在捕获态发送 `Ctrl+D` 或 `exit`，shell 结束后自动退回命令运行器模式。
-- 终端标题会显示当前状态（`交互终端` / `捕获中`）。
+- **Enter capture**: with the Terminal panel focused, press `F2` → enter capture mode, all keys forwarded to the PTY.
+- **Exit capture** (shell keeps running in the background): in capture mode press `Esc` or `F2` again. Focus returns to app navigation; you can then use `PgUp/PgDn` and arrow keys to browse terminal scrollback.
+- **Re-enter**: after exiting capture (shell not yet quit), press `F2` again to recapture.
+- **Quit shell back to runner**: in capture mode send `Ctrl+D` or `exit`; once the shell ends, it automatically returns to Command Runner mode.
+- The terminal title shows the current state (`Interactive` / `Capturing`).
 
-> 窗口尺寸随面板大小自动通过 `stty` 同步给 shell；宽字符（CJK）按 2 列占位渲染。
+> Window size is synced to the shell via `stty` as the panel resizes; wide characters (CJK) are rendered at 2 columns.
 
-## 配置与语言
+## Configuration & Language
 
-- 配置落盘到 `~/.vicerc`（JSON：布局 / 主题 / 语言），退出时自动保存。
-- 用环境变量 `VICECODE_CONFIG` 可覆盖配置文件路径（测试隔离用，避免污染家目录）。
-- 界面语言通过 `APP_LOCALE` 切换，默认 `zh_CN`，可选 `en`；缺失的 key 回退英文。
+- Config is persisted to `~/.vicerc` (JSON: layout / theme / language) and auto-saved on exit.
+- Override the config path with the `VICECODE_CONFIG` env var (used for test isolation to avoid polluting the home directory).
+- UI language is switched via `APP_LOCALE`, default `zh_CN`, `en` also available; missing keys fall back to English.
 
 ```bash
 APP_LOCALE=en php bin/vicecode.php
 VICECODE_CONFIG=/tmp/my_vicecode.json php bin/vicecode.php
 ```
 
-## 测试
+## Tests
 
-`tests/` 下既有 headless 单测，也有真实 pty 端到端验收（须真实终端环境，外层已加 `timeout` 兜底）：
+`tests/` contains both headless unit tests and real-pty end-to-end acceptance tests (require a real terminal; wrapped in `timeout` as a safety net):
 
 ```bash
-php tests/interactive_term_unit.php     # 交互式 PTY：仿真器 + pty 管道 headless 单测
-timeout 90 php tests/pty_interactive.php # 交互式 PTY：真实 pty 端到端（F2/echo/Ctrl+D）
-php tests/m6_unit.php                   # 终端/编辑器/键位漂移等回归
+php tests/interactive_term_unit.php     # Interactive PTY: emulator + pty pipe headless unit test
+timeout 90 php tests/pty_interactive.php # Interactive PTY: real pty end-to-end (F2/echo/Ctrl+D)
+php tests/m6_unit.php                   # terminal/editor/keybinding-drift regression
 ```
 
-> 真实 pty 验收脚本严禁裸跑 `bin/vicecode.php`，一律走 `tests/pty_*.php`，并设 `VICECODE_CONFIG` 指向临时文件隔离配置。
+> Never run `bin/vicecode.php` bare for pty acceptance; always go through `tests/pty_*.php` and set `VICECODE_CONFIG` to a temp file to isolate config.
