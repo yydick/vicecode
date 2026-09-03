@@ -57,6 +57,13 @@ final class EditorPanel
      */
     private bool $scrollPinned = false;
 
+    /**
+     * 横向滚动边界指示：左侧（scrollLeft>0）是否还有隐藏内容、右侧是否还有。
+     * 每帧 content() 重新计算，供 App 在编辑器标题栏渲染 ‹/› 提示。
+     */
+    public bool $hLeft = false;
+    public bool $hRight = false;
+
     public function __construct(private App $shell)
     {
     }
@@ -93,6 +100,8 @@ final class EditorPanel
         // buffers 降到 1 个后旧矩形会残留——虽然 onClick() 同样判 hasTabs() 而不会误命中，
         // 但那属于脏状态，也与本类 docblock 声明的「每帧重建」不符。
         $this->tabRects = [];
+        $this->hLeft = false;
+        $this->hRight = false;
 
         $inner = $editor->inner(new Margin(1, 1));
         $W = max(0, $inner->width);
@@ -184,6 +193,23 @@ final class EditorPanel
                 ...$contentSpans
             );
         }
+
+        // 横向滚动边界指示：取可见行的最大显示宽，判断左右是否还有隐藏内容。
+        // 用可见视口内最宽行（而非整文档），既便宜又能正确反映「当前屏」的滚动余量。
+        $maxVisW = 0;
+        for ($i = 0; $i < $visibleRows; $i++) {
+            $li = $buf->scrollTop + $i;
+            if ($li >= $total) {
+                continue;
+            }
+            $w = DisplayWidth::dispWidth($buf->lines[$li] ?? '');
+            if ($w > $maxVisW) {
+                $maxVisW = $w;
+            }
+        }
+        $this->hLeft = $buf->scrollLeft > 0;
+        $this->hRight = $buf->scrollLeft + $textW < $maxVisW;
+
         return ParagraphWidget::fromLines(...$lines);
     }
 

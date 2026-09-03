@@ -249,6 +249,40 @@ $buf->cursorCol = 0; // 首行开头
 $buf->moveLeft();
 check($buf->cursorRow === 0 && $buf->cursorCol === 0, '首行行首左移不越界');
 
+// ─────────────── 8) 横向滚动边界指示 ‹/› ───────────────
+echo "== 横向滚动边界指示 ‹/› ==\n";
+// 单行 201 列宽（dispWidth=202），textW=18：scrollLeft 合法区间 [0, 184]
+$lineI = str_repeat('x', 201);
+$ti = tempnam(sys_get_temp_dir(), 'vc_hi');
+file_put_contents($ti, $lineI);
+$appI = new App();
+$appI->openFile($ti);
+$bI = $appI->buffer;
+$iarea = Area::fromDimensions(22, 5); // inner 20 → gutter 2 → textW 18
+
+// 未横滚：左无、右有
+$appI->editor->onScrollH(0); // scrollPinned=true，scrollLeft=0
+$appI->editor->content($iarea, false);
+check($appI->editor->hLeft === false, '未横滚：左侧指示 ‹ 不显示');
+check($appI->editor->hRight === true, '未横滚：右侧指示 › 显示（行宽超出视口）');
+
+// 滚到最右：左有、右无（184 = 202-18，onScrollH 钳到 maxW-1=201 但 content 再钳到 184）
+$appI->editor->onScrollH(1000);
+$appI->editor->content($iarea, false);
+check($appI->editor->hLeft === true, '滚到最右：左侧指示 ‹ 显示（左侧有隐藏内容）');
+check($appI->editor->hRight === false, '滚到最右：右侧指示 › 不显示（已到行尾）');
+unlink($ti);
+
+// 短行（不溢出）：左右均无指示
+$ts = tempnam(sys_get_temp_dir(), 'vc_hs');
+file_put_contents($ts, 'short');
+$appS = new App();
+$appS->openFile($ts);
+$appS->editor->onScrollH(0);
+$appS->editor->content(Area::fromDimensions(22, 5), false);
+check($appS->editor->hLeft === false && $appS->editor->hRight === false, '短行不溢出：左右指示均不显示');
+unlink($ts);
+
 // ─────────────── 结果 ───────────────
 echo "\n";
 if ($failed) {

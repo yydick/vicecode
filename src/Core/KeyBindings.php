@@ -66,6 +66,7 @@ final class KeyBindings
                 ['PageUp / PageDown', 'help.t_page'],
                 ['Ctrl+L', 'help.t_clear'],
                 ['Ctrl+C', 'help.t_cancel'],
+                ['F2', 'help.t_interactive'],
             ]),
             self::group('help.group_explorer', [
                 ['↑ / ↓', 'help.x_move'],

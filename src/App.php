@@ -23,6 +23,7 @@ use App\Panel\SidebarPanel;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
 use App\Search\SearchModel;
+use App\Terminal\KeyToPty;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
 use PhpTui\Term\Event\CharKeyEvent;
@@ -333,21 +334,37 @@ class App
             ->widget($sidebarInner);
 
         // ── Editor ──
+        // 先算 content()（内部每帧更新 hLeft/hRight 横向滚动边界指示），再据此拼标题，
+        // 避免标题指示比正文晚一帧。
+        $editorWidget = $this->editor->content($a['editor'], $focus === 'editor');
         $editorTitle = ' ' . $this->i18n->t('panel.editor') . ' ';
         if ($this->buffer !== null) {
             $name = basename((string) $this->buffer->path);
             $flag = $this->buffer->dirty ? ' ' . $this->i18n->t('status.dirty') : '';
-            $editorTitle = ' ' . $this->i18n->t('panel.editor') . ': ' . $name . $flag . ' ';
+            $hint = '';
+            if ($this->editor->hLeft) {
+                $hint .= '‹';   // ‹ 左侧还有隐藏内容（已横滚）
+            }
+            if ($this->editor->hRight) {
+                $hint .= '›';   // › 右侧还有隐藏内容
+            }
+            $editorTitle = ' ' . $this->i18n->t('panel.editor') . ': ' . $name . $flag
+                . ($hint !== '' ? ' ' . $hint : '') . ' ';
         }
         $editor = BlockWidget::default()
             ->borders(Borders::ALL)
             ->borderStyle($this->borderStyle($focus === 'editor'))
             ->titles(Title::fromString($editorTitle))
-            ->widget($this->editor->content($a['editor'], $focus === 'editor'));
+            ->widget($editorWidget);
 
-        // ── Terminal（M2 命令运行器） ──
+        // ── Terminal（M2 命令运行器 / 交互式 PTY）──
         $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
-        if ($this->terminal->isRunning()) {
+        if ($this->terminal->mode === 'pty') {
+            $termTitle = ' ' . $this->i18n->t('term.interactive') . ' ';
+            if ($this->terminal->isCaptured()) {
+                $termTitle = ' ' . $this->i18n->t('term.interactive') . ' · ' . $this->i18n->t('term.captured') . ' ';
+            }
+        } elseif ($this->terminal->isRunning()) {
             $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' · ' . $this->i18n->t('term.running') . ' ';
         }
         $terminal = BlockWidget::default()
@@ -568,6 +585,15 @@ class App
             return;
         }
 
+        // F2：终端面板聚焦时进入/退出交互式 PTY 捕获（其余面板忽略）。
+        // 已捕获时按 F2 → toggleInteractive 退出捕获；未捕获（pty 模式但没在捕获）时再按进入。
+        if ($event instanceof FunctionKeyEvent && $event->number === 2) {
+            if ($this->focusPanel() === 'terminal') {
+                $this->terminal->toggleInteractive();
+            }
+            return;
+        }
+
         // 菜单栏打开期间**独占键盘**（模态）：不往下层面板分发，否则在菜单里按方向键
         // 会顺带移动编辑器光标、按 Enter 会插进文档。Esc/方向/Enter 全归菜单自己。
         if ($this->menuBar->isOpen()) {
@@ -618,6 +644,28 @@ class App
                 return;
             }
             return; // 其余键一律吞掉：帮助页是模态的
+        }
+
+        // 交互式 PTY 捕获态：终端面板聚焦且已捕获时，除 F2/Esc 退出键外，
+        // 所有按键经 KeyToPty 编码后转发给 PTY（由真实 shell / 全屏程序解释），
+        // 不再走下面的面板导航分发。
+        if ($this->focusPanel() === 'terminal' && $this->terminal->isCaptured()) {
+            $exit = ($event instanceof FunctionKeyEvent && $event->number === 2)
+                || ($event instanceof CodedKeyEvent && $event->code === KeyCode::Esc);
+            if ($exit) {
+                $this->terminal->exitCapture();
+                return;
+            }
+            // 孤立 ESC 字符（解析器未识别成 Esc）也退出捕获
+            if ($event instanceof CharKeyEvent && $event->char === "\x1b") {
+                $this->terminal->exitCapture();
+                return;
+            }
+            $bytes = KeyToPty::encode($event);
+            if ($bytes !== null) {
+                $this->terminal->sendToPty($bytes);
+            }
+            return;
         }
 
         if ($event instanceof MouseEvent) {
@@ -755,7 +803,7 @@ class App
             } elseif ($this->focusPanel() === 'sidebar') {
                 $this->sidebar->onScroll(MouseEventKind::ScrollDown);
             } elseif ($this->focusPanel() === 'terminal') {
-                $this->terminal->scrollBy(3);
+                $this->terminal->wheel(3);
             } elseif ($this->focusPanel() === 'ai_stream' || $this->focusPanel() === 'ai_input') {
                 $this->ai->onScroll(MouseEventKind::ScrollDown);
             }
@@ -767,7 +815,7 @@ class App
             } elseif ($this->focusPanel() === 'sidebar') {
                 $this->sidebar->onScroll(MouseEventKind::ScrollUp);
             } elseif ($this->focusPanel() === 'terminal') {
-                $this->terminal->scrollBy(-3);
+                $this->terminal->wheel(-3);
             } elseif ($this->focusPanel() === 'ai_stream' || $this->focusPanel() === 'ai_input') {
                 $this->ai->onScroll(MouseEventKind::ScrollUp);
             }

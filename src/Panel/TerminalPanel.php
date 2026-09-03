@@ -5,8 +5,12 @@ namespace App\Panel;
 
 use App\Core\KeyInput;
 use App\App;
+use App\Terminal\Cell;
 use App\Terminal\CommandRunner;
+use App\Terminal\PtyColor;
+use App\Terminal\PtyProcess;
 use App\Terminal\TerminalBuffer;
+use App\Terminal\Vt100Emulator;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
 use PhpTui\Term\Event\CodedKeyEvent;
@@ -16,6 +20,7 @@ use PhpTui\Term\KeyModifiers;
 use PhpTui\Tui\Color\AnsiColor;
 use PhpTui\Tui\Display\Area;
 use PhpTui\Tui\Extension\Core\Widget\ParagraphWidget;
+use PhpTui\Tui\Style\Modifier;
 use PhpTui\Tui\Style\Style;
 use PhpTui\Tui\Text\Line;
 use PhpTui\Tui\Text\Span;
@@ -67,6 +72,25 @@ final class TerminalPanel
 
     private const MAX_HISTORY = 200;
 
+    // ── 交互式 PTY 模式（F2 进入/退出，与命令运行器共存）──
+    /** 'runner' = 命令运行器；'pty' = 真实交互式 shell */
+    public string $mode = 'runner';
+
+    /** 捕获态：所有按键转发 PTY（runner 模式恒为 false） */
+    public bool $captured = false;
+
+    private ?PtyProcess $pty = null;
+
+    private ?Vt100Emulator $emu = null;
+
+    /** 回退滚动偏移（滚轮 / PageUp/Down 调整） */
+    public int $scrollback = 0;
+
+    /** 上次同步给仿真器的尺寸（避免每帧 resize） */
+    private int $lastCols = 0;
+
+    private int $lastRows = 0;
+
     public function __construct(private App $shell)
     {
         $this->runner = new CommandRunner();
@@ -83,13 +107,28 @@ final class TerminalPanel
 
     public function isRunning(): bool
     {
-        return $this->runner->isRunning();
+        if ($this->runner->isRunning()) {
+            return true;
+        }
+        if ($this->mode === 'pty' && $this->pty !== null && $this->pty->isRunning()) {
+            return true;
+        }
+        return false;
     }
 
     // ── 主循环钩子 ────────────────────────────────────
 
-    /** 主循环每轮调用：排空命令管道。返回是否有新内容（供主循环决定是否重绘）。 */
+    /** 主循环每轮调用：排空管道（命令运行器 或 交互式 PTY）。返回是否有新内容（供主循环决定是否重绘）。 */
     public function poll(): bool
+    {
+        if ($this->mode === 'runner') {
+            return $this->pollRunner();
+        }
+        return $this->pollPty();
+    }
+
+    /** runner 模式排空命令管道 */
+    private function pollRunner(): bool
     {
         if (!$this->runner->isRunning()) {
             return false;
@@ -106,10 +145,263 @@ final class TerminalPanel
         return $got;
     }
 
+    /** pty 模式：排空主端输出喂给仿真器；shell 退出则退回 runner。 */
+    private function pollPty(): bool
+    {
+        if ($this->pty === null) {
+            $this->mode = 'runner';
+            return false;
+        }
+        if ($this->pty->pollExited()) {
+            $this->buf->append($this->shell->t('term.interactive_exit') . "\n", false);
+            $this->mode = 'runner';
+            $this->captured = false;
+            $this->pty = null;
+            $this->emu = null;
+            return true;
+        }
+        $bytes = $this->pty->read();
+        if ($bytes === '') {
+            return false;
+        }
+        $this->emu?->write($bytes);
+        return true;
+    }
+
+    // ── 交互式 PTY 控制 ────────────────────────────────
+
+    /**
+     * 切换交互模式：
+     *  - runner → 起 shell、进入捕获态（mode=pty, captured=true）
+     *  - pty 且 captured → 退出捕获（仍可切回，shell 继续跑）
+     *  - pty 且未捕获 → 重新进入捕获
+     */
+    public function toggleInteractive(): void
+    {
+        if ($this->mode === 'runner') {
+            if ($this->runner->isRunning()) {
+                return; // 命令运行中不切换
+            }
+            $this->emu = new Vt100Emulator(80, 24);
+            $this->pty = new PtyProcess();
+            $env = $this->buildPtyEnv();
+            if (!$this->pty->start(
+                (string) (getenv('SHELL') ?: '/bin/bash'),
+                80,
+                24,
+                $this->cwd,
+                $env
+            )) {
+                $this->emu = null;
+                $this->pty = null;
+                $this->buf->append($this->shell->t('term.spawn_failed') . "\n", true);
+                return;
+            }
+            $this->mode = 'pty';
+            $this->captured = true;
+            $this->scrollback = 0;
+            return;
+        }
+        // pty 模式：翻转捕获态
+        $this->captured = !$this->captured;
+        if ($this->captured) {
+            $this->scrollback = 0;
+        }
+    }
+
+    /** 转发按键字节给 PTY（捕获态由 App 调用） */
+    public function sendToPty(string $bytes): void
+    {
+        if ($this->pty !== null && $this->pty->isRunning()) {
+            $this->pty->write($bytes);
+        }
+    }
+
+    /** 退出捕获态（shell 仍在跑，焦点回到应用导航） */
+    public function exitCapture(): void
+    {
+        $this->captured = false;
+    }
+
+    /** 是否处于捕获态（App 据此拦截按键） */
+    public function isCaptured(): bool
+    {
+        return $this->mode === 'pty' && $this->captured;
+    }
+
+    /** 回退滚动（滚轮 / PageUp / PageDown） */
+    public function scrollPty(int $delta): void
+    {
+        $max = $this->emu !== null ? $this->emu->scrollbackSize() : 0;
+        $this->scrollback = max(0, min($max, $this->scrollback + $delta));
+    }
+
+    /** 滚轮：pty 模式翻回退，否则内容滚动 */
+    public function wheel(int $delta): void
+    {
+        if ($this->mode === 'pty') {
+            $this->scrollPty($delta);
+        } else {
+            $this->scrollBy($delta);
+        }
+    }
+
+    /** 构造注入 PTY 的环境变量（继承关键变量，强制 TERM） */
+    private function buildPtyEnv(): array
+    {
+        $keys = [
+            'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TERM', 'SHELL',
+            'PWD', 'HOSTNAME', 'XDG_RUNTIME_DIR', 'DISPLAY',
+        ];
+        $env = [];
+        foreach ($keys as $k) {
+            $v = getenv($k);
+            if ($v !== false) {
+                $env[$k] = $v;
+            }
+        }
+        return $env;
+    }
+
     // ── 渲染 ──────────────────────────────────────────
 
     /** 面板内容：末行固定为命令输入行，其上是输出视口 */
     public function content(Area $terminal, bool $focused): Widget
+    {
+        if ($this->mode === 'pty') {
+            return $this->ptyContent($terminal, $focused);
+        }
+        return $this->runnerContent($terminal, $focused);
+    }
+
+    /** 交互式 PTY 模式渲染：仿真器网格 + 底部提示行（无命令输入行） */
+    private function ptyContent(Area $terminal, bool $focused): Widget
+    {
+        $inner = $terminal->inner(new Margin(1, 1));
+        $W = max(0, $inner->width);
+        $H = max(0, $inner->height);
+        $outH = max(0, $H - 1);   // 末行留给提示行
+
+        if ($outH <= 0 || $W <= 0) {
+            return ParagraphWidget::fromLines(
+                Line::fromSpans(Span::styled('', Style::default()))
+            );
+        }
+
+        // 尺寸同步：emu 初始 80×24，首帧按实际面板尺寸重建；变化时才 resize（避免每帧写 stty）
+        if ($this->emu === null) {
+            $this->emu = new Vt100Emulator($W, $outH);
+            $this->lastCols = $W;
+            $this->lastRows = $outH;
+        } elseif ($this->lastCols !== $W || $this->lastRows !== $outH) {
+            $this->emu->resize($W, $outH);
+            $this->lastCols = $W;
+            $this->lastRows = $outH;
+            if ($this->pty !== null && $this->pty->isRunning()) {
+                $this->pty->resize($W, $outH);
+            }
+        }
+
+        $grid = $this->emu->gridForRender($outH, $this->scrollback);
+        $cursor = $grid['cursor'];
+
+        $lines = [];
+        foreach ($grid['lines'] as $rIdx => $cells) {
+            $spans = [];
+            $curKey = null;
+            $curText = '';
+            $curStyle = Style::default();
+            $flush = static function () use (&$spans, &$curText, &$curStyle): void {
+                if ($curText !== '') {
+                    $spans[] = Span::styled($curText, $curStyle);
+                    $curText = '';
+                }
+            };
+            foreach ($cells as $cIdx => $cell) {
+                $isCursor = $cursor !== null
+                    && $cursor['y'] === $rIdx
+                    && $cursor['x'] === $cIdx;
+                [$st, $key] = $this->styleAndKey($cell, $isCursor);
+                if ($key !== $curKey) {
+                    $flush();
+                    $curKey = $key;
+                    $curStyle = $st;
+                }
+                $ch = $cell->wide ? ' ' : ($cell->ch === '' ? ' ' : $cell->ch);
+                $curText .= $ch;
+            }
+            $flush();
+            $lines[] = Line::fromSpans(...$spans);
+        }
+        $lines[] = $this->ptyHintLine($W, $focused);
+
+        return ParagraphWidget::fromLines(...$lines);
+    }
+
+    /** 单格样式 + 合并判据键（同键合并成一个 Span，降低渲染开销） */
+    private function styleAndKey(Cell $cell, bool $reverse): array
+    {
+        $st = Style::default();
+        $fk = 'd';
+        $bk = 'd';
+        $mods = 0;
+        if ($cell->fg >= 0) {
+            $fg = PtyColor::fg($cell->fg);
+            if ($fg !== null) {
+                $st = $st->fg($fg);
+            }
+            $fk = (string) $cell->fg; // 用原始索引作合并键（Color 对象不可 string 化）
+        }
+        if ($cell->bg >= 0) {
+            $bg = PtyColor::bg($cell->bg);
+            if ($bg !== null) {
+                $st = $st->bg($bg);
+            }
+            $bk = (string) $cell->bg;
+        }
+        if (($cell->flags & Vt100Emulator::FLAG_BOLD) !== 0) {
+            $st = $st->addModifier(Modifier::BOLD);
+            $mods |= 1;
+        }
+        if (($cell->flags & Vt100Emulator::FLAG_DIM) !== 0) {
+            $st = $st->addModifier(Modifier::DIM);
+            $mods |= 2;
+        }
+        if (($cell->flags & Vt100Emulator::FLAG_ITALIC) !== 0) {
+            $st = $st->addModifier(Modifier::ITALIC);
+            $mods |= 4;
+        }
+        if (($cell->flags & Vt100Emulator::FLAG_UNDERLINE) !== 0) {
+            $st = $st->addModifier(Modifier::UNDERLINED);
+            $mods |= 8;
+        }
+        if ($reverse || ($cell->flags & Vt100Emulator::FLAG_REVERSE) !== 0) {
+            $st = $st->addModifier(Modifier::REVERSED);
+            $mods |= 16;
+        }
+        return [$st, $fk . '|' . $bk . '|' . $mods];
+    }
+
+    /** 底部提示行：捕获态提示按 F2 退出；非捕获态提示按 F2 进入交互 */
+    private function ptyHintLine(int $W, bool $focused): Line
+    {
+        $hint = $this->captured
+            ? $this->shell->t('term.interactive_hint')
+            : $this->shell->t('term.interactive_enter');
+        $style = $focused
+            ? $this->shell->theme->style('borderFocus')
+            : $this->shell->theme->style('border');
+        $w = DisplayWidth::dispWidth($hint);
+        if ($w < $W) {
+            $hint .= str_repeat(' ', $W - $w);
+        } elseif ($w > $W) {
+            $hint = DisplayWidth::mbSubDisp($hint, 0, $W);
+        }
+        return Line::fromSpans(Span::styled($hint, $style));
+    }
+
+    /** 命令运行器模式渲染（原 content 逻辑） */
+    private function runnerContent(Area $terminal, bool $focused): Widget
     {
         $inner = $terminal->inner(new Margin(1, 1));
         $W = max(0, $inner->width);
@@ -209,6 +501,11 @@ final class TerminalPanel
 
     public function onChar(CharKeyEvent $e): bool
     {
+        // pty 模式：按键一律由 App 捕获分支转发（捕获态）或走应用导航（非捕获态），
+        // 不进入 runner 的命令输入行。
+        if ($this->mode === 'pty') {
+            return false;
+        }
         $ctrl = ($e->modifiers & KeyModifiers::CONTROL) !== 0;
         if ($ctrl && strtolower($e->char) === 'l') {
             $this->clear();
@@ -239,6 +536,32 @@ final class TerminalPanel
      */
     public function onKey(CodedKeyEvent $e, array $areas): bool
     {
+        // pty 模式：捕获态由 App 转发按键，不会走到这里；
+        // 非捕获态（shell 在跑但焦点在应用导航）时，方向/PageUp/Down/Home/End 翻回退。
+        if ($this->mode === 'pty' && !$this->captured) {
+            switch ($e->code) {
+                case KeyCode::PageUp:
+                    $this->scrollPty(-max(1, ($areas['terminal']->height ?? 4) - 3));
+                    return true;
+                case KeyCode::PageDown:
+                    $this->scrollPty(max(1, ($areas['terminal']->height ?? 4) - 3));
+                    return true;
+                case KeyCode::Up:
+                    $this->scrollPty(-1);
+                    return true;
+                case KeyCode::Down:
+                    $this->scrollPty(1);
+                    return true;
+                case KeyCode::Home:
+                    $this->scrollback = 0;
+                    return true;
+                case KeyCode::End:
+                    $this->scrollback = $this->emu !== null ? $this->emu->scrollbackSize() : 0;
+                    return true;
+                default:
+                    return false;
+            }
+        }
         switch ($e->code) {
             case KeyCode::Enter:
                 $this->submit();
@@ -419,5 +742,9 @@ final class TerminalPanel
     public function shutdown(): void
     {
         $this->runner->shutdown();
+        if ($this->pty !== null) {
+            $this->pty->shutdown();
+            $this->pty = null;
+        }
     }
 }
