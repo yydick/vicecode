@@ -3,12 +3,14 @@ declare(strict_types=1);
 
 namespace App\Panel;
 
+use App\Core\ConfigStore;
 use App\Core\KeyInput;
 use App\App;
 use App\Terminal\Cell;
 use App\Terminal\CommandRunner;
 use App\Terminal\PtyColor;
 use App\Terminal\PtyProcess;
+use App\Terminal\SessionStore;
 use App\Terminal\TerminalBuffer;
 use App\Terminal\Vt100Emulator;
 use App\Text\DisplayWidth;
@@ -82,6 +84,16 @@ final class TerminalPanel
     private ?PtyProcess $pty = null;
 
     private ?Vt100Emulator $emu = null;
+
+    // ── 会话持久化恢复（App 构造末尾 maybeRestore() 灌入，首帧真实尺寸下 spawn）──
+    /** 恢复目标 cwd（启动 cwd，非运行时 cd） */
+    private ?string $restoreCwd = null;
+
+    /** 恢复快照纯文本 */
+    private ?string $restoreText = null;
+
+    /** 待恢复标记：首帧 ptyContent() 在真实列宽下起 pty 并灌入 */
+    private bool $restorePending = false;
 
     /** 回退滚动偏移（滚轮 / PageUp/Down 调整） */
     public int $scrollback = 0;
@@ -229,6 +241,90 @@ final class TerminalPanel
         return $this->mode === 'pty' && $this->captured;
     }
 
+    // ── 会话持久化 ────────────────────────────────────
+
+    /**
+     * 退出时存盘（在 shutdown() 最开头调用，此时 emu 仍持有内容、早于杀进程）。
+     * 仅当开启持久化且处于 pty 模式且仿真器就绪时落盘主屏+滚动历史纯文本。
+     * 落盘失败静默（不致命）。
+     */
+    public function saveSession(): void
+    {
+        if (!ConfigStore::persistSession()) {
+            return;
+        }
+        if ($this->mode !== 'pty' || $this->emu === null) {
+            return;
+        }
+        SessionStore::save([
+            'cwd' => $this->cwd,
+            'text' => $this->emu->exportText(),
+            'savedAt' => time(),
+        ]);
+    }
+
+    /**
+     * 启动恢复（App 构造末尾调用）。仅当开启持久化且存在有效快照时：
+     * 灌入 cwd/text、置 pty 捕获态、标记待恢复——**此刻不起 pty**（屏宽未定会折行错位，
+     * 且 shell 提示符会被快照冲掉）；真正的 spawn+灌入推迟到 ptyContent() 首帧真实尺寸。
+     */
+    public function maybeRestore(): void
+    {
+        if (!ConfigStore::persistSession()) {
+            return;
+        }
+        $snap = SessionStore::load();
+        if ($snap === null) {
+            return;
+        }
+        $this->restoreCwd = $snap['cwd'];
+        $this->restoreText = $snap['text'];
+        $this->restorePending = true;
+        $this->mode = 'pty';
+        $this->captured = true;
+        $this->scrollback = 0;
+        // 清掉上次会话快照，避免下次启动又恢复同一份（会话已「消费」）
+        SessionStore::clear();
+    }
+
+    /**
+     * 首帧恢复：在真实列宽下起一个新 shell，把快照纯文本灌入仿真器，
+     * 使新 shell 的提示符接在快照之后。pty start 失败则回退 runner（不致命）。
+     */
+    private function restoreSession(int $W, int $outH): void
+    {
+        $cwd = $this->restoreCwd ?? $this->cwd;
+        $text = $this->restoreText ?? '';
+        $this->emu = new Vt100Emulator($W, $outH);
+        $this->pty = new PtyProcess();
+        $env = $this->buildPtyEnv();
+        if (!$this->pty->start(
+            (string) (getenv('SHELL') ?: '/bin/bash'),
+            $W,
+            $outH,
+            $cwd,
+            $env
+        )) {
+            // 失败回退 runner（不致命）
+            $this->emu = null;
+            $this->pty = null;
+            $this->mode = 'runner';
+            $this->captured = false;
+            $this->restorePending = false;
+            $this->restoreCwd = null;
+            $this->restoreText = null;
+            return;
+        }
+        $this->emu->importText($text);
+        $this->lastCols = $W;
+        $this->lastRows = $outH;
+        $this->cwd = $cwd; // 仅恢复启动 cwd（v1 局限：运行时 cd 不恢复）
+        $this->scrollback = 0;
+        $this->restorePending = false;
+        $this->restoreCwd = null;
+        $this->restoreText = null;
+    }
+
     /** 回退滚动（滚轮 / PageUp / PageDown） */
     public function scrollPty(int $delta): void
     {
@@ -286,6 +382,15 @@ final class TerminalPanel
             return ParagraphWidget::fromLines(
                 Line::fromSpans(Span::styled('', Style::default()))
             );
+        }
+
+        // 首帧恢复：在真实列宽下起 pty 并灌入快照（规避屏宽未定导致的折行错位）。
+        // 恢复失败已回退 runner，本帧改走 runner 渲染。
+        if ($this->restorePending && $this->pty === null) {
+            $this->restoreSession($W, $outH);
+            if ($this->mode !== 'pty') {
+                return $this->runnerContent($terminal, $focused);
+            }
         }
 
         // 尺寸同步：emu 初始 80×24，首帧按实际面板尺寸重建；变化时才 resize（避免每帧写 stty）
@@ -741,6 +846,8 @@ final class TerminalPanel
     /** 退出时收尾：停掉还在跑的子进程，避免留下孤儿进程 */
     public function shutdown(): void
     {
+        // 先存盘（此时 emu 仍持有内容、pty 还没杀），再回收 pty 进程
+        $this->saveSession();
         $this->runner->shutdown();
         if ($this->pty !== null) {
             $this->pty->shutdown();

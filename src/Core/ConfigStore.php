@@ -56,6 +56,18 @@ final class ConfigStore
     }
 
     /**
+     * 是否持久化交互式 PTY 会话（opt-in，默认关闭）。
+     *
+     * 默认 false：滚动历史可能含密码/令牌，落盘有隐私风险，必须由用户显式开启。
+     * 仅当配置中该键为真值时返回 true；缺失 / 类型不对一律 false。
+     */
+    public static function persistSession(): bool
+    {
+        $v = self::load()['persistSession'] ?? false;
+        return $v === true || $v === 1 || $v === '1';
+    }
+
+    /**
      * 写入配置；失败静默返回 false（不抛）。
      * @param array<string,mixed> $data
      */

@@ -135,9 +135,24 @@ Press **F2** to allocate a **real PTY** and launch an interactive shell (bash); 
 
 > Window size is synced to the shell via `stty` as the panel resizes; wide characters (CJK) are rendered at 2 columns.
 
+### Session persistence (opt-in)
+
+By default the interactive shell dies when you quit ViceCode (the PTY is an OS process, killed on exit). With session persistence enabled, ViceCode saves a snapshot of the terminal on exit — scrollback + the current main screen as **plain text** plus the startup working directory — and on the next launch automatically spawns a fresh shell and replays the snapshot, so the session appears to continue.
+
+- **Off by default** — opt in by adding `"persistSession": true` to your config (`~/.vicerc`, or the file pointed to by `VICECODE_CONFIG`).
+- The snapshot is written to `~/.vicecode_session` (next to the config, or `dirname(VICECODE_CONFIG)/.vicecode_session`) with `0600` permissions, and is consumed (deleted) after a successful restore so it is not replayed twice.
+- **Privacy**: scrollback may contain passwords / tokens typed at prompts. The file is `0600`, but consider it sensitive and only enable persistence on trusted machines.
+
+**Limitations (v1, by design):**
+
+- Only the **main screen** is persisted; full-screen programs (`vim` / `top` / `less` / `ssh`) run on the alternate screen and are intentionally excluded — their frozen UI would be garbage after restart.
+- **No colors** — plain text only.
+- Only the **startup** working directory is restored; a `cd` performed inside the shell is *not* restored.
+- The PTY process itself cannot be serialized; what is restored is a brand-new shell with the snapshot text injected above its fresh prompt.
+
 ## Configuration & Language
 
-- Config is persisted to `~/.vicerc` (JSON: layout / theme / language) and auto-saved on exit.
+- Config is persisted to `~/.vicerc` (JSON: layout / theme / language, and `persistSession` if you set it) and auto-saved on exit. On save, ViceCode **merges** with the existing file so hand-edited keys (like `persistSession`) are preserved.
 - Override the config path with the `VICECODE_CONFIG` env var (used for test isolation to avoid polluting the home directory).
 - UI language is switched via `APP_LOCALE`, default `zh_CN`, `en` also available; missing keys fall back to English.
 
@@ -153,6 +168,8 @@ VICECODE_CONFIG=/tmp/my_vicecode.json php bin/vicecode.php
 ```bash
 php tests/interactive_term_unit.php     # Interactive PTY: emulator + pty pipe headless unit test
 timeout 90 php tests/pty_interactive.php # Interactive PTY: real pty end-to-end (F2/echo/Ctrl+D)
+php tests/session_unit.php              # Session persistence: export/import + App restore (headless)
+timeout 120 php tests/pty_session.php   # Session persistence: save on exit -> restore on restart (real pty)
 php tests/m6_unit.php                   # terminal/editor/keybinding-drift regression
 ```
 

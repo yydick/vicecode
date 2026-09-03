@@ -927,6 +927,79 @@ final class Vt100Emulator
         return count($this->scrollback);
     }
 
+    // ── 会话持久化：导出 / 导入纯文本 ───────────────────
+
+    /**
+     * 导出当前会话的纯文本快照（滚动历史 + 主屏尾 N 行），用于退出时落盘。
+     *
+     * 设计取舍（见计划文档「风险与说明」）：
+     *  - 始终取**主屏** `$screen`，即使当前在交替屏（vim 等全屏 UI）也忽略交替屏——
+     *    交替屏是瞬态 UI，持久化它会变成冻结垃圾；主屏退出那一刻的快照才值得保留。
+     *  - 跳过宽字符右占位格（wide===true），行尾空白 rtrim，行以 `\n` 连接。
+     *  - 不含颜色（v1 纯文本）。
+     *
+     * @param int $maxLines 最多保留的尾行数（受 SCROLLBACK_MAX 约束，无上限传 0）
+     */
+    public function exportText(int $maxLines = self::SCROLLBACK_MAX): string
+    {
+        $combined = array_merge($this->scrollback, $this->screen);
+        if ($maxLines > 0 && count($combined) > $maxLines) {
+            $combined = array_slice($combined, -$maxLines);
+        }
+        $lines = [];
+        foreach ($combined as $row) {
+            $lines[] = $this->rowToText($row);
+        }
+        return implode("\n", $lines);
+    }
+
+    /**
+     * 从纯文本快照重建会话内容（恢复时灌入）。
+     *
+     * 过程：先清空（保留主屏语义、丢交替屏与残字节、光标归零），再逐行
+     * `$this->write($line . "\r\n")`（复用仿真器自带滚动/回退逻辑，超屏高自动入 scrollback）。
+     * 写入前先剥离文本中的转义序列，避免把快照里的残留控制字节当指令解析。
+     * 光标自然落到末行，等待后续新 shell 提示符接在快照之后。
+     */
+    public function importText(string $text): void
+    {
+        // 清空：保留主屏语义，丢弃交替屏与残字节，光标归零
+        $this->scrollback = [];
+        $this->screen = $this->blankGrid($this->cols, $this->rows);
+        $this->usingAlt = false;
+        $this->pending = '';
+        $this->cx = 0;
+        $this->cy = 0;
+
+        // 剥掉可能残留的转义序列与裸控制字符（保留 \n \r \t），
+        // 避免把快照当成指令解析；最后兜底清掉任何孤立 ESC。
+        // 用 # 作定界符，避免字符类里的 / 与 / 定界符冲突。
+        $clean = preg_replace(
+            '#\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\([AB0]|\)[AB0]|[=>])|[\x00-\x08\x0b\x0c\x0e-\x1f]#',
+            '',
+            $text
+        );
+        $clean = is_string($clean) ? str_replace("\x1b", '', $clean) : '';
+
+        $lines = explode("\n", $clean);
+        foreach ($lines as $line) {
+            $this->write($line . "\r\n");
+        }
+    }
+
+    /** 单行网格 → 纯文本（跳过宽字符右占位格、行尾去白） */
+    private function rowToText(array $row): string
+    {
+        $s = '';
+        foreach ($row as $cell) {
+            if ($cell->wide === true) {
+                continue; // 宽字符右占位格
+            }
+            $s .= $cell->ch;
+        }
+        return rtrim($s);
+    }
+
     /** @param list<list<Cell>> $grid */
     private function sliceRows(array $grid, int $start, int $rows): array
     {

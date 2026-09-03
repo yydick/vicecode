@@ -187,6 +187,9 @@ class App
             $this->search->shutdown();
             $this->terminal->shutdown();
         });
+        // 退出时若开启持久化，shutdown 闭包会经 terminal->saveSession() 存盘；
+        // 这里在构造末尾尝试恢复上次的 pty 会话（开启且存在快照时）。
+        $this->terminal->maybeRestore();
         $roots = $this->sidebar->tree()->roots;
         if (!empty($roots)) {
             $this->selectedPath = $roots[0]->path;
@@ -967,7 +970,13 @@ class App
     public function saveConfig(): bool
     {
         try {
-            return ConfigStore::save([
+            // 合并已有配置（而非整体覆盖）：保留用户手改的其它键（如 persistSession），
+            // 否则每次干净退出都会把 .vicerc 重写掉、丢掉用户设置。
+            $existing = ConfigStore::load();
+            if (!is_array($existing)) {
+                $existing = [];
+            }
+            $data = array_merge($existing, [
                 'layout' => [
                     'sidebarWidth' => $this->layout->sidebarWidth,
                     'aiWidth' => $this->layout->aiWidth,
@@ -977,6 +986,7 @@ class App
                 'theme' => $this->theme->id,
                 'locale' => $this->i18n->locale(),
             ]);
+            return ConfigStore::save($data);
         } catch (\Throwable $e) {
             return false;
         }

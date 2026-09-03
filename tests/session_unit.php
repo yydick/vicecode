@@ -1,0 +1,98 @@
+<?php
+declare(strict_types=1);
+
+/**
+ * headless 验收：交互式 PTY 会话持久化（不涉及真实 pty 子进程）。
+ *
+ * 三块独立验证：
+ *   1. Vt100Emulator exportText/importText 纯文本往返
+ *      —— 含 CJK 宽字（占位格跳过）、超屏高制造 scrollback、无残留 ESC。
+ *   2. SessionStore 存 / 取 / 清 往返（VICECODE_CONFIG 隔离）。
+ *   3. App 层接线：开启 persistSession + 预置快照 → 新 App 构造后「自动进入 pty 恢复态」
+ *      （mode=pty, captured=true，且快照被消费清除）；本测试不调用 content()，故不起真实 pty。
+ *   4. 反向：persistSession=false 时即便存在快照也不恢复（默认关闭，隐私优先）。
+ *
+ * 运行：php tests/session_unit.php
+ */
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use App\App;
+use App\Core\ConfigStore;
+use App\Terminal\SessionStore;
+use App\Terminal\Vt100Emulator;
+
+$failed = false;
+function check(bool $cond, string $msg): void
+{
+    global $failed;
+    echo ($cond ? '  [OK] ' : '  [FAIL] ') . $msg . "\n";
+    if (!$cond) {
+        $failed = true;
+    }
+}
+
+// 隔离配置：默认开启持久化
+$cfg = tempnam(sys_get_temp_dir(), 'vc_sscfg');
+file_put_contents($cfg, (string) json_encode(['persistSession' => true]));
+putenv('VICECODE_CONFIG=' . $cfg);
+
+echo "== 1. Vt100Emulator 导出/导入纯文本往返 ==\n";
+$emu = new Vt100Emulator(80, 24);
+$emu->write("hello world\r\n");
+$emu->write("中文宽字测试 line\r\n");
+$emu->write("echo MARK_A\r\n");
+for ($i = 0; $i < 30; $i++) {            // 超 24 行，制造 scrollback
+    $emu->write("scroll line $i\r\n");
+}
+$text = $emu->exportText();
+check(str_contains($text, 'hello world'), 'exportText 含普通行');
+check(str_contains($text, '中文宽字测试 line'), 'exportText 含 CJK 宽字行（占位格已跳过）');
+check(str_contains($text, 'MARK_A'), 'exportText 含命令回声');
+check(!str_contains($text, "\x1b"), 'exportText 无 ESC 残留');
+
+$emu2 = new Vt100Emulator(80, 24);
+$emu2->importText($text);
+$text2 = $emu2->exportText();
+check(str_contains($text2, 'hello world'), 'import→export 往返：普通行仍在');
+check(str_contains($text2, '中文宽字测试 line'), 'import→export 往返：CJK 行仍在');
+check(str_contains($text2, 'MARK_A'), 'import→export 往返：命令回声仍在');
+check(!str_contains($text2, "\x1b"), 'import→export 往返：仍无 ESC');
+check(str_contains($emu2->exportText(), 'scroll line 29'), 'import→export 往返：scrollback 行保留');
+
+echo "\n== 2. SessionStore 存 / 取 / 清 往返 ==\n";
+SessionStore::clear();
+$ok = SessionStore::save(['cwd' => '/tmp/work', 'text' => $text, 'savedAt' => 123]);
+check($ok, 'SessionStore::save 成功');
+$snap = SessionStore::load();
+check($snap !== null, 'SessionStore::load 非 null');
+check(($snap['cwd'] ?? null) === '/tmp/work', 'load 还原 cwd');
+check(($snap['text'] ?? null) === $text, 'load 还原 text 完全一致');
+check(SessionStore::clear(), 'SessionStore::clear 成功');
+check(SessionStore::load() === null, 'clear 后 load 返回 null');
+
+echo "\n== 3. App 层恢复接线（不起真实 pty）==\n";
+SessionStore::clear();
+SessionStore::save(['cwd' => '/tmp/restore_cwd', 'text' => "RESTORE_MARK_X\r\necho done\r\n", 'savedAt' => time()]);
+$app = new App();   // 构造末尾 maybeRestore() 应加载快照、进入 pty 恢复态
+check($app->terminal->mode === 'pty', 'App 构造后：开启且存在快照 → mode=pty');
+check($app->terminal->captured === true, 'App 构造后：进入捕获恢复态 captured=true');
+check(SessionStore::load() === null, '恢复后快照已「消费」（文件清除），不会重复恢复');
+
+echo "\n== 4. 默认关闭：persistSession=false 不恢复 ==\n";
+$cfg2 = tempnam(sys_get_temp_dir(), 'vc_sscfg2');
+file_put_contents($cfg2, (string) json_encode(['persistSession' => false]));
+putenv('VICECODE_CONFIG=' . $cfg2);
+// 在 cfg2 名下预置一份快照
+SessionStore::save(['cwd' => '/tmp/x', 'text' => 'Y', 'savedAt' => 1]);
+$app2 = new App();
+check($app2->terminal->mode === 'runner', 'persistSession=false：即使存在快照也不恢复，mode 仍为 runner');
+
+// 清理隔离文件（含各自目录下的快照）
+@unlink(dirname($cfg) . '/' . SessionStore::FILE_NAME);
+@unlink(dirname($cfg2) . '/' . SessionStore::FILE_NAME);
+@unlink($cfg);
+@unlink($cfg2);
+
+echo $failed ? "\nRESULT: FAIL\n" : "\nRESULT: PASS\n";
+exit($failed ? 1 : 0);
