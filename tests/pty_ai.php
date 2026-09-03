@@ -50,6 +50,25 @@ $readPty = static function ($stream, int $len) {
     }
 };
 
+// 抽干直到静默：普通 readPty 一遇空 fread 就返回，可能只抓到部分帧；这里一直读到静默，
+// 确保拿到点击后那次完整的差分重绘（含状态栏焦点标签的连续写入）。
+$drainPty = static function ($stream, float $idleSec = 0.25) use ($readPty) {
+    $s = '';
+    $idle = 0.0;
+    $start = microtime(true);
+    while ($idle < $idleSec && (microtime(true) - $start) < 8.0) {
+        $chunk = $readPty($stream, 65536);
+        if ($chunk === '' || $chunk === false) {
+            usleep(20000);
+            $idle += 0.02;
+        } else {
+            $s .= $chunk;
+            $idle = 0.0;
+        }
+    }
+    return $s;
+};
+
 $failed = false;
 function check(bool $cond, string $msg): void
 {
@@ -116,9 +135,14 @@ $ar = $ai->position->y + intdiv($ai->height, 2) + 1;
 fwrite($pipes[0], "\x1b[<0;{$ac};{$ar}M");
 fwrite($pipes[0], "\x1b[<0;{$ac};{$ar}m");
 usleep(400000);
-$out0 = normalize($readPty($pipes[1], 16384));
-// 只看 'aiinput'：状态栏前缀（focus/焦点）随语言包变化，断言不要绑死文案
-check(str_contains($out0, 'aiinput'), '点击 AI 输入框 → 焦点切到 ai_input（状态栏可见）');
+$clickRaw = $drainPty($pipes[1]); // 抽干点击后的整次差分重绘（含状态栏焦点标签）
+// 状态栏焦点标签恒为 strtoupper(panelId)，即 focus=ai_input 时渲染「=AI_INPUT」（与语言包
+// 无关：无论 zh「焦点」还是 en「focus」，值都是未翻译的 AI_INPUT）。php-tui 差分渲染把它拆成
+// col68 的 A 与 col70 起的 _INPUT，中间 col69 是边框分隔符、并非可恢复的 I——所以整词
+// 「aiinput」在单帧里永不连续，跨帧重建也补不出（那个位置本来就不是 I）。
+// 但点击帧里 _INPUT 是连续写入的，且五个面板标识符里只有 AI_INPUT 带下划线（边框标题用空格
+// 「AI Input」、无下划线），故直接对原始字节查 '_input' 即可，跨语言、抗拆词。
+check(str_contains(strtolower($clickRaw), '_input'), '点击 AI 输入框 → 焦点切到 ai_input（状态栏可见）');
 
 // ── 打字 + 回车发送 ───────────────────────────────────
 // 刻意打中文：pty 里 IME/UTF-8 是真实多字节路径，headless 用 CharKeyEvent 构造不出来
