@@ -1,6 +1,7 @@
 {
     "name": "yydick/vicecode",
     "type": "project",
+    "license": "MIT",
     "require": {
         "php": ">=8.3",
         "php-tui/php-tui": "^0.2",
