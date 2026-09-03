@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "cb9eea035d88d4edfc11c6738e615d27",
+    "content-hash": "4c2a66af94f087c10401a45ff28f19df",
     "packages": [
         {
             "name": "php-tui/cassowary",
@@ -215,7 +215,8 @@
     "prefer-stable": false,
     "prefer-lowest": false,
     "platform": {
-        "php": ">=8.3"
+        "php": ">=8.3",
+        "ext-swoole": "*"
     },
     "platform-dev": [],
     "plugin-api-version": "2.6.0"

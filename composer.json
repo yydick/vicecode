@@ -1,6 +1,7 @@
 {
     "name": "yydick/vicecode",
     "type": "project",
+    "description": "VSCode-style multi-panel terminal workspace (TUI) built with php-tui and Swoole.",
     "license": "MIT",
     "require": {
         "php": ">=8.3",
