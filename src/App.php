@@ -857,6 +857,9 @@ class App
     private function tryStartDrag(MouseEvent $e, array $a): bool
     {
         $tol = self::DRAG_TOL;
+        // 面板在拖拽轴上的最小可点击尺寸：小于它的面板，其拖拽容差带会吞掉整个内部，
+        // 导致"点中间反而拖不动、无法聚焦"。此时把点击交给焦点逻辑；从相邻的大面板一侧仍可拖动调整。
+        $min = 2 * $tol + 1;
         $mainTop = $a['sidebar']->position->y;
         $mainBottom = $a['status']->position->y; // 状态栏起始 = 主区底部
 
@@ -864,16 +867,22 @@ class App
         $sidebarEdge = $a['sidebar']->position->x + $a['sidebar']->width;
         if (abs($e->column - $sidebarEdge) <= $tol
             && $e->row >= $mainTop && $e->row < $mainBottom) {
-            $this->drag = ['which' => 'sidebar', 'horizontal' => false];
-            return true;
+            $key = $e->column <= $sidebarEdge ? 'sidebar' : 'editor';
+            if ($a[$key]->width > $min) {
+                $this->drag = ['which' => 'sidebar', 'horizontal' => false];
+                return true;
+            }
         }
 
         // 竖分隔条②：AI 列左边界（x = ai_stream.x）
         $aiEdge = $a['ai_stream']->position->x;
         if (abs($e->column - $aiEdge) <= $tol
             && $e->row >= $mainTop && $e->row < $mainBottom) {
-            $this->drag = ['which' => 'ai', 'horizontal' => false];
-            return true;
+            $key = $e->column < $aiEdge ? 'editor' : 'ai_stream';
+            if ($a[$key]->width > $min) {
+                $this->drag = ['which' => 'ai', 'horizontal' => false];
+                return true;
+            }
         }
 
         // 横分隔条①：编辑器下边界（y = editor.y + editor.height），且仅在中间列水平范围内
@@ -882,8 +891,11 @@ class App
         $editorEdge = $a['editor']->position->y + $a['editor']->height;
         if (abs($e->row - $editorEdge) <= $tol
             && $e->column >= $centerX && $e->column < $centerX + $centerW) {
-            $this->drag = ['which' => 'center', 'horizontal' => true];
-            return true;
+            $key = $e->row < $editorEdge ? 'editor' : 'terminal';
+            if ($a[$key]->height > $min) {
+                $this->drag = ['which' => 'center', 'horizontal' => true];
+                return true;
+            }
         }
 
         // 横分隔条②：AI 消息流下边界（y = ai_stream.y + ai_stream.height），且在 AI 列水平范围内
@@ -892,8 +904,11 @@ class App
         $aiEdgeY = $a['ai_stream']->position->y + $a['ai_stream']->height;
         if (abs($e->row - $aiEdgeY) <= $tol
             && $e->column >= $aiX && $e->column < $aiX + $aiW) {
-            $this->drag = ['which' => 'ai_input', 'horizontal' => true];
-            return true;
+            $key = $e->row < $aiEdgeY ? 'ai_stream' : 'ai_input';
+            if ($a[$key]->height > $min) {
+                $this->drag = ['which' => 'ai_input', 'horizontal' => true];
+                return true;
+            }
         }
 
         return false;

@@ -110,7 +110,12 @@ fwrite($pipes[0], "\x1b[<0;{$tc};{$tr}m");
 usleep(900000);
 
 $out = normalize($readPty($pipes[1], 8192));
-check(str_contains($out, 'master'), '屏幕含当前分支 master');
+// 分支名随仓库实际状态变化（如 develop），断言须基于真实分支而非硬编码 master
+$branch = trim((string) @shell_exec('git rev-parse --abbrev-ref HEAD 2>/dev/null'));
+if ($branch === '') {
+    $branch = 'develop';
+}
+check(str_contains($out, $branch), "屏幕含当前分支 {$branch}");
 check(str_contains($out, '变更') || str_contains($out, '状态'), 'GIT tab 显示变更/状态');
 check(str_contains($out, 'commit'), 'GIT tab 渲染 Commit 按钮');
 check(str_contains($out, '提交信息'), 'GIT tab 渲染提交信息输入框（占位）');
