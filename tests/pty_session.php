@@ -105,6 +105,7 @@ $seqA = [
     ["\t", 700000],                 // editor -> terminal
     ["\x1bOQ", 1800000],            // F2：进入交互式 PTY（捕获态）；等 shell 启动
     ["echo MARK_OLD\r", 1200000],   // 捕获态键入
+    ["echo -e \"\\033[31mCOLOR_RED_X\\033[0m\"\r", 1200000], // 彩色标记（红字），验证颜色随快照恢复
     ["\x1b", 600000],               // Esc：退出捕获（shell 仍在跑，emu 仍持有内容）
     ["\x11", 1800000],              // Ctrl+Q：干净退出 → shutdown → saveSession 落盘
 ];
@@ -147,6 +148,8 @@ check($rb['code'] === 0, "干净退出 exit=$rb[code]");
 check(!$fatalB, '无 Fatal / Uncaught');
 check(str_contains($nb, 'markold'), 'MARK_OLD 凭空出现（本次运行未键入，只能源于恢复快照）');
 check(str_contains($nb, 'marknew'), '新 shell 仍可交互：MARK_NEW 已渲染');
+check(str_contains($nb, 'colorredx'), '彩色标记 COLOR_RED_X 文本经重启仍在（cells 还原）');
+check(str_contains($rb['out'], "\x1b[31m"), '重启后渲染仍含红色 SGR（颜色随快照恢复，非本次键入）');
 check($sessionConsumed, '恢复后快照已消费（文件清除），不会二次恢复');
 
 @unlink($cfgFile);

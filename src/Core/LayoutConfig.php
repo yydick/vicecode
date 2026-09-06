@@ -6,7 +6,7 @@ namespace App\Core;
 /**
  * 可变布局配置（R5 拖拽分隔条）。
  *
- * 把原本散落在 LayoutFactory 里的硬编码约束（侧栏 30 / AI 45 / 编辑器 60% / AI 输入框 3）
+ * 把原本散落在 LayoutFactory 里的硬编码约束（侧栏 30 / AI 45 / 编辑器 60% / AI 输入框 6）
  * 抽成一份数据，拖拽分隔条时改这里，渲染与命中测试共用同一份，杜绝「两处约束不同步」。
  *
  * 设计为**不可变值对象**：每次拖拽更新都返回一个新实例（with*），App 持有的引用整体替换。
@@ -20,7 +20,7 @@ final class LayoutConfig
     public const DEFAULT_SIDEBAR = 30;
     public const DEFAULT_AI = 45;
     public const DEFAULT_EDITOR_RATIO = 0.60;
-    public const DEFAULT_AI_INPUT = 3;
+    public const DEFAULT_AI_INPUT = 5;
 
     /** 侧栏宽度（列） */
     public const MIN_SIDEBAR = 12;
@@ -37,8 +37,11 @@ final class LayoutConfig
     public const MIN_EDITOR_RATIO = 0.2;
     public const MAX_EDITOR_RATIO = 0.8;
 
-    /** AI 输入框高度（行） */
-    public const MIN_AI_INPUT = 1;
+    /** AI 输入框框高（行）= 上下边框 + 输入内容行。
+     *  工具栏（发送/换行/清空）用图标放在**顶边框**（右对齐），不占输入行。
+     *  默认 5 = 上下边框(2) + 3 行输入内容（输入区恒 ≥3 行，长 prompt 不被截断）。
+     *  最小 5 = 上下边框(2) + 至少 3 行输入（用户要求输入区最少 3 行，故框高下限即 5）。 */
+    public const MIN_AI_INPUT = 5;
     public const MAX_AI_INPUT = 30;
     /** AI 消息流最少留几行，避免输入框把消息流完全吞掉 */
     public const MIN_AI_STREAM = 3;

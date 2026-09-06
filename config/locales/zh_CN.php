@@ -24,6 +24,7 @@ return [
     'status.readonly'  => '只读',
     'status.locale'    => '语言',
     'status.branch'    => '分支',
+    'status.cwd'       => '目录',
     'status.provider'  => 'AI',
     'status.theme'     => '主题',
     'status.mode'      => '模式',
@@ -33,6 +34,10 @@ return [
     'status.l_ai'      => 'AI',
     'status.l_editor'  => '编辑',
     'status.l_input'   => '输入',
+    'status.copied'     => '已复制 {n} 字符',
+    'status.copied_msg' => '已复制消息',
+    'status.pasted'      => '已粘贴 {n} 字符',
+    'status.paste_pending' => '正在读取剪贴板…',
 
     'ai.input_hint'    => '（回车发送）',
 
@@ -176,6 +181,7 @@ return [
     'help.a_history'       => '调取历史提问',
     'help.a_page'          => '滚动消息流',
     'help.a_stop'          => '停止生成',
+    'help.e_paste'         => '粘贴（Ctrl+V / Shift+Ins）',
     'help.title'           => '快捷键',
     'help.close'           => 'Esc / ? / q 关闭',
     'help.scroll_hint'     => '↑↓ 或滚轮滚动',

@@ -134,6 +134,11 @@ final class StatusBarPanel
             // ⚠️ tab 不能排太低：侧栏 tab **只显示图标不显示文字**，状态栏这行是它
             // 唯一的文字标识，丢了用户就分不清当前在哪个 tab。
             ['k' => 'tab',     'p' => 75,  'o' => 6, 't' => $t('status.tab') . '=' . $this->shell->sidebar->tabLabel()],
+            // 终端 cwd：仅在聚焦终端时显示（避免与其它面板争抢状态栏空间）。
+            // 值来自 PROMPT_COMMAND 钩子经 OSC 实时上报的 shell 工作目录。
+            ['k' => 'cwd',     'p' => 60,  'o' => 10, 't' => $this->shell->focusPanel() === 'terminal'
+                ? $t('status.cwd') . '=' . $this->shell->terminal->cwd()
+                : ''],
             // 拖拽尺寸段：排最右、优先级最高，拖拽时必定显示，松手即消失。
             ['k' => 'layout',  'p' => 95,  'o' => 11, 't' => $layout],
         ];

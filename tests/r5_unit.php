@@ -131,7 +131,7 @@ check(!$app->isDragging(), '松开 → 退出拖拽');
 echo "\n== AI 输入框分隔条 ==\n";
 $app = new App();
 $a = $app->areas($vp);
-check($a['ai_input']->height === 3, '初始 AI 输入框高 3（默认）');
+check($a['ai_input']->height === 5, '初始 AI 输入框高 5（默认：上下边框+3行输入；工具栏图标在顶边框）');
 $aiEdgeY = $a['ai_stream']->position->y + $a['ai_stream']->height; // 约 36
 $aiX = $a['ai_stream']->position->x;
 $aiW = $a['ai_stream']->width;
@@ -146,9 +146,9 @@ $aiH = $a['ai_stream']->height + $a['ai_input']->height; // 38, 底沿 = aiTop+3
 $app->handle($drag($hitCol, 20), $vp);
 check($app->layout->aiInputHeight === 19, '拖到 row=20 → AI 输入框高精确为 19');
 
-// 拖到 row=38 → 高 = (aiTop+38) - 38 = aiTop → 实际 = 1（MIN_AI_INPUT）
+// 拖到 row=38 → 高 = (aiTop+38) - 38 = aiTop → 实际 = 5（MIN_AI_INPUT：上下边框+至少3行输入）
 $app->handle($drag($hitCol, 38), $vp);
-check($app->layout->aiInputHeight === 1, '拖到 row=38 → 输入框高 clamp 到 MIN 1');
+check($app->layout->aiInputHeight === 5, '拖到 row=38 → 输入框高 clamp 到 MIN 5');
 
 $app->handle($up($hitCol, 38), $vp);
 check(!$app->isDragging(), '松开 → 退出拖拽');

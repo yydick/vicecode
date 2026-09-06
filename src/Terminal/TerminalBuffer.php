@@ -72,6 +72,39 @@ final class TerminalBuffer
     }
 
     /**
+     * 导出全部行（[text, err(0|1)] 元组），供会话持久化。
+     * @return list<array{0:string,1:int}>
+     */
+    public function exportLines(): array
+    {
+        $out = [];
+        foreach ($this->lines as $l) {
+            $out[] = [$l['text'], $l['err'] ? 1 : 0];
+        }
+        return $out;
+    }
+
+    /**
+     * 从持久化元组列表重建缓冲（viewport 无关，可直接灌入，无需首帧）。
+     * 字段缺失容错；受 MAX_LINES 上限约束。
+     * @param list<array> $rows
+     */
+    public function loadLines(array $rows): void
+    {
+        $this->lines = [];
+        $this->tail = '';
+        $this->tailErr = false;
+        foreach ($rows as $r) {
+            if (!is_array($r)) {
+                continue;
+            }
+            $text = isset($r['text']) ? (string) $r['text'] : (isset($r[0]) ? (string) $r[0] : '');
+            $err = !empty($r['err'] ?? ($r[1] ?? false));
+            $this->push($text, (bool) $err);
+        }
+    }
+
+    /**
      * 取一屏可见行。
      *
      * @return list<array{text:string, err:bool}>

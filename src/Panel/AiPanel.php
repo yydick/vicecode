@@ -7,6 +7,7 @@ use App\Ai\ChatModel;
 use App\App;
 use App\Core\KeyInput;
 use App\Text\DisplayWidth;
+use PhpTui\Tui\Display\Area;
 use PhpTui\Term\Event\CharKeyEvent;
 use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\KeyCode;
@@ -16,6 +17,7 @@ use PhpTui\Tui\Extension\Core\Widget\ParagraphWidget;
 use PhpTui\Tui\Text\Line;
 use PhpTui\Tui\Style\Style;
 use PhpTui\Tui\Text\Span;
+use PhpTui\Tui\Widget\Margin;
 use PhpTui\Tui\Widget\Widget;
 
 /**
@@ -134,22 +136,157 @@ final class AiPanel
         return ParagraphWidget::fromLines(...$visible);
     }
 
-    /** 输入框（ai_input 区域的内容，末位是光标块） */
-    public function inputContent(): Widget
+    /**
+     * 输入框（ai_input 区域的内容，末位是光标块）。
+     *
+     * 按显示列宽软换行：输入较长时占满框内 3 行（默认），超长部分向上滚出，
+     * 光标块始终贴在末行末位。框高 - 2 个边框 = 可用内容行，
+     * 调用方（App::build）已把「框宽 - 2 / 框高 - 2」传进来。
+     */
+    public function inputContent(int $width, int $height): Widget
     {
+        $W = max(1, $width);
+        $H = max(1, $height);
         $cursor = '▌';
-        $text = '> ' . $this->input . $cursor;
-        return ParagraphWidget::fromString($text);
+
+        // 首行带提示符 '> '，整段按显示列宽软换行（mbWrapDisp 已处理输入里的既有 \n）
+        $wrapped = DisplayWidth::mbWrapDisp('> ' . $this->input, $W);
+        if ($wrapped === []) {
+            $wrapped = [''];
+        }
+        // 光标块追加到最后一个可见片段（软换行后的真正末行）
+        $wrapped[count($wrapped) - 1] .= $cursor;
+        // 只保留最后 $H 行：长输入从顶部滚出
+        $wrapped = array_slice($wrapped, -$H);
+        while (count($wrapped) < $H) {
+            array_unshift($wrapped, '');
+        }
+
+        $lines = [];
+        foreach ($wrapped as $wl) {
+            $lines[] = Line::fromSpans(Span::styled($wl, Style::default()));
+        }
+        return ParagraphWidget::fromLines(...$lines);
+    }
+
+    // ── 工具栏（图标放 ai_input 顶边框，不占输入行）────────
+    // 逆向思路：Enter 仍负责「发送」，硬换行（软回车）由工具栏图标插入，
+    // 这样既不改 vendor/终端协议（Shift+Enter 在标准 TTY 与 Enter 撞字节、无法区分，
+    // 且本项目原则不改 vendor），又契合「后面还要加工具栏」的计划。
+    // 图标放在顶边框（右对齐），输入区始终为框高-2（上下边框）= 最少 3 行。
+    // 渲染串与点击命中共用 TOOLBAR_BUTTONS 同一份定义，避免两处漂移。
+    /** 工具栏图标按钮（图标 + 动作）。顺序即顶边框右对齐的排列顺序。 */
+    private const TOOLBAR_BUTTONS = [
+        ['icon' => '→', 'action' => 'send'],     // 提交发送
+        ['icon' => '↵', 'action' => 'newline'],  // 软回车：插入硬换行
+        ['icon' => '✕', 'action' => 'clear'],    // 清空输入
+    ];
+
+    /** 顶边框右对齐的图标串（仅串首 1 空格留白，末字符即最右按钮末列），渲染与命中几何共用 */
+    public function toolbarTitleString(): string
+    {
+        $segs = '';
+        foreach (self::TOOLBAR_BUTTONS as $b) {
+            $segs .= '[' . $b['icon'] . ']';
+        }
+        return ' ' . $segs;
     }
 
     /**
-     * 构造软换行后的「显示行」列表（含样式）。
-     *
-     * @return Line[]
+     * 各按钮的显示列区间（0 基，相对图标串左沿），点击命中复用。
+     * @return array<int,array{0:int,1:int,2:string}>
      */
-    private function buildLines(int $W): array
+    private function toolbarRanges(): array
+    {
+        $ranges = [];
+        $x = 1; // 串首 1 空格留白
+        foreach (self::TOOLBAR_BUTTONS as $b) {
+            $seg = '[' . $b['icon'] . ']';
+            $w = DisplayWidth::dispWidth($seg);
+            $ranges[] = [$x, $x + $w - 1, $b['action']];
+            $x += $w; // 按钮紧贴（seg 已含括号），无额外间隔
+        }
+        return $ranges;
+    }
+
+    /**
+     * 纯命中判定：鼠标是否落在顶边框图标区（仅判断，不触发动作）。
+     * 供 App::tryStartDrag 在「AI 输入框上」拖拽分隔条与工具栏图标冲突时让位——
+     * 工具栏图标正好画在 ai_input 顶边框（= 拖拽手柄行），若不豁免会被拖拽吞掉点击。
+     * @param int $col 鼠标绝对列
+     * @param int $row 鼠标绝对行
+     * @param Area $area ai_input 面板矩形
+     */
+    public function isToolbarBorderHit(int $col, int $row, Area $area): bool
+    {
+        if ($row !== $area->position->y) {
+            return false; // 只在顶边框行
+        }
+        $innerW = max(0, $area->width - 2);
+        $t = $this->toolbarTitleString();
+        $tLen = DisplayWidth::dispWidth($t);
+        $startX = $area->position->x + 1 + max(0, $innerW - $tLen); // 右对齐起点（绝对列）
+        return $col >= $startX && $col < $startX + $tLen;
+    }
+
+    /**
+     * 点击落在顶边框图标区：把绝对列换算成图标串内相对列并定位按钮。
+     * @param int $col 鼠标绝对列
+     * @param Area $area ai_input 面板矩形
+     */
+    public function onToolbarBorderClick(int $col, Area $area): bool
+    {
+        $innerW = max(0, $area->width - 2);
+        $t = $this->toolbarTitleString();
+        $tLen = DisplayWidth::dispWidth($t);
+        $startX = $area->position->x + 1 + max(0, $innerW - $tLen); // 右对齐起点（绝对列）
+        if ($col < $startX || $col >= $startX + $tLen) {
+            return false;
+        }
+        return $this->onToolbarClick($col - $startX);
+    }
+
+    /** 图标串内相对列命中按钮并触发动作（0 基） */
+    public function onToolbarClick(int $relX): bool
+    {
+        foreach ($this->toolbarRanges() as [$s, $e, $action]) {
+            if ($relX >= $s && $relX <= $e) {
+                return $this->runToolbarAction($action);
+            }
+        }
+        return false;
+    }
+
+    private function runToolbarAction(string $action): bool
+    {
+        switch ($action) {
+            case 'send':
+                $this->send();
+                return true;
+            case 'newline':
+                $this->input .= "\n"; // 软回车：输入里插入硬换行（Enter 仍用于发送）
+                return true;
+            case 'clear':
+                // 工具栏贴在输入区，「清空」清空输入框文本（对话清理由 Ctrl+L 负责，避免同名词义冲突）
+                $this->input = '';
+                $this->draft = '';
+                $this->histIdx = -1;
+                return true;
+        }
+        return false;
+    }
+
+    /**
+     * 构造软换行后的「显示行」列表（含样式），并附每条可见行对应的消息下标。
+     * map[k] = 该可见行属于第几条消息（-1=非消息：空态提示 / 错误行）。
+     * 供 buildLines() 渲染、copyMessageAtRow() 由屏幕行反推消息复用，避免两套换行逻辑漂移。
+     *
+     * @return array{lines: Line[], map: list<int>}
+     */
+    private function buildLinesWithMap(int $W): array
     {
         $lines = [];
+        $map = [];
         $chat = $this->chat();
 
         if ($chat->messages() === []) {
@@ -159,8 +296,9 @@ final class AiPanel
                     DisplayWidth::mbSubDisp($t, $this->hScroll, $W),
                     $this->shell->theme->style('aiDim'),
                 ));
+                $map[] = -1;
             }
-            return $lines;
+            return ['lines' => $lines, 'map' => $map];
         }
 
         foreach ($chat->messages() as $i => $m) {
@@ -187,6 +325,7 @@ final class AiPanel
                     DisplayWidth::mbSubDisp($text, $this->hScroll, $W),
                     $style,
                 ));
+                $map[] = $i;
             }
         }
 
@@ -196,10 +335,48 @@ final class AiPanel
                     DisplayWidth::mbSubDisp($wl, $this->hScroll, $W),
                     $this->shell->theme->style('aiErr'),
                 ));
+                $map[] = -1;
             }
         }
 
-        return $lines;
+        return ['lines' => $lines, 'map' => $map];
+    }
+
+    /**
+     * 构造软换行后的「显示行」列表（含样式）。
+     *
+     * @return Line[]
+     */
+    private function buildLines(int $W): array
+    {
+        return $this->buildLinesWithMap($W)['lines'];
+    }
+
+    /**
+     * 点击 AI 消息流某行 → 整条复制该消息正文到剪贴板（不拖拽选区，符合「整条消息复制」）。
+     * @return bool 是否命中有消息的行（命中则已复制并提示）
+     */
+    public function copyMessageAtRow(int $row, Area $area): bool
+    {
+        $inner = $area->inner(new Margin(1, 1));
+        $v = $row - $inner->position->y; // 可见行下标（0=消息流首行）
+        if ($v < 0) {
+            return false;
+        }
+        $W = max(1, $inner->width);
+        $map = $this->buildLinesWithMap($W)['map'];
+        if (!isset($map[$v]) || $map[$v] < 0) {
+            return false;
+        }
+        $msgs = $this->chat()->messages();
+        $idx = $map[$v];
+        if (!isset($msgs[$idx])) {
+            return false;
+        }
+        $text = $msgs[$idx]['content'] ?? '';
+        $this->shell->clipboardCopy($text);
+        $this->shell->setMessage($this->shell->t('status.copied_msg'));
+        return true;
     }
 
     /** @return string[] */
@@ -294,6 +471,16 @@ final class AiPanel
     public function backspace(): void
     {
         $this->input = mb_substr($this->input, 0, -1);
+    }
+
+    /** 粘贴文本到 AI 输入框（追加到末尾；该输入框无独立光标位，追加即粘贴位置）。 */
+    public function insertText(string $text): void
+    {
+        if ($text === '') {
+            return;
+        }
+        $this->input .= $text;
+        $this->histIdx = -1;
     }
 
     /** 纵向滚动（滚轮）；滚回底部自动恢复 follow */

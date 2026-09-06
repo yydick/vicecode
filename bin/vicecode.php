@@ -11,7 +11,8 @@ declare(strict_types=1);
  *    screen / raw mode / mouse capture / 还原）仍交给 php-tui/term。
  *  - TUI_USE_SWOOLE=0（或未装 swoole）回退到纯 php-tui/term 阻塞读（M0 方案）。
  *
- * 运行：php bin/vicecode.php   （真实 pty 下；验收用 tests/pty_run.php / pty_drive.php）
+ * 运行：php bin/vicecode.php [dir]   （真实 pty 下；验收用 tests/pty_run.php / pty_drive.php）
+ *   dir 省略或为 '.' → 当前目录；dir 为目录路径 → 以其为资源管理器根；dir 为文件 → 直接打开。
  */
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -103,20 +104,59 @@ function restoreTerminal(Terminal $term): void
 }
 
 /**
+ * 解析启动参数（纯函数，便于单测）。返回 [openFile, chdirTo]：
+ *  - 首个非选项位置参数：目录 → chdirTo=realpath；可读文件 → openFile；'.' → 两者皆 null（当前目录）。
+ *  - 无匹配参数 → 两者皆 null。
+ * @return array{openFile:?string, chdirTo:?string}
+ */
+function resolveStartArg(array $argv): array
+{
+    $openFile = null;
+    $chdirTo = null;
+    foreach (array_slice($argv, 1) as $arg) {
+        if ($arg === '' || $arg[0] === '-') {
+            continue;
+        }
+        if ($arg === '.') {
+            break; // 默认当前目录，无需切换
+        }
+        if (is_dir($arg)) {
+            $real = realpath($arg);
+            if ($real !== false && $real !== '') {
+                $chdirTo = $real;
+            }
+            break;
+        }
+        if (is_file($arg) && is_readable($arg)) {
+            $openFile = $arg;
+            break;
+        }
+        // 既非目录也非可读文件：忽略，继续看下一个参数
+    }
+    return ['openFile' => $openFile, 'chdirTo' => $chdirTo];
+}
+
+/**
  * @param bool $sw 是否使用 Swoole 协程底座
- * @param list<string> $argv 命令行参数（首个可读文件作为初始打开文件）
+ * @param list<string> $argv 命令行参数：
+ *   - 首个位置参数（不以 '-' 开头）为目录 → chdir 进该目录，资源管理器/终端/搜索/git 随之跟随；
+ *   - 为可读文件 → 作为初始打开文件（沿用 M1 行为）；
+ *   - 无参数或 '.' → 默认当前目录（不切换）。
  */
 function start(bool $sw, array $argv): void
 {
+    // 解析首个位置参数：目录 → chdir 进它；文件 → 记录待打开文件；'-' 开头视为选项跳过。
+    // 在 new App() 之前切换 cwd，使资源管理器根目录 / 终端 cwd / 搜索 / git 全部自然跟随。
+    $arg = resolveStartArg($argv);
+    if ($arg['chdirTo'] !== null) {
+        chdir($arg['chdirTo']);
+    }
+
     $app = new App();
 
     // 命令行首个可读文件作为初始打开文件（验收 / 日常 `vicecode <file>` 都可用）。
-    // 注意跳过 $argv[0]（脚本自身路径，也是合法文件，不能当待打开文件）。
-    foreach (array_slice($argv, 1) as $arg) {
-        if ($arg !== '' && $arg[0] !== '-' && is_file($arg) && is_readable($arg)) {
-            $app->editor->openFile($arg);
-            break;
-        }
+    if ($arg['openFile'] !== null) {
+        $app->editor->openFile($arg['openFile']);
     }
 
     // ── 进入终端（终端动作仍走 php-tui/term）──
@@ -146,7 +186,12 @@ function start(bool $sw, array $argv): void
 function startMain(App $app, Terminal $term, bool $sw): void
 {
     $backend = PhpTermBackend::new($term);
-    $display = DisplayBuilder::default($backend)->fullscreen()->build();
+    // 注册菜单下拉透明覆盖层渲染器（DropdownOverlay 只画面板子区域、不清屏，
+    // 修复早期「全视口 Grid + 空 spacer」把底层 UI 整块抹成空白的遮罩 bug）。
+    $display = DisplayBuilder::default($backend)
+        ->fullscreen()
+        ->addWidgetRenderer(\App\Widget\DropdownOverlay::renderer())
+        ->build();
 
     if ($sw) {
         // ── Swoole 协程底座 ──
@@ -169,6 +214,8 @@ function startMain(App $app, Terminal $term, bool $sw): void
                     // 超时无输入：告诉 parser「没有更多字节了」($more=false)，
                     // 让缓冲区里孤立的 ESC（单独 \x1b）冲刷成 Esc 事件——否则 parser 会
                     // 一直把它当「转义序列开头」等待后续，孤立 Esc 永远发不出去（菜单关不掉）。
+                    // 该冲刷路径由 vendor EventParser::advance('', false) 的空行分支实现
+                    // （见 vendor/php-tui/term/src/EventParser.php —— ViceCode 修复）。
                     $parser->advance('', false);
                     foreach ($parser->drain() as $ev) {
                         $ch->push($ev);
@@ -179,7 +226,12 @@ function startMain(App $app, Terminal $term, bool $sw): void
                 if ($bytes === '' || $bytes === false) {
                     break; // EOF（终端关闭）
                 }
-                $parser->advance($bytes, false);
+                // more=true：pty 下 fread 常把转义序列（如 \e[5~、\e[A）拆成多段返回，
+                // 必须让 parser 在内部 buffer 里暂存不完整的序列，等后续字节拼齐再解析；
+                // 否则孤 \e 被立刻当成 Esc 冲掉、后面的字节退化成字符键——方向键 /
+                // PageUp/Down / Home/End 全失灵。已完整结束的序列（~/$/字母终结符）无论
+                // more 如何都会立即吐出，仅孤 \e 会等下个字节或超时冲刷（见上方超时分支）。
+                $parser->advance($bytes, true);
                 $evs = $parser->drain();
                 foreach ($evs as $ev) {
                     $ch->push($ev);
@@ -267,17 +319,21 @@ $useSwoole = (getenv('TUI_USE_SWOOLE') ?: '1') === '1'
 // 命令执行本就靠「子进程 + 非阻塞管道轮询」，不需要这两个 HOOK。
 // R3：顶层兜底。终端还原由 start() 的 finally 保证；这里只负责把致命错误
 // 翻译成人类可读的一行，而不是把栈追踪喷在用户刚恢复的屏幕上。
-try {
-    if ($useSwoole) {
-        Swoole\Runtime::enableCoroutine(
-            SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO & ~SWOOLE_HOOK_FILE & ~SWOOLE_HOOK_PROC
-        );
-        Swoole\Coroutine\run(static fn() => start(true, $argv));
-    } else {
-        start(false, $argv);
+// 仅当本文件被直接执行（而非被测试 require）时才启动 TUI；
+// 守卫让 tests/cli_dir.php 能 require 本文件调用 resolveStartArg 而不误进界面。
+if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
+    try {
+        if ($useSwoole) {
+            Swoole\Runtime::enableCoroutine(
+                SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO & ~SWOOLE_HOOK_FILE & ~SWOOLE_HOOK_PROC
+            );
+            Swoole\Coroutine\run(static fn() => start(true, $argv));
+        } else {
+            start(false, $argv);
+        }
+    } catch (Throwable $e) {
+        fwrite(STDERR, "\nViceCode 异常退出：" . $e->getMessage() . "\n");
+        fwrite(STDERR, '  ' . $e->getFile() . ':' . $e->getLine() . "\n");
+        exit(1);
     }
-} catch (Throwable $e) {
-    fwrite(STDERR, "\nViceCode 异常退出：" . $e->getMessage() . "\n");
-    fwrite(STDERR, '  ' . $e->getFile() . ':' . $e->getLine() . "\n");
-    exit(1);
 }

@@ -41,7 +41,9 @@ final class SessionStore
 
     /**
      * 写入会话快照。失败静默返回 false（不抛）。
-     * @param array{cwd:string,text:string,savedAt:int,cols?:int,rows?:int} $data
+     * @param array{cwd:string,savedAt:int,mode?:string,text?:string,cells?:array,lines?:array} $data
+     *   mode 缺省 'pty'。pty：cells(彩色)/text(纯文本回退) 至少其一；
+     *   runner：lines（输出缓冲 [text,err] 元组）。
      */
     public static function save(array $data): bool
     {
@@ -63,7 +65,8 @@ final class SessionStore
 
     /**
      * 读取会话快照；不存在 / 损坏 / 缺关键字段返回 null。
-     * @return array{cwd:string,text:string,savedAt:int}|null
+     * 返回 mode（缺省 'pty'）+ 对应负载：pty 优先 cells 再 text；runner 取 lines。
+     * @return array{cwd:string,savedAt:int,mode:string,cells?:array,text?:string,lines?:array}|null
      */
     public static function load(): ?array
     {
@@ -76,14 +79,33 @@ final class SessionStore
             return null;
         }
         $data = json_decode($txt, true);
-        if (!is_array($data) || !isset($data['cwd']) || !isset($data['text']) || !is_string($data['cwd']) || !is_string($data['text'])) {
+        if (!is_array($data) || !isset($data['cwd']) || !is_string($data['cwd'])) {
             return null;
         }
-        return [
+        $mode = isset($data['mode']) && is_string($data['mode']) ? $data['mode'] : 'pty';
+        $result = [
             'cwd' => $data['cwd'],
-            'text' => $data['text'],
             'savedAt' => isset($data['savedAt']) && is_int($data['savedAt']) ? $data['savedAt'] : 0,
+            'mode' => $mode,
         ];
+        if (isset($data['cells']) && is_array($data['cells'])) {
+            $result['cells'] = $data['cells'];
+        }
+        if (isset($data['text']) && is_string($data['text'])) {
+            $result['text'] = $data['text'];
+        }
+        if (isset($data['lines']) && is_array($data['lines'])) {
+            $result['lines'] = $data['lines'];
+        }
+        // 校验：runner 必须有 lines；pty 须有 cells 或 text
+        if ($mode === 'runner') {
+            if (!isset($result['lines'])) {
+                return null;
+            }
+        } elseif (!isset($result['cells']) && !isset($result['text'])) {
+            return null;
+        }
+        return $result;
     }
 
     /** 删除快照文件（恢复成功后清理，避免下次启动重复恢复）。失败静默返回 false。 */

@@ -28,6 +28,7 @@ return [
     'status.readonly'  => 'RO',
     'status.locale'    => 'lang',
     'status.branch'    => 'branch',
+    'status.cwd'       => 'cwd',
     'status.provider'  => 'AI',
     'status.theme'     => 'Theme',
     'status.mode'      => 'Mode',
@@ -37,6 +38,10 @@ return [
     'status.l_ai'      => 'AI',
     'status.l_editor'  => 'edit',
     'status.l_input'   => 'input',
+    'status.copied'     => 'Copied {n} chars',
+    'status.copied_msg' => 'Copied message',
+    'status.pasted'      => 'Pasted {n} chars',
+    'status.paste_pending' => 'Reading clipboard…',
 
     // AI 输入框提示
     'ai.input_hint'    => '(Enter send)',
@@ -184,6 +189,7 @@ return [
     'help.a_history'       => 'Recall prompt history',
     'help.a_page'          => 'Scroll message stream',
     'help.a_stop'          => 'Stop generating',
+    'help.e_paste'         => 'Paste (Ctrl+V / Shift+Ins)',
     'help.title'           => 'Keyboard Shortcuts',
     'help.close'           => 'Esc / ? / q to close',
     'help.scroll_hint'     => 'Up/Down or wheel to scroll',

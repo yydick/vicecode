@@ -29,6 +29,13 @@ final class Vt100Emulator
     /** 滚动回退上限（行） */
     public const SCROLLBACK_MAX = 2000;
 
+    /**
+     * 自定义 OSC（操作系指令）：shell 经 PROMPT_COMMAND 在每轮提示符前回显当前目录，
+     * 形如 `ESC ] 777 ; vicetui ; cwd = <绝对路径> BEL`。仿真器剥离该序列（不渲染），
+     * 并经由 consumeCwd() 暴露给上层更新终端工作目录。xterm 等真实终端会忽略未知 OSC。
+     */
+    public const OSC_CWD_PREFIX = '777;vicetui;cwd=';
+
     private int $cols;
     private int $rows;
 
@@ -64,6 +71,15 @@ final class Vt100Emulator
 
     /** 跨块残字节缓存 */
     private string $pending = '';
+
+    /** OSC 收集态（跨 write() 块续传） */
+    private bool $inOsc = false;
+
+    /** OSC 正文缓冲（终止符之前的字节） */
+    private string $oscBuf = '';
+
+    /** 最近一次捕获到的 shell 工作目录（consumeCwd 取走即清空） */
+    private ?string $capturedCwd = null;
 
     public function __construct(int $cols, int $rows)
     {
@@ -102,6 +118,22 @@ final class Vt100Emulator
         $i = 0;
         $len = strlen($data);
         while ($i < $len) {
+            // OSC 收集态：继续拼接到终止符（BEL 或 ST），支持跨 write() 块续传。
+            if ($this->inOsc) {
+                $term = $this->oscTermPos($data, $i, $len);
+                if ($term < 0) {
+                    // 本缓冲内无终止符：剩余字节暂存，等下一块
+                    $this->oscBuf .= substr($data, $i);
+                    $i = $len;
+                    break;
+                }
+                $this->oscBuf .= substr($data, $i, $term - $i);
+                $this->finishOsc($this->oscBuf);
+                $this->inOsc = false;
+                $this->oscBuf = '';
+                $i = $term + ($data[$term] === "\x07" ? 1 : 2);
+                continue;
+            }
             $c = $data[$i];
             if ($c === "\x1b") {
                 $i = $this->parseEscape($data, $i, $len);
@@ -254,7 +286,10 @@ final class Vt100Emulator
             return $this->parseCsi($s, $i + 2, $len);
         }
         if ($next === ']') {
-            return $this->parseOsc($s, $i + 2, $len);
+            // 进入 OSC 收集态；正文与终止符处理交给 write() 主循环（支持跨块续传）。
+            $this->inOsc = true;
+            $this->oscBuf = '';
+            return $i + 2;
         }
         if ($next === '(' || $next === ')') {
             return $i + 3; // 字符集选择，跳过后续一个字节
@@ -288,20 +323,48 @@ final class Vt100Emulator
         return $i + 2;
     }
 
-    private function parseOsc(string $s, int $i, int $len): int
+    /**
+     * 在 [$i,$len) 内找 OSC 终止符位置：BEL(\x07) 或 ST(\x1b\\)。
+     * 返回终止符首字节下标；未找到返回 -1。
+     */
+    private function oscTermPos(string $s, int $i, int $len): int
     {
-        // OSC：读到 BEL(\x07) 或 ST(\x1b\\) 结束
-        while ($i < $len) {
+        for (; $i < $len; $i++) {
             $c = $s[$i];
             if ($c === "\x07") {
-                return $i + 1;
+                return $i;
             }
             if ($c === "\x1b" && $i + 1 < $len && $s[$i + 1] === '\\') {
-                return $i + 2;
+                return $i;
             }
-            $i++;
         }
-        return $len;
+        return -1;
+    }
+
+    /**
+     * OSC 收集完成：仅识别自定义 cwd 序列（OSC_CWD_PREFIX），提取绝对路径并缓存；
+     * 其它 OSC 一律忽略（不渲染）。
+     */
+    private function finishOsc(string $body): void
+    {
+        if (str_starts_with($body, self::OSC_CWD_PREFIX)) {
+            $cwd = substr($body, strlen(self::OSC_CWD_PREFIX));
+            $cwd = rtrim($cwd, "\x00..\x1f");
+            if ($cwd !== '' && $cwd[0] === '/') {
+                $this->capturedCwd = $cwd;
+            }
+        }
+    }
+
+    /**
+     * 取走最近捕获的 shell 工作目录（取走即清空，避免重复应用）。
+     * @return string|null
+     */
+    public function consumeCwd(): ?string
+    {
+        $cwd = $this->capturedCwd;
+        $this->capturedCwd = null;
+        return $cwd;
     }
 
     private function parseCsi(string $s, int $i, int $len): int
@@ -619,6 +682,9 @@ final class Vt100Emulator
         $this->originMode = false;
         $this->screen = $this->blankGrid($this->cols, $this->rows);
         $this->scrollback = [];
+        $this->inOsc = false;
+        $this->oscBuf = '';
+        $this->capturedCwd = null;
     }
 
     // ── 擦除 / 滚动 ───────────────────────────────────
@@ -827,7 +893,9 @@ final class Vt100Emulator
     // ── 尺寸变化 ──────────────────────────────────────
 
     /**
-     * 重建屏（保留左上角内容尽量迁移），重置光标不越界。
+     * 重建屏：终端语义是**底对底**保留最近输出（缩窗口时顶部旧行让位给回退，
+     * 而非把旧屏顶行搬到新屏顶——后者会让刚跑出来的最新输出在缩小面板时消失）。
+     * 同时把被挤出顶部的行压入回退，保证回退历史连续、无空洞。
      */
     public function resize(int $cols, int $rows): void
     {
@@ -836,37 +904,45 @@ final class Vt100Emulator
         if ($cols === $this->cols && $rows === $this->rows) {
             return;
         }
-        $old = $this->screen;
-        $this->screen = $this->blankGrid($cols, $rows);
-        foreach ($old as $y => $row) {
-            if ($y >= $rows) {
-                break;
-            }
-            foreach ($row as $x => $cell) {
-                if ($x >= $cols) {
-                    break;
-                }
-                $this->screen[$y][$x] = clone $cell;
-            }
-        }
-        $oldAlt = $this->altScreen;
-        $this->altScreen = $this->blankGrid($cols, $rows);
-        foreach ($oldAlt as $y => $row) {
-            if ($y >= $rows) {
-                break;
-            }
-            foreach ($row as $x => $cell) {
-                if ($x >= $cols) {
-                    break;
-                }
-                $this->altScreen[$y][$x] = clone $cell;
-            }
-        }
+        $this->resizeScreen($this->screen, $cols, $rows);
+        $this->resizeScreen($this->altScreen, $cols, $rows);
         $this->cols = $cols;
         $this->rows = $rows;
         $this->bottom = $rows - 1;
         $this->top = min($this->top, $this->bottom);
         $this->clampCursor();
+    }
+
+    /**
+     * 把单屏按底对底迁移到新尺寸（终端语义：缩小窗口保留最近输出，而非把旧屏顶行搬去新屏顶）。
+     * 不把溢出行压入回退——本仿真器的回退由 lineFeed 滚动时维护，resize 只做视图裁剪，
+     * 强行压入会和已有回退重叠错位（旧屏顶行本就在回退里）。
+     * @param list<list<Cell>> $scr
+     */
+    private function resizeScreen(array &$scr, int $cols, int $rows): void
+    {
+        $oldRows = count($scr);
+        $new = $this->blankGrid($cols, $rows);
+        if ($oldRows <= $rows) {
+            // 旧屏更矮：原样落到新屏底部（顶部留空）
+            $dstStart = $rows - $oldRows;
+            for ($y = 0; $y < $oldRows; $y++) {
+                for ($x = 0; $x < min($cols, count($scr[$y])); $x++) {
+                    $new[$dstStart + $y][$x] = clone $scr[$y][$x];
+                }
+            }
+            $scr = $new;
+            return;
+        }
+        // 旧屏更高：只保留最底 rows 行
+        $srcStart = $oldRows - $rows;
+        for ($y = $srcStart; $y < $oldRows; $y++) {
+            $dstY = $y - $srcStart;
+            for ($x = 0; $x < min($cols, count($scr[$y])); $x++) {
+                $new[$dstY][$x] = clone $scr[$y][$x];
+            }
+        }
+        $scr = $new;
     }
 
     // ── 取渲染网格 ────────────────────────────────────
@@ -968,6 +1044,9 @@ final class Vt100Emulator
         $this->screen = $this->blankGrid($this->cols, $this->rows);
         $this->usingAlt = false;
         $this->pending = '';
+        $this->inOsc = false;
+        $this->oscBuf = '';
+        $this->capturedCwd = null;
         $this->cx = 0;
         $this->cy = 0;
 
@@ -998,6 +1077,107 @@ final class Vt100Emulator
             $s .= $cell->ch;
         }
         return rtrim($s);
+    }
+
+    // ── 会话持久化 v2：导出 / 导入彩色网格 ────────────────
+
+    /**
+     * 导出当前会话的彩色快照（会话持久化 v2）：主屏 + 滚动历史的逐格
+     * (字符 / 宽字占位 / 前景索引 / 背景索引 / 修饰标志)。供重启后 importCells 原样还原颜色。
+     *
+     * 与 exportText 同语义：始终取主屏（忽略交替屏），滚动历史截断到 SCROLLBACK_MAX。
+     *
+     * @return array{scrollback:list<list<array>>, screen:list<list<array>>}
+     *   每格元组 [ch, wide(0|1), fg(int), bg(int), flags(int)]
+     */
+    public function exportCells(int $maxLines = self::SCROLLBACK_MAX): array
+    {
+        $sb = $this->scrollback;
+        if ($maxLines > 0 && count($sb) > $maxLines) {
+            $sb = array_slice($sb, -$maxLines);
+        }
+        return [
+            'scrollback' => array_map([$this, 'rowToCells'], $sb),
+            'screen' => array_map([$this, 'rowToCells'], $this->screen),
+        ];
+    }
+
+    /**
+     * 从彩色快照重建会话（恢复时灌入）。与 importText 一致：先清空（保留主屏语义、丢交替屏与残字节、
+     * 光标归零、复位 OSC 状态），再逐行把存储的 Cell 元组放回去（按当前屏宽裁剪/补空）。
+     * 主屏只取末尾与当前行数等长的若干行；超长行在当前屏宽处截断（同宽恢复时完全一致）。
+     *
+     * @param array{scrollback?:list<list<array>>, screen?:list<list<array>>} $data
+     */
+    public function importCells(array $data): void
+    {
+        $this->scrollback = [];
+        $this->screen = $this->blankGrid($this->cols, $this->rows);
+        $this->usingAlt = false;
+        $this->pending = '';
+        $this->inOsc = false;
+        $this->oscBuf = '';
+        $this->capturedCwd = null;
+        $this->cx = 0;
+        $this->cy = 0;
+
+        $sb = $data['scrollback'] ?? [];
+        foreach ($sb as $row) {
+            $this->scrollback[] = $this->cellsToRow($row);
+        }
+        $over = count($this->scrollback) - self::SCROLLBACK_MAX;
+        if ($over > 0) {
+            array_splice($this->scrollback, 0, $over);
+        }
+
+        $screenRows = $data['screen'] ?? [];
+        $n = count($screenRows);
+        $keep = min($n, $this->rows);
+        $start = $n - $keep;
+        for ($y = 0; $y < $keep; $y++) {
+            $this->screen[$y] = $this->cellsToRow($screenRows[$start + $y]);
+        }
+        // 光标落到底部左端，等待新 shell 提示符接在快照之后
+        $this->cy = max(0, $keep - 1);
+        $this->cx = 0;
+    }
+
+    /** 单行 Cell 网格 → 元组列表（[ch, wide, fg, bg, flags]） */
+    private function rowToCells(array $row): array
+    {
+        $cells = [];
+        foreach ($row as $cell) {
+            $cells[] = [
+                $cell->ch,
+                $cell->wide ? 1 : 0,
+                $cell->fg,
+                $cell->bg,
+                $cell->flags,
+            ];
+        }
+        return $cells;
+    }
+
+    /** 元组列表 → 单行 Cell 网格（按当前屏宽补空；字段缺失容错） */
+    private function cellsToRow(array $row): array
+    {
+        $cells = [];
+        foreach ($row as $t) {
+            if (!is_array($t)) {
+                continue;
+            }
+            $cell = new Cell();
+            $cell->ch = isset($t[0]) && is_string($t[0]) ? $t[0] : '';
+            $cell->wide = ($t[1] ?? 0) == 1;
+            $cell->fg = isset($t[2]) ? (int) $t[2] : -1;
+            $cell->bg = isset($t[3]) ? (int) $t[3] : -1;
+            $cell->flags = isset($t[4]) ? (int) $t[4] : 0;
+            $cells[] = $cell;
+        }
+        while (count($cells) < $this->cols) {
+            $cells[] = new Cell();
+        }
+        return $cells;
     }
 
     /** @param list<list<Cell>> $grid */

@@ -17,8 +17,18 @@ final class PtyProcess
     /** @var resource|null */
     private $proc = null;
 
-    /** @var array<int, resource> 0=master输入 1=master输出(含stderr) */
-    private array $pipes = [];
+    /**
+     * 0=master输入 1=master输出(含stderr)。
+     * 声明为 mixed 而非 array：proc_open 的 $pipes 引用参数回填的是 stream resource，
+     * AOT（TypePHP）严格类型检查会拒绝把 resource 赋给 array 属性
+     * （见 docs/AOT_INCOMPATIBILITY_REPORT.md ②）。标准 PHP 下 array 也接受 resource 元素，
+     * 故改 mixed 不改变运行时行为；仅为 AOT 编译兼容。
+     * @var array<int, resource>
+     */
+    private mixed $pipes = [];
+
+    /** bash 专用：注入 cwd 上报钩子的临时 rcfile 路径（shutdown 时清理） */
+    private ?string $rcFile = null;
 
     private bool $running = false;
 
@@ -58,18 +68,23 @@ final class PtyProcess
         $shell = $shell !== '' ? $shell : (getenv('SHELL') ?: '/bin/bash');
 
         // 环境：继承关键变量 + 强制 TERM=xterm-256color（让全屏程序走 256 色）
-        $envArr = [];
+        // 用关联数组聚合，避免 COLUMNS/LINES/TERM 既从父环境拷贝又被追加造成重复键
+        // （重复键时子进程取到哪个值未定义，会按错误尺寸渲染）。
+        $envMap = [];
         foreach ($env as $k => $v) {
+            $envMap[$k] = $v;
+        }
+        if (!isset($envMap['TERM'])) {
+            $envMap['TERM'] = 'xterm-256color';
+        }
+        // COLUMNS/LINES 必须始终反映 pty 真实尺寸（面板视口），覆盖从父环境继承的过期值。
+        // 否则 vim/less/top 等全屏程序会按错误的 LINES（如测试或嵌套 shell 注入的 40）渲染，
+        // 把内容画进与仿真器尺寸（如面板实际 13 行）不匹配的网格，导致首/末行错位或滚出视口。
+        $envMap['COLUMNS'] = (string) $cols;
+        $envMap['LINES'] = (string) $rows;
+        $envArr = [];
+        foreach ($envMap as $k => $v) {
             $envArr[] = $k . '=' . $v;
-        }
-        if (!isset($env['TERM'])) {
-            $envArr[] = 'TERM=xterm-256color';
-        }
-        if (!isset($env['COLUMNS'])) {
-            $envArr[] = 'COLUMNS=' . $cols;
-        }
-        if (!isset($env['LINES'])) {
-            $envArr[] = 'LINES=' . $rows;
         }
 
         $desc = [
@@ -78,11 +93,25 @@ final class PtyProcess
             2 => ['pty'],
         ];
 
-        // bash -c 'stty rows R cols C 2>/dev/null; exec "$0" -i' "$shell"
-        // argv[0]=shell, argv[2]=$0=script 里 exec 的 shell 名；用 $0 传名避免二次解析。
-        $script = sprintf('stty rows %d cols %d 2>/dev/null; exec "$0" -i', $rows, $cols);
+        // bash 专用：用 --rcfile 注入「cwd 上报钩子」，且先 source 用户 ~/.bashrc，
+        // 既保留用户环境、又确保 PROMPT_COMMAND 不被用户 .bashrc 覆盖（常规 env 注入会被覆盖）。
+        // 其它 shell（zsh/fish 等）暂不支持 cwd 捕获，退回原 exec "$0" -i 行为。
+        $base = basename($shell);
+        if ($base === 'bash') {
+            $rc = $this->buildIntegrationRc($rows, $cols);
+            $tmp = tempnam(sys_get_temp_dir(), 'vicetui_rc_');
+            if ($tmp !== false) {
+                file_put_contents($tmp, $rc);
+                $this->rcFile = $tmp;
+                $argv = [$shell, '--rcfile', $tmp, '-i'];
+            } else {
+                $argv = [$shell, '-c', sprintf('stty rows %d cols %d 2>/dev/null; exec "$0" -i', $rows, $cols), $shell];
+            }
+        } else {
+            $argv = [$shell, '-c', sprintf('stty rows %d cols %d 2>/dev/null; exec "$0" -i', $rows, $cols), $shell];
+        }
         $proc = proc_open(
-            [$shell, '-c', $script, $shell],
+            $argv,
             $desc,
             $pipes,
             $cwd !== '' ? $cwd : null,
@@ -90,6 +119,10 @@ final class PtyProcess
         );
 
         if (!is_resource($proc)) {
+            if ($this->rcFile !== null && is_file($this->rcFile)) {
+                @unlink($this->rcFile);
+                $this->rcFile = null;
+            }
             return false;
         }
         foreach ([0, 1, 2] as $idx) {
@@ -102,6 +135,22 @@ final class PtyProcess
         $this->running = true;
         $this->exitCode = null;
         return true;
+    }
+
+    /**
+     * 生成注入 bash 的 rcfile：先设窗口尺寸、source 用户 ~/.bashrc（保留其环境），
+     * 再 append 一个 PROMPT_COMMAND 钩子，在每轮提示符前经自定义 OSC 回显 $PWD。
+     */
+    private function buildIntegrationRc(int $rows, int $cols): string
+    {
+        $rc = sprintf("stty rows %d cols %d 2>/dev/null\n", $rows, $cols);
+        $home = getenv('HOME');
+        if ($home !== false && is_file($home . '/.bashrc')) {
+            $rc .= '. ' . escapeshellarg($home . '/.bashrc') . "\n";
+        }
+        $rc .= '__vicetui_cwd() { printf \'\033]777;vicetui;cwd=%s\007\' "$PWD"; }' . "\n";
+        $rc .= 'PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__vicetui_cwd"' . "\n";
+        return $rc;
     }
 
     /**
@@ -189,5 +238,9 @@ final class PtyProcess
         $this->proc = null;
         $this->pipes = [];
         $this->running = false;
+        if ($this->rcFile !== null && is_file($this->rcFile)) {
+            @unlink($this->rcFile);
+            $this->rcFile = null;
+        }
     }
 }

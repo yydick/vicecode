@@ -113,8 +113,10 @@ $startXHelp = $app6->menuBar->menuStartX(3);
 $widthHelp = $app6->menuBar->menuWidth(3);
 $clicked = $app6->menuBar->clickBar($startXHelp + intdiv($widthHelp, 2));
 check($clicked && $app6->menuBar->isOpen(), '点击「帮助」标签激活该菜单');
-// 现在菜单打开且 active=3（帮助），点下拉第 0 项（快捷键）→ 打开帮助页
-$app6->menuBar->clickDropdown($startXHelp, 1);
+// 现在菜单打开且 active=3（帮助），点下拉第 0 项（快捷键）→ 打开帮助页。
+// clickDropdown 第二参是绝对行：下拉顶边框在绝对行 1（菜单栏 row0 下方），
+// 条目从绝对行 2 起（itemsTop = top+1），故首项在绝对行 2。
+$app6->menuBar->clickDropdown($startXHelp, 2);
 check($app6->help->isOpen() === true, '点下拉「快捷键」打开帮助页');
 check($app6->menuBar->isOpen() === false, '点条目后菜单关闭');
 // 单独验证「点其它标签可切换（不崩）」——用新实例，避免改掉上面的 active

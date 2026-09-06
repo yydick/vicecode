@@ -85,6 +85,15 @@ final class TerminalPanel
 
     private ?Vt100Emulator $emu = null;
 
+    /**
+     * 文本选择矩形（归一化 [r0,c0,r1,c1]，视口绝对行列）；null=无选择。
+     * 由 App 渲染前注入，ptyContent/runnerContent 据此反显高亮。
+     */
+    private ?array $sel = null;
+
+    /** 最近一次 ptyContent 渲染的可见网格（list<list<Cell>>），供 getTextRect 取字 */
+    private ?array $lastGrid = null;
+
     // ── 会话持久化恢复（App 构造末尾 maybeRestore() 灌入，首帧真实尺寸下 spawn）──
     /** 恢复目标 cwd（启动 cwd，非运行时 cd） */
     private ?string $restoreCwd = null;
@@ -92,11 +101,22 @@ final class TerminalPanel
     /** 恢复快照纯文本 */
     private ?string $restoreText = null;
 
+    /** 恢复快照彩色网格（v2；优先于 restoreText） */
+    private ?array $restoreCells = null;
+
     /** 待恢复标记：首帧 ptyContent() 在真实列宽下起 pty 并灌入 */
     private bool $restorePending = false;
 
+    /** 交互 pty 待启动：F2 切到 pty 模式后，推迟到首帧 ptyContent() 用真实面板尺寸起 pty
+     *  （避免 toggleInteractive 硬编码 80x24 与面板不符，导致全屏程序按错误 LINES 渲染、首末行错位） */
+    private bool $ptyStartPending = false;
+
     /** 回退滚动偏移（滚轮 / PageUp/Down 调整） */
     public int $scrollback = 0;
+
+    /** 本次会话是否在 runner 模式下真正跑过命令（仅此才值得持久化 runner scrollback；
+     *  单纯从 pty 退出回落 runner 不算——那样 buf 里只有自动退出横幅，不值得存盘） */
+    private bool $ranInRunner = false;
 
     /** 上次同步给仿真器的尺寸（避免每帧 resize） */
     private int $lastCols = 0;
@@ -115,6 +135,12 @@ final class TerminalPanel
     public function buffer(): TerminalBuffer
     {
         return $this->buf;
+    }
+
+    /** 终端当前工作目录（启动 cwd，或在交互式 pty 里随 shell cd 实时更新） */
+    public function cwd(): string
+    {
+        return $this->cwd;
     }
 
     public function isRunning(): bool
@@ -177,6 +203,11 @@ final class TerminalPanel
             return false;
         }
         $this->emu?->write($bytes);
+        // 消费 shell 经 OSC 回显的工作目录（实时 cwd 捕获）
+        $cwd = $this->emu?->consumeCwd();
+        if ($cwd !== null) {
+            $this->cwd = $cwd;
+        }
         return true;
     }
 
@@ -194,24 +225,12 @@ final class TerminalPanel
             if ($this->runner->isRunning()) {
                 return; // 命令运行中不切换
             }
-            $this->emu = new Vt100Emulator(80, 24);
-            $this->pty = new PtyProcess();
-            $env = $this->buildPtyEnv();
-            if (!$this->pty->start(
-                (string) (getenv('SHELL') ?: '/bin/bash'),
-                80,
-                24,
-                $this->cwd,
-                $env
-            )) {
-                $this->emu = null;
-                $this->pty = null;
-                $this->buf->append($this->shell->t('term.spawn_failed') . "\n", true);
-                return;
-            }
+            // 延迟到首帧 ptyContent() 用真实面板尺寸起 pty（见 ptyStartPending 说明），
+            // 避免用 80x24 硬编码尺寸启动后全屏程序按错误 LINES 渲染、首末行错位。
             $this->mode = 'pty';
             $this->captured = true;
             $this->scrollback = 0;
+            $this->ptyStartPending = true;
             return;
         }
         // pty 模式：翻转捕获态
@@ -241,11 +260,42 @@ final class TerminalPanel
         return $this->mode === 'pty' && $this->captured;
     }
 
+    /**
+     * 用真实面板尺寸起交互 pty（F2 切换后、首帧渲染时调用）。
+     * 尺寸必须 = 面板视口（W x outH），使 stty 与 LINES/COLUMNS 环境一致，
+     * 全屏程序（vim/less/top）按正确行数渲染，首末行不再错位或滚出视口。
+     */
+    private function startPty(int $W, int $outH): void
+    {
+        $this->emu = new Vt100Emulator($W, $outH);
+        $this->pty = new PtyProcess();
+        $env = $this->buildPtyEnv();
+        if (!$this->pty->start(
+            (string) (getenv('SHELL') ?: '/bin/bash'),
+            $W,
+            $outH,
+            $this->cwd,
+            $env
+        )) {
+            $this->emu = null;
+            $this->pty = null;
+            $this->mode = 'runner';
+            $this->captured = false;
+            $this->ptyStartPending = false;
+            $this->buf->append($this->shell->t('term.spawn_failed') . "\n", true);
+            return;
+        }
+        $this->lastCols = $W;
+        $this->lastRows = $outH;
+        $this->ptyStartPending = false;
+    }
+
     // ── 会话持久化 ────────────────────────────────────
 
     /**
-     * 退出时存盘（在 shutdown() 最开头调用，此时 emu 仍持有内容、早于杀进程）。
-     * 仅当开启持久化且处于 pty 模式且仿真器就绪时落盘主屏+滚动历史纯文本。
+     * 退出时存盘（在 shutdown() 最开头调用，此时 emu / buf 仍持有内容、早于杀进程）。
+     *  - pty 模式：落盘主屏+滚动历史的彩色网格(v2) + 纯文本回退。
+     *  - runner 模式：落盘输出缓冲（viewport 无关；仅在有内容时保存，避免空缓冲覆盖 pty 快照）。
      * 落盘失败静默（不致命）。
      */
     public function saveSession(): void
@@ -253,12 +303,29 @@ final class TerminalPanel
         if (!ConfigStore::persistSession()) {
             return;
         }
-        if ($this->mode !== 'pty' || $this->emu === null) {
+        if ($this->mode === 'pty') {
+            if ($this->emu === null) {
+                return;
+            }
+            SessionStore::save([
+                'mode' => 'pty',
+                'cwd' => $this->cwd,
+                'cells' => $this->emu->exportCells(),
+                'text' => $this->emu->exportText(),
+                'savedAt' => time(),
+            ]);
             return;
         }
+        // runner 模式：输出缓冲（先 flush 未结束半行），仅非空且本次会话真正跑过命令时保存
+        // （避免 pty 退出回落后的自动横幅被误存，破坏「快照已消费」不变量）。
+        if (!$this->ranInRunner || $this->buf->count() === 0) {
+            return;
+        }
+        $this->buf->flushTail();
         SessionStore::save([
+            'mode' => 'runner',
             'cwd' => $this->cwd,
-            'text' => $this->emu->exportText(),
+            'lines' => $this->buf->exportLines(),
             'savedAt' => time(),
         ]);
     }
@@ -277,8 +344,21 @@ final class TerminalPanel
         if ($snap === null) {
             return;
         }
+        // runner 模式快照：viewport 无关，构造时直接灌入缓冲，无需首帧延迟。
+        if (($snap['mode'] ?? 'pty') === 'runner'
+            && isset($snap['lines']) && is_array($snap['lines'])) {
+            $this->buf->loadLines($snap['lines']);
+            $this->cwd = $snap['cwd'];
+            SessionStore::clear();
+            return;
+        }
+        // pty 模式快照（既有逻辑）：首帧真实尺寸下才起 pty 灌入。
+        if (isset($snap['cells']) && is_array($snap['cells'])) {
+            $this->restoreCells = $snap['cells'];
+        } else {
+            $this->restoreText = $snap['text'] ?? '';
+        }
         $this->restoreCwd = $snap['cwd'];
-        $this->restoreText = $snap['text'];
         $this->restorePending = true;
         $this->mode = 'pty';
         $this->captured = true;
@@ -294,7 +374,6 @@ final class TerminalPanel
     private function restoreSession(int $W, int $outH): void
     {
         $cwd = $this->restoreCwd ?? $this->cwd;
-        $text = $this->restoreText ?? '';
         $this->emu = new Vt100Emulator($W, $outH);
         $this->pty = new PtyProcess();
         $env = $this->buildPtyEnv();
@@ -313,9 +392,15 @@ final class TerminalPanel
             $this->restorePending = false;
             $this->restoreCwd = null;
             $this->restoreText = null;
+            $this->restoreCells = null;
             return;
         }
-        $this->emu->importText($text);
+        // 彩色快照优先（v2）；否则回退纯文本（v1 旧快照）
+        if ($this->restoreCells !== null) {
+            $this->emu->importCells($this->restoreCells);
+        } else {
+            $this->emu->importText($this->restoreText ?? '');
+        }
         $this->lastCols = $W;
         $this->lastRows = $outH;
         $this->cwd = $cwd; // 仅恢复启动 cwd（v1 局限：运行时 cd 不恢复）
@@ -323,13 +408,22 @@ final class TerminalPanel
         $this->restorePending = false;
         $this->restoreCwd = null;
         $this->restoreText = null;
+        $this->restoreCells = null;
     }
 
     /** 回退滚动（滚轮 / PageUp / PageDown） */
     public function scrollPty(int $delta): void
     {
         $max = $this->emu !== null ? $this->emu->scrollbackSize() : 0;
-        $this->scrollback = max(0, min($max, $this->scrollback + $delta));
+        // 约定：scrollback=0 表示贴住最新（底部），scrollback=max 表示翻到最旧（顶部）。
+        // 故「向上 / 翻旧」（delta<0）需增大 scrollback，对 delta 取反后再钳制。
+        $this->scrollback = max(0, min($max, $this->scrollback - $delta));
+    }
+
+    /** pty 回退缓冲总行数（无 pty 时 0）。测试与状态栏断言用。 */
+    public function scrollbackSize(): int
+    {
+        return $this->emu !== null ? $this->emu->scrollbackSize() : 0;
     }
 
     /** 滚轮：pty 模式翻回退，否则内容滚动 */
@@ -393,6 +487,14 @@ final class TerminalPanel
             }
         }
 
+        // F2 进入 pty 后，首帧用真实面板尺寸起 pty（修复全屏程序按错误 LINES 渲染）。
+        if ($this->ptyStartPending && $this->pty === null) {
+            $this->startPty($W, $outH);
+            if ($this->mode !== 'pty') {
+                return $this->runnerContent($terminal, $focused);
+            }
+        }
+
         // 尺寸同步：emu 初始 80×24，首帧按实际面板尺寸重建；变化时才 resize（避免每帧写 stty）
         if ($this->emu === null) {
             $this->emu = new Vt100Emulator($W, $outH);
@@ -409,6 +511,7 @@ final class TerminalPanel
 
         $grid = $this->emu->gridForRender($outH, $this->scrollback);
         $cursor = $grid['cursor'];
+        $this->lastGrid = $grid['lines'];
 
         $lines = [];
         foreach ($grid['lines'] as $rIdx => $cells) {
@@ -426,7 +529,13 @@ final class TerminalPanel
                 $isCursor = $cursor !== null
                     && $cursor['y'] === $rIdx
                     && $cursor['x'] === $cIdx;
-                [$st, $key] = $this->styleAndKey($cell, $isCursor);
+                // 文本选择：本格落在选区矩形内则反显（与光标反显叠加）
+                $inSel = $this->sel !== null
+                    && ($inner->position->y + $rIdx) >= $this->sel[0]
+                    && ($inner->position->y + $rIdx) <= $this->sel[2]
+                    && ($inner->position->x + $cIdx) >= $this->sel[1]
+                    && ($inner->position->x + $cIdx) <= $this->sel[3];
+                [$st, $key] = $this->styleAndKey($cell, $isCursor || $inSel);
                 if ($key !== $curKey) {
                     $flush();
                     $curKey = $key;
@@ -441,6 +550,132 @@ final class TerminalPanel
         $lines[] = $this->ptyHintLine($W, $focused);
 
         return ParagraphWidget::fromLines(...$lines);
+    }
+
+    /** 渲染前注入文本选择矩形（归一化 [r0,c0,r1,c1]）；null 清掉高亮 */
+    public function setSelection(?array $r): void
+    {
+        $this->sel = $r;
+    }
+
+    /**
+     * 对一组内容 Span 反显 [c0,c1] 绝对显示列区间（落在文本区内的部分）。
+     * 文本区显示列从 $textX0 起；跨入选区的 Span 切成「前/选中/后」三段，选中段加 REVERSED。
+     * @param Span[] $spans
+     * @return Span[]
+     */
+    private function invertSpans(array $spans, int $textX0, int $c0, int $c1): array
+    {
+        if ($c1 < $c0) {
+            return $spans;
+        }
+        $out = [];
+        $col = $textX0;
+        foreach ($spans as $span) {
+            $text = $span->content;
+            $w = DisplayWidth::dispWidth($text);
+            $s0 = $col;
+            $s1 = $col + $w;
+            $col = $s1;
+            $a = max($s0, $c0);
+            $b = min($s1, $c1 + 1); // c1 含
+            if ($a >= $b) {
+                $out[] = $span;
+                continue;
+            }
+            if ($a > $s0) {
+                $out[] = new Span(DisplayWidth::mbSubDisp($text, 0, $a - $s0), $span->style);
+            }
+            $selText = DisplayWidth::mbSubDisp($text, $a - $s0, $b - $a);
+            $out[] = new Span($selText, $span->style->addModifier(Modifier::REVERSED));
+            if ($b < $s1) {
+                $out[] = new Span(DisplayWidth::mbSubDisp($text, $b - $s0, $s1 - $b), $span->style);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * 取终端文本选择矩形内的文字（runner / pty 两模式）。坐标均为视口绝对行列。
+     * runner 模式从 TerminalBuffer 取去色文本（按 hScroll 偏移映射）；pty 模式从缓存的
+     * 可见屏幕网格取单元格（跳过宽字符右占位）。
+     */
+    public function getTextRect(Area $terminal, int $r0, int $c0, int $r1, int $c1): string
+    {
+        $inner = $terminal->inner(new Margin(1, 1));
+        $W = max(0, $inner->width);
+        $H = max(0, $inner->height);
+
+        if ($this->mode === 'pty') {
+            return $this->ptyTextRect($inner, $r0, $c0, $r1, $c1);
+        }
+
+        // ── runner 模式 ──
+        $outH = max(0, $H - 1);
+        $rows = $this->buf->all();
+        $status = $this->statusRow();
+        if ($status !== null) {
+            $rows[] = $status;
+        }
+        if ($rows === []) {
+            return '';
+        }
+        $maxOff = max(0, count($rows) - $outH);
+        $off = $this->follow ? $maxOff : min(max(0, $this->scroll), $maxOff);
+
+        $out = [];
+        for ($row = $r0; $row <= $r1; $row++) {
+            $v = $row - $inner->position->y;
+            if ($v < 0 || $v >= $outH) {
+                $out[] = '';
+                continue;
+            }
+            $src = $rows[$off + $v] ?? null;
+            if ($src === null) {
+                $out[] = '';
+                continue;
+            }
+            $text = $src['text'] ?? '';
+            // 显示文本 = mbSubDisp(text, hScroll, W)：可见文本从 inner.x 起、显示列 0..W-1。
+            // 选区绝对列 → 可见文本显示列 = absCol - inner.x - hScroll。
+            $dispA = max(0, $c0 - $inner->position->x - $this->hScroll);
+            $dispB = max(0, $c1 - $inner->position->x - $this->hScroll);
+            $chA = DisplayWidth::mbDispToCharIndex($text, $dispA);
+            $chB = DisplayWidth::mbDispToCharIndex($text, $dispB + 1);
+            $out[] = mb_substr($text, $chA, $chB - $chA);
+        }
+        return implode("\n", $out);
+    }
+
+    /** pty 模式取字：从缓存可见网格按单元格拼字（跳过宽字符右占位） */
+    private function ptyTextRect(Area $inner, int $r0, int $c0, int $r1, int $c1): string
+    {
+        if ($this->lastGrid === null) {
+            return '';
+        }
+        $out = [];
+        for ($row = $r0; $row <= $r1; $row++) {
+            $v = $row - $inner->position->y;
+            if ($v < 0 || $v >= count($this->lastGrid)) {
+                $out[] = '';
+                continue;
+            }
+            $cells = $this->lastGrid[$v];
+            $line = '';
+            for ($col = $c0; $col <= $c1; $col++) {
+                $vc = $col - $inner->position->x;
+                if ($vc < 0 || $vc >= count($cells)) {
+                    break;
+                }
+                $cell = $cells[$vc];
+                if ($cell->wide) {
+                    continue; // 宽字符右占位：跳过，避免重复空格
+                }
+                $line .= $cell->ch === '' ? ' ' : $cell->ch;
+            }
+            $out[] = $line;
+        }
+        return implode("\n", $out);
     }
 
     /** 单格样式 + 合并判据键（同键合并成一个 Span，降低渲染开销） */
@@ -540,7 +775,7 @@ final class TerminalPanel
         $this->hScroll = max(0, min($this->hScroll, max(0, $maxW - $W)));
 
         $lines = [];
-        foreach (array_slice($rows, $off, $outH) as $row) {
+        foreach (array_slice($rows, $off, $outH) as $v => $row) {
             $kind = $row['kind'] ?? ($row['err'] ? 'err' : 'out');
             $style = match ($kind) {
                 'err' => $this->shell->theme->style('termErr'),
@@ -548,7 +783,16 @@ final class TerminalPanel
                 'hint' => $this->shell->theme->style('termHint'),
                 default => Style::default(),
             };
-            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($row['text'], $this->hScroll, $W), $style));
+            $disp = DisplayWidth::mbSubDisp($row['text'], $this->hScroll, $W);
+            $span = Span::styled($disp, $style);
+            // 文本选择反显：本可见行落在选区行范围内时，反显文本区内 [c0,c1] 显示列
+            $absRow = $inner->position->y + $v;
+            if ($this->sel !== null
+                && $absRow >= $this->sel[0] && $absRow <= $this->sel[2]) {
+                $inv = $this->invertSpans([$span], $inner->position->x, $this->sel[1], $this->sel[3]);
+                $span = $inv[0] ?? $span;
+            }
+            $lines[] = Line::fromSpans($span);
         }
         // 输出不足一屏时补空行，把输入行顶到面板底部
         while (count($lines) < $outH) {
@@ -658,10 +902,10 @@ final class TerminalPanel
                     $this->scrollPty(1);
                     return true;
                 case KeyCode::Home:
-                    $this->scrollback = 0;
+                    $this->scrollback = $this->emu !== null ? $this->emu->scrollbackSize() : 0;
                     return true;
                 case KeyCode::End:
-                    $this->scrollback = $this->emu !== null ? $this->emu->scrollbackSize() : 0;
+                    $this->scrollback = 0;
                     return true;
                 default:
                     return false;
@@ -728,6 +972,7 @@ final class TerminalPanel
             return;
         }
         $this->buf->append('$ ' . $cmd . "\n", false);   // 回显命令
+        $this->ranInRunner = true;
         $this->follow = true;
         $this->scroll = 0;
         if (!$this->runner->start($cmd, $this->cwd)) {
@@ -841,6 +1086,35 @@ final class TerminalPanel
     {
         $this->input = '';
         $this->pos = 0;
+    }
+
+    /**
+     * 粘贴文本到终端（按当前模式分派）：
+     *  - runner 模式：插到命令输入行光标处；输入行是单行的，粘贴文本里的换行统一规整为空格，
+     *    避免把多行塞进单行输入行（也不自动提交命令，避免误执行）。
+     *  - pty 捕获态：把文本字节转发给 PTY（\n→\r 适配 Enter 语义），由真实 shell 解释（真粘贴）。
+     *  - pty 非捕获态：焦点在应用导航、无输入行，忽略。
+     */
+    public function pasteText(string $text): void
+    {
+        if ($text === '') {
+            return;
+        }
+        if ($this->mode === 'pty') {
+            if (!$this->captured) {
+                return; // 非捕获态：无焦点输入行
+            }
+            $bytes = str_replace("\n", "\r", str_replace("\r\n", "\r", $text));
+            $this->sendToPty($bytes);
+            return;
+        }
+        // runner 模式：单行输入行，换行规整为空格
+        $line = str_replace(["\r\n", "\r", "\n"], ' ', $text);
+        $this->input = mb_substr($this->input, 0, $this->pos)
+            . $line
+            . mb_substr($this->input, $this->pos);
+        $this->pos += mb_strlen($line);
+        $this->histIdx = -1;
     }
 
     /** 退出时收尾：停掉还在跑的子进程，避免留下孤儿进程 */

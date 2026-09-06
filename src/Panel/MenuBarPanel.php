@@ -219,7 +219,31 @@ final class MenuBarPanel
     }
 
     /**
-     * 下拉打开时点击：命中某条目则执行；点下拉空白处则关闭。返回 true 表示已消费。
+     * 命中测试：给定视口坐标，返回对应的菜单项下标；未命中（点面板外 / 顶边框空白行）返回 null。
+     * 下拉面板顶边框在绝对行 $top（菜单栏下方一行），条目从 $top+1 行起（跳过顶边框），
+     * 故命中行须与绘制一致地 +1，否则会出现「点第一项却命中第二项」的 off-by-one。
+     * @param int $x 相对视口左边界的列；@param int $y 相对视口顶端的行
+     */
+    public function dropdownHit(int $x, int $y): ?int
+    {
+        if (!$this->open) {
+            return null;
+        }
+        $startX = $this->menuStartX($this->active);
+        $defs = $this->definitions();
+        $items = $defs[$this->active]['items'];
+        $top = 1;                 // 菜单栏 row0 下方：面板顶边框所在绝对行
+        $itemsTop = $top + 1;    // 跳过面板顶边框，条目从第 2 行起
+        $itemW = $this->dropdownWidth();
+        if ($x >= $startX && $x < $startX + $itemW
+            && $y >= $itemsTop && $y < $itemsTop + count($items)) {
+            return $y - $itemsTop;
+        }
+        return null;
+    }
+
+    /**
+     * 下拉打开时点击：命中某条目则执行；点下拉空白（含顶边框空行）则关闭。返回 true 表示已消费。
      * @param int $x 相对视口左边界的列；@param int $y 相对视口顶端的行
      */
     public function clickDropdown(int $x, int $y): bool
@@ -227,18 +251,13 @@ final class MenuBarPanel
         if (!$this->open) {
             return false;
         }
-        $startX = $this->menuStartX($this->active);
-        $defs = $this->definitions();
-        $items = $defs[$this->active]['items'];
-        // 下拉从第 1 行开始（第 0 行是菜单栏）
-        $top = 1;
-        $itemW = $this->dropdownWidth();
-        if ($x >= $startX && $x < $startX + $itemW && $y >= $top && $y < $top + count($items)) {
-            $this->sel = $y - $top;
+        $hit = $this->dropdownHit($x, $y);
+        if ($hit !== null) {
+            $this->sel = $hit;
             $this->runActive();
             return true;
         }
-        // 点下拉之外：关闭（但点其它菜单标签由 clickBar 处理，这里只关）
+        // 点下拉之外（含面板顶边框空白行）：关闭（点其它菜单标签由 clickBar 处理，这里只关）
         $this->close();
         return true;
     }
@@ -291,8 +310,12 @@ final class MenuBarPanel
 
     /**
      * 下拉覆盖层（菜单打开时由 App::render 用 CompositeWidget 浮到主区之上）。
-     * 全视口 Grid：第 0 行留白（不盖菜单栏），随后是下拉块，其余留白。
-     * 极小视口（高度 < 2）不画，避免 0 高 area。
+     *
+     * 透明叠加：只把面板画到 (startX, top) 起的子区域，其余缓冲不动，底层 UI 自然透出。
+     * 早期实现用「全视口 Grid + 空 spacer 定位」，但 php-tui 的 GridWidget 渲染时先建
+     * 空白子缓冲再 putBuffer 拷回，会把底层 UI 整块抹成空白（即「遮罩全屏」的 bug）。
+     * 故改由 DropdownOverlay 仅画面板子区域、不清屏。
+     * 极小视口（高度放不下边框）不画，避免 0 高 area。
      */
     public function dropdownWidget(int $vpW, int $vpH): Widget
     {
@@ -309,49 +332,17 @@ final class MenuBarPanel
         $panelW = $contentW + 2;
         $panelH = $contentH + 2;
 
-        $panel = $this->buildDropdown($items);
-
         $top = 1; // 第 0 行是菜单栏，不盖
         // 视口太矮放不下下拉（含边框）就不画，避免约束溢出崩界面
         if ($vpH < $top + $panelH) {
             return \PhpTui\Tui\Extension\Core\Widget\ParagraphWidget::fromString('');
         }
-        $below = max(0, $vpH - $top - $panelH);
-        $left = max(0, $startX);
-        $right = max(0, $vpW - $left - $panelW);
+        // 水平越界则左移夹紧，保证面板完整可见（不画到视口外）
+        $startX = max(0, min($startX, max(0, $vpW - $panelW)));
 
-        // ⚠️ 绝不能给 0 宽/0 高的 spacer：ParagraphWidget 会往 0 尺寸 area 里写，
-        // 抛 OutOfBoundsException（菜单栏 startX=0 时左侧 spacer 必然 0 宽）。
-        // 故约束与 widget 都按「非零才加入」动态组装。
-        $rowCons = [];
-        $rowW = [];
-        if ($left > 0) {
-            $rowCons[] = \PhpTui\Tui\Layout\Constraint::length($left);
-            $rowW[] = $this->spacer();
-        }
-        $rowCons[] = \PhpTui\Tui\Layout\Constraint::length($panelW);
-        $rowW[] = $panel;
-        if ($right > 0) {
-            $rowCons[] = \PhpTui\Tui\Layout\Constraint::length($right);
-            $rowW[] = $this->spacer();
-        }
-        $row = \PhpTui\Tui\Extension\Core\Widget\GridWidget::default()
-            ->direction(\PhpTui\Tui\Widget\Direction::Horizontal)
-            ->constraints(...$rowCons)
-            ->widgets(...$rowW);
+        $panel = $this->buildDropdown($items);
 
-        $vCons = [\PhpTui\Tui\Layout\Constraint::length($top)];
-        $vW = [$this->spacer()];
-        $vCons[] = \PhpTui\Tui\Layout\Constraint::length($panelH);
-        $vW[] = $row;
-        if ($below > 0) {
-            $vCons[] = \PhpTui\Tui\Layout\Constraint::length($below);
-            $vW[] = $this->spacer();
-        }
-        return \PhpTui\Tui\Extension\Core\Widget\GridWidget::default()
-            ->direction(\PhpTui\Tui\Widget\Direction::Vertical)
-            ->constraints(...$vCons)
-            ->widgets(...$vW);
+        return new \App\Widget\DropdownOverlay($panel, $startX, $top, $panelW, $panelH);
     }
 
     private function buildDropdown(array $items): Widget
@@ -378,10 +369,5 @@ final class MenuBarPanel
             ->borders(\PhpTui\Tui\Widget\Borders::ALL)
             ->borderType(\PhpTui\Tui\Widget\BorderType::Plain)
             ->widget(\PhpTui\Tui\Extension\Core\Widget\ParagraphWidget::fromLines(...$lines));
-    }
-
-    private function spacer(): Widget
-    {
-        return \PhpTui\Tui\Extension\Core\Widget\ParagraphWidget::fromString('');
     }
 }
