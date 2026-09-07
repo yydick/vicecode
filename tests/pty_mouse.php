@@ -14,7 +14,50 @@ declare(strict_types=1);
  * 运行：timeout 90 php tests/pty_mouse.php
  */
 
-$env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40']);
+chdir(__DIR__ . '/..');
+
+// ── 探针：用同尺寸布局 + 产品自身的 FileTree 精确算出各树节点的屏幕坐标，不再写死偏移 ──
+// 早期版本把 .gitignore 标成 0-based (5,15)（idx=11），但 src/Text/ 等新目录让节点下移、
+// idx 变成 12，硬编码坐标随即失效。这里直接读 $tree->visible()（与渲染同款），按 product
+// SidebarPanel::content() 的 offset 规则算屏幕行，目录增删都不再影响坐标。
+require __DIR__ . '/../vendor/autoload.php';
+use App\App;
+use PhpTui\Tui\Display\Area;
+
+$probe = new App();
+$sb = $probe->areas(Area::fromDimensions(120, 40))['sidebar'];
+$sbx = $sb->position->x;
+$sby = $sb->position->y;
+$tree = $probe->sidebar->tree();
+$visible = $tree->visible();
+$selIdx = 0;
+foreach ($visible as $i => $n) {
+    if ($n->path === $probe->selectedPath) {
+        $selIdx = $i;
+        break;
+    }
+}
+$rowsH = max(0, $sb->height - 4);
+$offset = ($selIdx < $rowsH) ? 0 : max(0, $selIdx - $rowsH + 1);
+/** 顶层节点名 → 0-based 屏幕行（与 content() 渲染一致：sb.y+3+idx-offset） */
+$rowOf = static function (string $name) use ($visible, $sby, $offset): ?int {
+    foreach ($visible as $i => $n) {
+        if ($n->name === $name) {
+            return $sby + 3 + ($i - $offset);
+        }
+    }
+    return null;
+};
+// depth0 行结构：│» ▶ name/ → 三角命中区 0-based x∈[sbx+3, sbx+4]，名称从 sbx+5 起。
+$arrowCol = $sbx + 4; // 点三角：0-based x=sbx+3 → SGR col=sbx+4
+$nameCol  = $sbx + 6; // 点名称：0-based x=sbx+5 → SGR col=sbx+6（避开三角，避免误触展开）
+
+$rG   = $rowOf('.gitignore'); // 顶层文件
+$rSrc = $rowOf('src');        // 顶层目录（有子目录）
+$rBin = $rowOf('bin');        // 顶层目录（只有文件，稳定）
+$rDocs = $rowOf('.docs');     // 顶层目录
+
+$env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40', 'VICECODE_CONFIG' => tempnam(sys_get_temp_dir(), 'vc_mouse')]);
 
 /** 归一化：剥 ANSI，只留字母数字与汉字（差分渲染会把整词拆成逐格写入） */
 function normalize(string $raw): string
@@ -73,14 +116,6 @@ function runOnce(array $env, array $seq, callable $readPty): string
     return normalize($out);
 }
 
-// 0-based (5,15) 是侧栏的 .gitignore 条目（120x40 下：菜单栏占第 0 行使 sidebar.y=1，
-// 树条目从 y=4 起；且顶层多了 tools/ 目录，.gitignore 现为第 12 个可见节点 idx=11）。
-// SGR 鼠标坐标是 1-based，故 (6,16)。
-$COL = 6;
-$ROW = 16;
-$press = "\x1b[<0;{$COL};{$ROW}M";
-$release = "\x1b[<0;{$COL};{$ROW}m";
-
 $failed = false;
 function check(bool $cond, string $msg): void
 {
@@ -91,58 +126,59 @@ function check(bool $cond, string $msg): void
     }
 }
 
-echo "== 单击（按下 + 释放）==\n";
-$out1 = runOnce($env, [[$press, 300000], [$release, 400000]], $readPty);
+// 探针对任意顶层节点必须解析出行号，否则说明树结构假设变了，直接报错而非静默错配坐标。
+foreach (['.gitignore' => $rG, 'src' => $rSrc, 'bin' => $rBin, '.docs' => $rDocs] as $nm => $rr) {
+    if ($rr === null) {
+        echo "  [FAIL] 探针找不到顶层节点 {$nm}（visible 数=" . count($visible) . "）\n";
+        $failed = true;
+    }
+}
+// SGR 1-based 坐标封装
+$seq = static fn (int $col, int $row0): array => [
+    ["\x1b[<0;{$col};" . ($row0 + 1) . "M", 250000],
+    ["\x1b[<0;{$col};" . ($row0 + 1) . "m", 450000],
+];
+$seqDbl = static fn (int $col, int $row0): array => [
+    ["\x1b[<0;{$col};" . ($row0 + 1) . "M", 50000],
+    ["\x1b[<0;{$col};" . ($row0 + 1) . "m", 150000],
+    ["\x1b[<0;{$col};" . ($row0 + 1) . "M", 50000],
+    ["\x1b[<0;{$col};" . ($row0 + 1) . "m", 450000],
+];
+
+echo "== 单击顶层文件（按下 + 释放）→ 打开进编辑器 ==\n";
+$out1 = runOnce($env, $seq($nameCol, $rG), $readPty);
 check(str_contains($out1, 'gitignore'), '画面上出现 .gitignore 条目（鼠标事件到达应用）');
 check(str_contains($out1, '编辑器gitignore'), '单击后文件被打开进编辑器（标题含文件名）');
 
-echo "== 双击（按下 + 释放 + 按下 + 释放）==\n";
-$out2 = runOnce($env, [
-    [$press, 200000], [$release, 200000],
-    [$press, 200000], [$release, 400000],
-], $readPty);
+echo "== 双击顶层文件（按下 + 释放 + 按下 + 释放）==\n";
+$out2 = runOnce($env, $seqDbl($nameCol, $rG), $readPty);
 check(str_contains($out2, '编辑器gitignore'), '双击后文件被打开进编辑器');
 
 echo "== 展开目录后点其中的文件（真实使用路径）==\n";
-// 刻意用 bin/ 而不是 src/：这里的坐标只能硬编码（pty 是黑盒，查不到树结构），
-// 而 src/ 的子目录数量会随重构变化——本次就因新增 src/Text/ 让 src/App.php 下移一行而失效。
-// bin/ 下只放文件、不会再增子目录，vicecode.php 是其中唯一的文件。
-// 0-based (5,6)=bin 目录；展开后 bin/vicecode.php 位于 0-based y=7 → SGR row=8
+// bin 只有文件、顶层位置由探针算出；展开后首个子项 vicecode.php 正好在 bin 下一行。
 $out4 = runOnce($env, [
-    ["\x1b[<0;6;7M", 200000], ["\x1b[<0;6;7m", 200000],   // 点 bin 目录（选中）
-    ["\r", 300000],                                        // Enter 展开
-    ["\x1b[<0;6;8M", 250000], ["\x1b[<0;6;8m", 450000],   // 点 bin/vicecode.php
+    ...$seq($arrowCol, $rBin),   // 点 bin 三角 → 展开（箭头命中即 toggle，无需再按 Enter）
+    ...$seq($nameCol, $rBin + 1), // 点 bin/vicecode.php（展开后紧邻 bin 的下一行）
 ], $readPty);
 check(str_contains($out4, '编辑器vicecodephp'), '展开 bin 后点 vicecode.php 成功打开进编辑器');
 
 echo "== 单击行首三角应展开（VSCode 习惯）==\n";
-// src 在 0-based y=11（SGR row=12）；三角在 0-based x=3（SGR col=4），名称区 x=10（SGR col=11）
-$out6 = runOnce($env, [
-    ["\x1b[<0;4;12M", 200000], ["\x1b[<0;4;12m", 500000],
-], $readPty);
+$out6 = runOnce($env, $seq($arrowCol, $rSrc), $readPty);
 check(str_contains($out6, 'appphp'), '单击 src 行首三角 → 展开（侧栏出现 src/App.php）');
 check(!str_contains($out6, '编辑器appphp'), '点三角只展开，不把目录当文件打开');
 
-$out7 = runOnce($env, [
-    ["\x1b[<0;11;12M", 200000], ["\x1b[<0;11;12m", 500000],
-], $readPty);
+echo "== 单击条目名只选中、不展开（三角命中区未越界）==\n";
+$out7 = runOnce($env, $seq($nameCol, $rSrc), $readPty);
 check(!str_contains($out7, 'appphp'), '点条目名只选中、不展开（三角命中区未越界）');
 
 echo "== 双击目录应展开（VSCode 习惯）==\n";
-// 0-based (5,11) = src 目录 → SGR (6,12)。两次按下间隔必须 < 400ms 才构成双击，
-// 故按下/释放之间只等 50ms、两次按下之间 200ms（贴近真实双击节奏）。
-$out5 = runOnce($env, [
-    ["\x1b[<0;6;12M", 50000], ["\x1b[<0;6;12m", 150000],
-    ["\x1b[<0;6;12M", 50000], ["\x1b[<0;6;12m", 500000],
-], $readPty);
+// 两次按下间隔 < 400ms 才构成双击，故按下/释放之间只等 50ms、两次按下之间 200ms。
+$out5 = runOnce($env, $seqDbl($nameCol, $rSrc), $readPty);
 check(str_contains($out5, 'appphp'), '双击 src 目录 → 展开（侧栏出现 src/App.php）');
 check(!str_contains($out5, '编辑器appphp'), '双击目录只展开，不会把目录当文件打开');
 
-echo "== 目录条目单击（应展开而非打开）==\n";
-// 0-based (5,4) 是 .docs 目录；SGR 1-based (6,5)
-$out3 = runOnce($env, [
-    ["\x1b[<0;6;5M", 300000], ["\x1b[<0;6;5m", 400000],
-], $readPty);
+echo "== 目录条目单击（应只选中而非打开）==\n";
+$out3 = runOnce($env, $seq($nameCol, $rDocs), $readPty);
 check(!str_contains($out3, '编辑器docs'), '点目录不会把目录当文件打开');
 
 echo $failed ? "\n结论：鼠标交互存在问题\n" : "\n结论：真实 pty 下鼠标点击侧栏条目正常\n";

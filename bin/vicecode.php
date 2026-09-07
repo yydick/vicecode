@@ -258,9 +258,13 @@ function startMain(App $app, Terminal $term, bool $sw): void
         // 真实 pty 下首屏会空白到用户按第一个键才出现（回退分支在循环前有同样的初始 draw）。
         $display->draw($app->render($display->viewportArea()));
 
+        // 有待周期重绘的插件（如时钟）时，idle 超时设为最小 tick 间隔，使其持续走动；
+        // 否则保持原 50ms 低耗轮询。
+        $tickSec = $app->minTickInterval();
+        $idleTimeout = $tickSec !== null ? max(0.1, (float) $tickSec) : 0.05;
         while (!$app->quit) {
             $busy = $app->termRunning() || $app->searchRunning() || $app->aiStreaming();
-            $ev = $ch->pop($busy ? 0.01 : 0.05);
+            $ev = $ch->pop($busy ? 0.01 : $idleTimeout);
             $gotOutput = $app->pollTerminal();
             $gotSearch = $app->pollSearch();
             // M5：AI 流式 token 同样每轮排空。返回 true 表示有新 token，必须重绘，
@@ -274,6 +278,9 @@ function startMain(App $app, Terminal $term, bool $sw): void
                         $redraw->pop(0.001);
                     }
                     $display->draw($app->render($display->viewportArea()));
+                } elseif ($tickSec !== null) {
+                    // 无事件/输出但有待 tick 插件：idle 超时到达即重绘，驱动时钟等插件更新
+                    $display->draw($app->render($display->viewportArea()));
                 }
                 continue;
             }
@@ -285,19 +292,22 @@ function startMain(App $app, Terminal $term, bool $sw): void
 
     // ── 回退分支：纯 php-tui/term（无 Swoole，M0 方案，保留可用）──
     // 用 drainTimeout() 而不是 next()：后者永久阻塞在等键上，命令运行期间 UI 会僵住。
+    $tickSec = $app->minTickInterval();
+    $idleUs = $tickSec !== null ? (int) max(200000, (float) $tickSec * 1000000) : 50000;
     $events = new BlockingTtyEventProvider(STDIN);
     $display->draw($app->render($display->viewportArea()));
     while (!$app->quit) {
         $handled = false;
         $busy = $app->termRunning() || $app->searchRunning() || $app->aiStreaming();
-        foreach ($events->drainTimeout($busy ? 10000 : 50000) as $event) {
+        foreach ($events->drainTimeout($busy ? 10000 : $idleUs) as $event) {
             $app->handle($event, $display->viewportArea());
             $handled = true;
         }
         $gotOutput = $app->pollTerminal();
         $gotSearch = $app->pollSearch();
         $gotAi = $app->pollAi();
-        if ($handled || $gotOutput || $gotSearch || $gotAi) {
+        // 有待 tick 插件时即便无输入/输出也重绘（$idleUs 已按 tick 放大），驱动时钟走动
+        if ($handled || $gotOutput || $gotSearch || $gotAi || $tickSec !== null) {
             $display->draw($app->render($display->viewportArea()));
         }
     }

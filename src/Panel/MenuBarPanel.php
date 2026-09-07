@@ -89,6 +89,7 @@ final class MenuBarPanel
                     ['label' => $t('menu.file_open'),   'action' => 'file.open',   'shortcut' => ''],
                     ['label' => $t('menu.file_save'),   'action' => 'file.save',   'shortcut' => 'Ctrl+S'],
                     ['label' => $t('menu.file_close'),  'action' => 'file.close',  'shortcut' => 'Ctrl+W'],
+                    ['label' => $t('menu.file_plugins'),'action' => 'plugins.open', 'shortcut' => ''],
                     ['label' => $t('menu.file_quit'),   'action' => 'file.quit',   'shortcut' => 'Ctrl+Q'],
                 ],
             ],

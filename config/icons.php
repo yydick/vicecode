@@ -18,6 +18,7 @@ return [
     'explorer' => '📁',  // 资源管理器
     'git'      => '🔗',  // GIT（分支）
     'search'   => '🔍',  // 搜索
+    'plugins'  => '🧩',  // 扩展（插件）
     // 面板标题也可带图标（App 渲染标题时如需可调用 icon()）
     'sidebar'  => '',
     'editor'   => '',

@@ -161,6 +161,30 @@ APP_LOCALE=en php bin/vicecode.php
 VICECODE_CONFIG=/tmp/my_vicecode.json php bin/vicecode.php
 ```
 
+## Plugins (V1)
+
+Plugins are loaded **at runtime**: on startup the app scans `plugins/<id>/plugin.json`, reads the entry file and loads/instantiates the plugin class via `require` (not through composer autoload). A single failing plugin is skipped without breaking startup.
+
+In V1 a plugin can extend the **bottom status bar** — it injects custom segments that are trimmed by priority and ordered together with the built-in segments.
+
+**Built-in example: the `clock` plugin** (`plugins/clock/`): shows the current time on the right of the status bar and refreshes every second (driven by the plugin's `tickInterval`, which makes the main loop redraw periodically).
+
+**Writing a plugin**:
+
+1. Create `plugins/<id>/plugin.json`:
+   ```json
+   { "id": "myplugin", "entry": "MyPlugin.php", "class": "MyPlugin" }
+   ```
+2. Implement `App\Plugin\PluginInterface`:
+   - `id()`: stable unique id;
+   - `statusSegments(App $app)`: return a list of `StatusSegment` (key / text / priority / order);
+   - `tickInterval()`: return a number of seconds (e.g. `1`) when periodic refresh is needed, otherwise `null`.
+3. Drop the entry file in place — no recompilation required.
+
+Plugin files are plain PHP; the core loader deliberately uses a runtime `require`, so plugins can be dropped in or removed independently without rebuilding the app.
+
+Full plugin developer guide (authoring / loading / segment fields / testing) is at [docs/plugins.md](docs/plugins.md).
+
 ## Tests
 
 `tests/` contains both headless unit tests and real-pty end-to-end acceptance tests (require a real terminal; wrapped in `timeout` as a safety net):

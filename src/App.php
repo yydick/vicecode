@@ -20,9 +20,12 @@ use App\Panel\AiPanel;
 use App\Panel\EditorPanel;
 use App\Panel\HelpPanel;
 use App\Panel\MenuBarPanel;
+use App\Panel\PluginsPanel;
 use App\Panel\SidebarPanel;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
+use App\Plugin\PluginInterface;
+use App\Plugin\PluginLoader;
 use App\Search\SearchModel;
 use App\Terminal\KeyToPty;
 use App\Text\DisplayWidth;
@@ -160,6 +163,12 @@ class App
     /** 顶部菜单栏（Backlog 接入）：F10 或点击激活，不进入焦点循环 */
     public MenuBarPanel $menuBar;
 
+    /** 插件管理浮层（V1.1 入口）：菜单「插件 → 已安装插件」唤出，列出插件与配置文件路径 */
+    public PluginsPanel $pluginsPanel;
+
+    /** 用户 ~/.vicerc 的 plugins.<id> 段原始覆盖（供 PluginsPanel 展示有效配置） */
+    public array $userPluginConfig = [];
+
     /**
      * AI 对话状态（M5）：消息历史 / 流式生成 / Provider 选择。
      * 面板（AiPanel）只读它，不持有内容——与 GitModel / SearchModel 同构。
@@ -168,6 +177,14 @@ class App
 
     /** 底部状态栏 */
     public StatusBarPanel $statusBar;
+
+    /**
+     * 已加载的插件（V1：运行时动态加载，目录扫描 plugins 下各子目录的 plugin.json + 运行时 require）。
+     * 由 PluginLoader 在构造末尾填充；插件文件不在 composer autoload 内，
+     * 产品版由内嵌 Zend 运行时解释（见 project_plugin.md）。
+     * @var list<\App\Plugin\PluginInterface>
+     */
+    public array $plugins = [];
 
     /** 退出与未保存确认状态机（R8） */
     public Lifecycle $lifecycle;
@@ -203,6 +220,7 @@ class App
         $this->chat = new ChatModel($this);
         $this->help = new HelpPanel($this);
         $this->menuBar = new MenuBarPanel($this);
+        $this->pluginsPanel = new PluginsPanel($this);
         $this->clip = new Clipboard();        // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function (): void {
             $this->chat->shutdown();
@@ -216,6 +234,104 @@ class App
         if (!empty($roots)) {
             $this->selectedPath = $roots[0]->path;
         }
+        // V1 插件：运行时动态加载（目录扫描 + 运行时 require，避开 composer autoload 的
+        // Closure::bind 以兼容 AOT 产品版）。单个插件失败已在 Loader 内跳过，不影响启动。
+        $this->plugins = PluginLoader::load(__DIR__ . '/..');
+        // 插件配置注入：VSCode 式「插件声明默认（configDefaults）+ 用户 ~/.vicerc 覆盖」。
+        // 可选能力——插件若实现 configure()/configDefaults() 则注入合并后的配置，否则跳过
+        // （不影响未实现它们的插件）。配置段来自 $cfg['plugins']（即 ~/.vicerc）。
+        $userPlugins = ConfigStore::loadPlugins();
+        $this->userPluginConfig = $userPlugins;
+        foreach ($this->plugins as $plugin) {
+            $defaults = method_exists($plugin, 'configDefaults')
+                ? $plugin->configDefaults()
+                : [];
+            $user = $userPlugins[$plugin->id()] ?? [];
+            if (is_array($user) && method_exists($plugin, 'configure')) {
+                $plugin->configure(array_merge($defaults, $user));
+            }
+        }
+    }
+
+    /**
+     * 计算单个插件的「有效配置」= 默认(configDefaults) ∩ 用户 ~/.vicerc 覆盖。
+     * 与构造期注入用的是同一套合并逻辑，供 PluginsPanel / SidebarPanel 展示当前生效值。
+     * @return array<string,mixed>
+     */
+    public function pluginEffectiveConfig(\App\Plugin\PluginInterface $p): array
+    {
+        $defaults = method_exists($p, 'configDefaults') ? $p->configDefaults() : [];
+        $user = $this->userPluginConfig[$p->id()] ?? [];
+        return is_array($user) ? array_merge($defaults, $user) : $defaults;
+    }
+
+    /**
+     * 在 ViceCode 自己的编辑器里打开**插件专用配置文件**（~/.vicecode.plugins.json，
+     * 与 ~/.vicerc 分离）供编辑（VSCode「打开设置(JSON)」同款，而非甩给外部编辑器）。
+     * 文件不存在时，先落一份含当前生效插件配置的专用文件，避免打开空文件把配置冲掉。
+     */
+    public function openPluginConfig(): void
+    {
+        $path = ConfigStore::pluginsPath();
+        if (!is_file($path)) {
+            $data = [];
+            foreach ($this->plugins as $p) {
+                $cfg = $this->pluginEffectiveConfig($p);
+                if ($cfg !== []) {
+                    $data[$p->id()] = $cfg;
+                }
+            }
+            ConfigStore::savePlugins($data);
+        }
+        $this->editor->openFile($path);
+    }
+
+    /**
+     * 重新加载插件配置（VSCode「重载窗口」的平替，但无需退出进程）。
+     * 重读专用插件配置文件（与 ~/.vicerc 分离），按「默认 ∩ 用户覆盖」重新注入每个插件。
+     */
+    public function reloadPluginConfig(): void
+    {
+        $userPlugins = ConfigStore::loadPlugins();
+        $this->userPluginConfig = $userPlugins;
+        foreach ($this->plugins as $plugin) {
+            $defaults = method_exists($plugin, 'configDefaults') ? $plugin->configDefaults() : [];
+            $user = $userPlugins[$plugin->id()] ?? [];
+            if (is_array($user) && method_exists($plugin, 'configure')) {
+                $plugin->configure(array_merge($defaults, $user));
+            }
+        }
+    }
+
+    /**
+     * 聚合所有插件本帧的状态栏段，统一交给 StatusBarPanel 与系统段一起裁剪/摆放。
+     * @return array<int,array{k:string,p:int,o:int,t:string}>
+     */
+    public function pluginSegments(): array
+    {
+        $out = [];
+        foreach ($this->plugins as $plugin) {
+            foreach ($plugin->statusSegments($this) as $seg) {
+                $out[] = ['k' => $seg->key, 'p' => $seg->priority, 'o' => $seg->order, 't' => $seg->text];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * 聚合插件要求的最小周期重绘间隔（秒），null=无需周期重绘。
+     * 主循环据此在 idle 时按最小间隔触发重绘，使时钟等插件持续更新。
+     */
+    public function minTickInterval(): ?int
+    {
+        $min = null;
+        foreach ($this->plugins as $plugin) {
+            $tick = $plugin->tickInterval();
+            if ($tick !== null && $tick > 0) {
+                $min = $min === null ? $tick : min($min, $tick);
+            }
+        }
+        return $min;
     }
 
     /** 取图标；未配置返回空串（调用方据此回退到纯文字标签） */
@@ -336,6 +452,9 @@ class App
         }
         if ($this->help->isAboutOpen()) {
             $overlays[] = $this->help->aboutWidget($vp->width, $vp->height);
+        }
+        if ($this->pluginsPanel->isOpen()) {
+            $overlays[] = $this->pluginsPanel->widget($vp->width, $vp->height);
         }
         if ($overlays === []) {
             return $base;
@@ -568,6 +687,11 @@ class App
                 break;
             case 'file.save':
                 $this->editor->save();
+                // 保存的若是插件专用配置文件，则重新注入插件配置（在 ViceCode 内改完即生效，无需重启）
+                if ($this->buffer !== null && $this->buffer->path === ConfigStore::pluginsPath()) {
+                    $this->reloadPluginConfig();
+                    $this->setMessage($this->t('plugins.reloaded'));
+                }
                 break;
             case 'file.close':
                 if ($this->buffer !== null) {
@@ -606,6 +730,9 @@ class App
                 break;
             case 'help.about':
                 $this->help->openAbout();
+                break;
+            case 'plugins.open':
+                $this->pluginsPanel->open();
                 break;
         }
     }
@@ -658,6 +785,27 @@ class App
                 return;
             }
             return; // 其余字符键一律吞掉
+        }
+
+        // 插件管理浮层打开期间**独占键盘**（与帮助页同机制）：Esc/q 关闭，上下/翻页滚动，
+        // 不往下层面板分发，否则在浮层里按 q 会顺带把应用退了。
+        if ($this->pluginsPanel->isOpen()) {
+            $viewH = $this->pluginsPanel->viewHeightFor($vp->width, $vp->height);
+            if ($event instanceof MouseEvent) {
+                if ($event->kind === MouseEventKind::ScrollUp) {
+                    $this->pluginsPanel->scrollBy(-3);
+                } elseif ($event->kind === MouseEventKind::ScrollDown) {
+                    $this->pluginsPanel->scrollBy(3);
+                }
+                return;
+            }
+            if ($event instanceof CharKeyEvent && $this->pluginsPanel->onChar($event)) {
+                return;
+            }
+            if ($event instanceof CodedKeyEvent && $this->pluginsPanel->onKey($event, $viewH)) {
+                return;
+            }
+            return; // 其余键一律吞掉：浮层是模态的
         }
 
         // 帮助页/关于页打开期间**独占键盘**：不往下层面板分发，否则在帮助页里按 q

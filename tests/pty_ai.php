@@ -107,13 +107,29 @@ if (!$up) {
 // ── 起应用（pty）──────────────────────────────────────
 $base = 'http://127.0.0.1:' . $port . '/v1';
 $env = array_merge(getenv(), [
-    'COLUMNS'          => '120',
-    'LINES'            => '40',
+    'COLUMNS'          => '200',
+    'LINES'            => '50',
+    'VICECODE_CONFIG' => tempnam(sys_get_temp_dir(), 'vc_ai'),
     'OPENAI_BASE_URL'  => $base,
     'OPENAI_API_KEY'   => 'test-key-local-mock',
     'DEEPSEEK_BASE_URL' => $base,
     'DEEPSEEK_API_KEY' => 'test-key-local-mock',
 ]);
+
+// 临时禁用插件目录：内置 clock 插件每秒在状态栏写时间数字，差分渲染会把「你好」两个字与时钟
+// 数字跨行穿插进归一化流，导致「你好」不连续（时钟每秒变 → 偶发失败）。中文输入验收只关心
+// 输入盒本身，禁用插件后断言稳定。shutdown 时还原。
+$pluginsDir = __DIR__ . '/../plugins';
+$pluginsBackup = $pluginsDir . '.disabled_for_ai';
+if (is_dir($pluginsDir)) {
+    rename($pluginsDir, $pluginsBackup);
+    register_shutdown_function(static function () use ($pluginsDir, $pluginsBackup): void {
+        if (is_dir($pluginsBackup)) {
+            rename($pluginsBackup, $pluginsDir);
+        }
+    });
+}
+
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
 $proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes, null, $env);
 if ($proc === false) {
@@ -125,9 +141,11 @@ stream_set_blocking($pipes[1], false);
 usleep(300000);
 $readPty($pipes[1], 16384); // 吃掉首帧
 
-// 探针算 ai_input 面板中心（0-based → SGR 1-based）
+// 探针算 ai_input 面板中心（0-based → SGR 1-based）。视口用 200x50：窄屏（如 120 列）下
+// 状态栏会按优先级丢弃焦点段（focus 优先级最低），导致「=AI_INPUT」根本不渲染，无法观测；
+// 加宽后焦点段稳定出现，且 ai_input 坐标由本探针动态算出、随视口自适应。
 $probe = new App();
-$ai = $probe->areas(Area::fromDimensions(120, 40))['ai_input'];
+$ai = $probe->areas(Area::fromDimensions(200, 50))['ai_input'];
 $ac = $ai->position->x + intdiv($ai->width, 2) + 1;
 $ar = $ai->position->y + intdiv($ai->height, 2) + 1;
 

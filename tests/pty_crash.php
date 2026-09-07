@@ -35,7 +35,7 @@ function check(bool $cond, string $msg): void
 function makeCrashingEntry(string $root): string
 {
     $src = (string) file_get_contents($root . '/bin/vicecode.php');
-    $marker = '$display = DisplayBuilder::default($backend)->fullscreen()->build();';
+    $marker = '->build();';
     if (!str_contains($src, $marker)) {
         throw new RuntimeException('找不到注入点，bin/vicecode.php 结构变了');
     }

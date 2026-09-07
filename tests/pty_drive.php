@@ -35,7 +35,7 @@ $seq = [
     ["\x1b[A", 40000],     // Up 箭头
     ["\x1b[C", 40000],     // Right 箭头
     ["\x1b[D", 40000],     // Left 箭头
-    ["q", 60000],          // 退出（sidebar 焦点下 q 退出）
+    ["\x11", 60000],       // Ctrl+Q 全局退出（非终端焦点下生效；终端焦点不生效，见下方兜底循环）
 ];
 
 // 子进程退出后读 pty 主端会触发 EIO(errno=5)，视为 EOF；仅精确忽略该错误，不掩盖其它异常
@@ -67,10 +67,13 @@ foreach ($seq as [$bytes, $us]) {
     }
 }
 
-// 兜底：若还活着，再发 q / Esc 确保退出
+// 兜底：若还活着，循环「Tab 切焦点 + Ctrl+Q」直到退出。Ctrl+Q 在终端焦点下不生效（会被当 shell
+// 输入），故每次先 Tab 离开终端再发 Ctrl+Q，最多 6 轮必能从某个非终端面板干净退出。
 $guard = 0;
-while (proc_get_status($proc)['running'] && $guard < 5) {
-    fwrite($pipes[0], $guard % 2 === 0 ? "q" : "\x1b");
+while (proc_get_status($proc)['running'] && $guard < 6) {
+    fwrite($pipes[0], "\t");
+    usleep(80000);
+    fwrite($pipes[0], "\x11");
     usleep(150000);
     $guard++;
 }

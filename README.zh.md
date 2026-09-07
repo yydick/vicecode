@@ -171,6 +171,30 @@ APP_LOCALE=en php bin/vicecode.php
 VICECODE_CONFIG=/tmp/my_vicecode.json php bin/vicecode.php
 ```
 
+## 插件系统（V1）
+
+插件在**运行时**动态加载：应用启动时扫描 `plugins/<id>/plugin.json`，读取入口文件后用 `require` 加载并实例化插件类（不走 composer autoload）。单个插件加载失败会被跳过，不影响整体启动。
+
+当前 V1 版本插件可扩展**底部状态栏**——向状态栏注入自定义段（与系统段统一按优先级裁剪、按顺序排列）。
+
+**内置示例：`clock` 插件**（`plugins/clock/`）：在状态栏右侧显示当前时间，并每秒自动刷新（通过插件声明的 `tickInterval` 驱动主循环周期重绘）。
+
+**编写插件**：
+
+1. 在 `plugins/<id>/` 下创建 `plugin.json`：
+   ```json
+   { "id": "myplugin", "entry": "MyPlugin.php", "class": "MyPlugin" }
+   ```
+2. 实现 `App\Plugin\PluginInterface`：
+   - `id()`：稳定唯一标识；
+   - `statusSegments(App $app)`：返回 `StatusSegment` 列表（含 key / 文本 / 优先级 / 显示顺序）；
+   - `tickInterval()`：如需周期刷新返回秒数（如 `1`），否则返回 `null`。
+3. 放置入口文件即生效，无需重新编译。
+
+插件文件写普通 PHP 即可；核心加载器刻意使用运行时 `require`，插件可独立放置、随时增删，无需重新构建应用。
+
+完整插件开发文档（编写 / 加载机制 / 字段取值 / 测试）见 [docs/plugins.md](docs/plugins.md)。
+
 ## 测试
 
 `tests/` 下既有 headless 单测，也有真实 pty 端到端验收（须真实终端环境，外层已加 `timeout` 兜底）：

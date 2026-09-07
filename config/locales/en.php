@@ -19,6 +19,7 @@ return [
     'sidebar.explorer' => 'EXPLORER',
     'sidebar.git'      => 'GIT',
     'sidebar.search'   => 'SEARCH',
+    'sidebar.plugins'  => 'EXTENSIONS',
 
     // 状态栏
     'status.focus'     => 'focus',
@@ -213,6 +214,14 @@ return [
     'menu.help'              => 'Help',
     'menu.help_shortcuts'    => 'Shortcuts',
     'menu.help_about'        => 'About',
+    'menu.file_plugins'      => 'Installed Plugins...',
+    'plugins.title'          => 'Installed Plugins',
+    'plugins.enabled'        => 'enabled',
+    'plugins.no_config'      => 'no configurable options',
+    'plugins.config_path'    => 'Plugin config file',
+    'plugins.hint'           => "Press Enter to edit that file in ViceCode's own editor (Ctrl+S applies live)",
+    'plugins.close'          => 'Esc / q to close',
+    'plugins.reloaded'       => 'Plugin config reloaded',
     'about.title'            => 'About ViceCode',
     'about.line1'            => 'A terminal IDE built on php-tui',
     'about.line2'            => 'Swoole coroutine driven · multi-provider LLM',
