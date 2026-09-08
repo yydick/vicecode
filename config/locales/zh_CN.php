@@ -210,6 +210,7 @@ return [
     'plugins.title'          => '已安装插件',
     'plugins.enabled'        => '已启用',
     'plugins.no_config'      => '无可配置项',
+    'plugins.no_plugins'     => '(无插件)',
     'plugins.config_path'    => '插件配置文件',
     'plugins.hint'          => '在此按 Enter，用 ViceCode 自带的编辑器打开上面文件直接改（Ctrl+S 保存即生效）',
     'plugins.close'          => 'Esc / q 关闭',

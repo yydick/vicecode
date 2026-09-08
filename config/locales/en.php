@@ -218,6 +218,7 @@ return [
     'plugins.title'          => 'Installed Plugins',
     'plugins.enabled'        => 'enabled',
     'plugins.no_config'      => 'no configurable options',
+    'plugins.no_plugins'     => '(no plugins)',
     'plugins.config_path'    => 'Plugin config file',
     'plugins.hint'           => "Press Enter to edit that file in ViceCode's own editor (Ctrl+S applies live)",
     'plugins.close'          => 'Esc / q to close',

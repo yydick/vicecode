@@ -1,6 +1,7 @@
 {
     "name": "yydick/vicecode",
     "type": "project",
+    "version": "0.0.1",
     "description": "VSCode-style multi-panel terminal workspace (TUI) built with php-tui and Swoole.",
     "license": "MIT",
     "require": {
@@ -16,6 +17,9 @@
     },
     "config": {
         "sort-packages": true
+    },
+    "scripts": {
+        "test": "tools/run_tests.sh"
     },
     "repositories": {
         "packagist": {

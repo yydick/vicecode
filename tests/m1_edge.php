@@ -127,8 +127,19 @@ for ($i = 0; $i < 60; $i++) {
 check($b3->cursorRow === 499, '连续 PageDown 停在末行（不越界）');
 
 // ───────── 4) 极小视口：不崩、无负数宽度 ─────────
-echo "== 极小视口 40x10 / 20x6 ==\n";
-foreach ([Area::fromDimensions(40, 10), Area::fromDimensions(20, 6)] as $small) {
+// 覆盖到退化尺寸：Grid 分出 0 宽/0 高 cell 会抛 OutOfBoundsException，
+// 故布局层有「过小视口直接不画」的守卫；这里把它钉住，防止重构时守卫被丢。
+// 40x10 / 20x6 是历史用例，其余为本次补的退化边界（1x1 也必须不崩）。
+echo "== 极小视口（含退化尺寸 1x1）==\n";
+foreach ([
+    Area::fromDimensions(40, 10),
+    Area::fromDimensions(20, 6),
+    Area::fromDimensions(10, 4),
+    Area::fromDimensions(8, 3),
+    Area::fromDimensions(5, 3),
+    Area::fromDimensions(2, 2),
+    Area::fromDimensions(1, 1),
+] as $small) {
     $app->buffer = $b;
     $app->focusIndex = array_search('editor', App::PANELS);
     $threw = false;

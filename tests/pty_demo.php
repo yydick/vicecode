@@ -33,3 +33,6 @@ while (microtime(true) - $start < 4) {
 if (proc_get_status($proc)['running']) { fwrite($pipes[0], "\x1b"); usleep(200000); }
 $code = proc_close($proc);
 echo ($code === 0) ? "[OK] TUI_DEMO 重绘路径干净退出 (exit=0)\n" : "[FAIL] exit=$code\n";
+// 必须显式带出退出码：早期版本只 echo 不 exit，[FAIL] 场景下进程仍返回 0，
+// 任何按退出码判定的跑批都会把它当成通过（永远绿）。
+exit($code === 0 ? 0 : 1);

@@ -645,7 +645,10 @@ final class SidebarPanel
         $innerW = max(0, $sidebar->width - 2);
         $plugins = $this->shell->plugins;
         if ($plugins === []) {
-            $lines[] = Line::fromSpans(Span::styled('(无插件)', $this->shell->theme->style('dim')));
+            $lines[] = Line::fromSpans(Span::styled(
+                $this->shell->t('plugins.no_plugins'),
+                $this->shell->theme->style('dim')
+            ));
             return;
         }
         $this->pluginSel = max(0, min($this->pluginSel, count($plugins) - 1));
