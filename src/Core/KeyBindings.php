@@ -55,6 +55,7 @@ final class KeyBindings
                 ['Ctrl+S', 'help.e_save'],
                 ['Ctrl+W', 'help.e_close'],
                 ['Ctrl+Tab', 'help.e_switch'],
+                ['Ctrl+V', 'help.e_paste'],
                 ['keys.printable', 'help.e_type'],
             ]),
             self::group('help.group_terminal', [
@@ -66,6 +67,8 @@ final class KeyBindings
                 ['PageUp / PageDown', 'help.t_page'],
                 ['Ctrl+L', 'help.t_clear'],
                 ['Ctrl+C', 'help.t_cancel'],
+                ['Ctrl+V', 'help.e_paste'],
+                ['Shift+Ins', 'help.e_paste'],
                 ['F2', 'help.t_interactive'],
             ]),
             self::group('help.group_explorer', [
@@ -97,6 +100,7 @@ final class KeyBindings
                 ['Ctrl+P', 'help.a_provider'],
                 ['Ctrl+N', 'help.a_model'],
                 ['Ctrl+L', 'help.a_clear'],
+                ['Ctrl+V', 'help.e_paste'],
                 ['↑ / ↓', 'help.a_history'],
                 ['PageUp / PageDown', 'help.a_page'],
                 ['Esc', 'help.a_stop'],

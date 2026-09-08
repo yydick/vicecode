@@ -53,6 +53,68 @@ $readPty = static function ($stream, int $len) {
     }
 };
 
+/**
+ * ANSI 屏幕重建：按光标/擦除序列重建最终可见帧（与 tests/pty_r5.php 同款）。
+ * 差分渲染只发增量、且单元格写序不保证左→右，直接对增量流做子串断言会把别处
+ * 单元格（如 GIT 状态计数数字）穿插进提交框文本，得到「h9ellomsg」这类假阴性。
+ * 重建后每个字符落到其真实 (row,col)，「hellomsg」在同一行内连续，断言稳定。
+ */
+function rebuildScreen(string $raw, int $w, int $h): string
+{
+    $grid = array_fill(0, $h, array_fill(0, $w, ' '));
+    $r = 0; $c = 0;
+    $len = strlen($raw);
+    $i = 0;
+    while ($i < $len) {
+        $ch = $raw[$i];
+        if ($ch === "\x1b") {
+            if (isset($raw[$i + 1]) && $raw[$i + 1] === '[') {
+                $j = $i + 2;
+                $params = '';
+                while ($j < $len && $raw[$j] !== '' && !ctype_alpha($raw[$j]) && $raw[$j] !== '~') {
+                    $params .= $raw[$j]; $j++;
+                }
+                $cmd = ($j < $len) ? $raw[$j] : '';
+                $j++;
+                $nums = array_map('intval', explode(';', $params === '' ? '1' : $params));
+                switch ($cmd) {
+                    case 'H': case 'f':
+                        $r = max(0, ($nums[0] ?? 1) - 1); $c = max(0, ($nums[1] ?? 1) - 1); break;
+                    case 'A': $r = max(0, $r - ($nums[0] ?? 1)); break;
+                    case 'B': $r = min($h - 1, $r + ($nums[0] ?? 1)); break;
+                    case 'C': $c = min($w - 1, $c + ($nums[0] ?? 1)); break;
+                    case 'D': $c = max(0, $c - ($nums[0] ?? 1)); break;
+                    case 'J':
+                        if (($nums[0] ?? 0) === 2 || ($nums[0] ?? 0) === 3) { $grid = array_fill(0, $h, array_fill(0, $w, ' ')); }
+                        break;
+                    case 'K':
+                        if (($nums[0] ?? 0) === 0) { for ($k = $c; $k < $w; $k++) { $grid[$r][$k] = ' '; } }
+                        elseif (($nums[0] ?? 0) === 1) { for ($k = 0; $k <= $c; $k++) { $grid[$r][$k] = ' '; } }
+                        elseif (($nums[0] ?? 0) === 2) { for ($k = 0; $k < $w; $k++) { $grid[$r][$k] = ' '; } }
+                        break;
+                }
+                $i = $j; continue;
+            }
+            $i++;
+            while ($i < $len && !ctype_alpha($raw[$i]) && $raw[$i] !== "\x1b") { $i++; }
+            if ($i < $len) { $i++; }
+            continue;
+        }
+        if ($ch === "\r") { $c = 0; $i++; continue; }
+        if ($ch === "\n") { $r = min($h - 1, $r + 1); $c = 0; $i++; continue; }
+        if ($ch === "\x00" || $ch === "\x08") { $i++; continue; }
+        if ($r >= 0 && $r < $h && $c >= 0 && $c < $w) { $grid[$r][$c] = $ch; }
+        $c++;
+        if ($c >= $w) { $c = 0; $r = min($h - 1, $r + 1); }
+        $i++;
+    }
+    $lines = [];
+    foreach ($grid as $row) { $lines[] = rtrim(implode('', $row)); }
+    $t = implode("\n", $lines);
+    $res = preg_replace('/[^a-zA-Z0-9\x{4e00}-\x{9fff}]/u', '', $t);
+    return $res === null ? strtolower((string) preg_replace('/[^a-zA-Z0-9]/', '', $t)) : $res;
+}
+
 $failed = false;
 function check(bool $cond, string $msg): void
 {
@@ -110,7 +172,12 @@ fwrite($pipes[0], "\x1b[<0;{$tc};{$tr}m");
 usleep(900000);
 
 $out = normalize($readPty($pipes[1], 8192));
-check(str_contains($out, 'master'), '屏幕含当前分支 master');
+// 分支名随仓库实际状态变化（如 develop），断言须基于真实分支而非硬编码 master
+$branch = trim((string) @shell_exec('git rev-parse --abbrev-ref HEAD 2>/dev/null'));
+if ($branch === '') {
+    $branch = 'develop';
+}
+check(str_contains($out, $branch), "屏幕含当前分支 {$branch}");
 check(str_contains($out, '变更') || str_contains($out, '状态'), 'GIT tab 显示变更/状态');
 check(str_contains($out, 'commit'), 'GIT tab 渲染 Commit 按钮');
 check(str_contains($out, '提交信息'), 'GIT tab 渲染提交信息输入框（占位）');
@@ -118,8 +185,14 @@ check(str_contains($out, '提交信息'), 'GIT tab 渲染提交信息输入框�
 // 键入提交信息（focus=sidebar GIT tab 时键入进 commitMsg）
 fwrite($pipes[0], 'hellomsg');
 usleep(400000);
-$outTyped = normalize($readPty($pipes[1], 16384));
-check(str_contains($outTyped, 'hellomsg'), '键入进提交信息输入框（捕获 hellomsg）');
+$rawTyped = '';
+for ($i = 0; $i < 5; $i++) {
+    $rawTyped .= $readPty($pipes[1], 16384);
+    usleep(150000);
+}
+// 见 rebuildScreen 注释：差分写序会把 GIT 状态计数数字穿插进提交框文本，必须重建帧再断言。
+$screenTyped = rebuildScreen($rawTyped, 120, 40);
+check(str_contains($screenTyped, 'hellomsg'), '键入进提交信息输入框（捕获 hellomsg）');
 // 清空消息，避免后续提交真的建提交
 for ($i = 0; $i < 10; $i++) {
     fwrite($pipes[0], "\x1b\x7f"); // Backspace（ESC + DEL 序列）

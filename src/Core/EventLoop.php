@@ -33,7 +33,7 @@ final class EventLoop
 
     public static function run(): void
     {
-        \Swoole\Coroutine\run(function () {
+        \Swoole\Coroutine\run(function (): void {
             (new self())->start();
         });
     }
@@ -60,19 +60,27 @@ final class EventLoop
         $this->terminal->flush();
 
         $backend = PhpTermBackend::new($this->terminal);
-        $this->display = DisplayBuilder::default($backend)->fullscreen()->build();
+        // 同 bin/vicecode.php：注册菜单下拉透明覆盖层渲染器（DropdownOverlay 只画面板子区域、不清屏）
+        $this->display = DisplayBuilder::default($backend)
+            ->fullscreen()
+            ->addWidgetRenderer(\App\Widget\DropdownOverlay::renderer())
+            ->build();
         $this->app = new App();
         $this->input = new InputParser();
+        // OSC 52 剪贴板读取：终端把系统剪贴板内容经 stdin 回传，InputParser 旁路捕获后回调 App
+        $this->input->setClipboardHandler(function (string $text): void {
+            $this->app->onClipboardRead($text);
+        });
 
         // 关闭 STDOUT 缓冲并清一次屏，避免启动瞬间的残留/错位
         stream_set_write_buffer(STDOUT, 0);
         $this->display->clear();
 
         // 任何退出路径都恢复终端：正常 quit、信号、以及进程 shutdown（崩溃兜底）
-        register_shutdown_function(function () {
+        register_shutdown_function(function (): void {
             $this->restore();
         });
-        \Swoole\Process::signal(SIGINT, function () {
+        \Swoole\Process::signal(SIGINT, function (): void {
             $this->quit();
         });
 
@@ -104,7 +112,7 @@ final class EventLoop
         });
 
         // 渲染循环：约 30fps；单帧异常时安全退出，避免卡在损坏的终端状态
-        $this->timer = \Swoole\Timer::tick(33, function () {
+        $this->timer = \Swoole\Timer::tick(33, function (): void {
             try {
                 $area = $this->display->viewportArea();
                 if ($area->width < 2 || $area->height < 2) {

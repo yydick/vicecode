@@ -1,0 +1,7 @@
+{
+    "id": "clock",
+    "name": "Clock",
+    "entry": "ClockPlugin.php",
+    "class": "ClockPlugin",
+    "description": "在状态栏显示当前时间（每秒刷新）"
+}

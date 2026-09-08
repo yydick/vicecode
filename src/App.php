@@ -9,6 +9,7 @@ use App\Core\KeyInput;
 use App\Core\Lifecycle;
 use App\Core\LayoutFactory;
 use App\Core\LayoutConfig;
+use App\Core\Clipboard;
 use App\Core\ConfigStore;
 use App\Core\Theme;
 use App\Editor\Buffer;
@@ -19,9 +20,12 @@ use App\Panel\AiPanel;
 use App\Panel\EditorPanel;
 use App\Panel\HelpPanel;
 use App\Panel\MenuBarPanel;
+use App\Panel\PluginsPanel;
 use App\Panel\SidebarPanel;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
+use App\Plugin\PluginInterface;
+use App\Plugin\PluginLoader;
 use App\Search\SearchModel;
 use App\Terminal\KeyToPty;
 use App\Text\DisplayWidth;
@@ -39,6 +43,7 @@ use PhpTui\Tui\Position\Position;
 use PhpTui\Tui\Extension\Core\Widget\BlockWidget;
 use PhpTui\Tui\Extension\Core\Widget\CompositeWidget;
 use PhpTui\Tui\Extension\Core\Widget\GridWidget;
+use PhpTui\Tui\Widget\HorizontalAlignment;
 use PhpTui\Tui\Extension\Core\Widget\ParagraphWidget;
 use PhpTui\Tui\Widget\Borders;
 use PhpTui\Tui\Widget\Direction;
@@ -89,8 +94,14 @@ class App
      */
     private const DOUBLE_CLICK_MS = 400;
 
-    /** 分隔条命中容差（列/行）：鼠标落在边界 ±1 内即算抓住分隔条，太窄不好点 */
-    private const DRAG_TOL = 1;
+    /**
+     * 分隔条命中容差（列/行）。
+     * 0 = 仅精确命中分隔条所在的那一列/行才进入拖拽；面板内部（距边界 1 格内的
+     * 末行/末列，常是光标或文本所在处）的点击交给 handleClick 做聚焦/按钮，
+     * 不再被拖拽窗口吞掉。早期取 1（±1 容差）是为了"分隔条太窄不好点"，
+     * 但代价是面板边缘内的点击会被误判为拖拽——收敛到 0 优先保证边缘内部点击可用。
+     */
+    private const DRAG_TOL = 0;
 
     /** @var array<string,Buffer> */
     private array $buffers = [];
@@ -132,11 +143,31 @@ class App
      */
     private ?array $drag = null;
 
+    /**
+     * 文本选择（鼠标拖拽）进行中的状态：null=无选择。
+     * 结构：['panel'=>'editor'|'terminal','aRow','aCol','bRow','bCol']，坐标均为视口绝对行列。
+     * a=锚点（Down 时记），b=头点（Drag 时更新）。Up 时若 a≠b 则按矩形取字写入剪贴板，
+     * 并保留高亮直到下次 Down 清掉。与 $drag（分隔条拖拽）互斥：tryStartDrag 先 return。
+     */
+    private ?array $select = null;
+
+    /** 剪贴板写入服务（复制：OSC 52 或降级内存） */
+    private Clipboard $clip;
+
+    /** 粘贴目标面板（tty 异步读取时暂存，响应回来即插入该面板）；null=无进行中的粘贴 */
+    private ?string $pasteTarget = null;
+
     /** 帮助页覆盖层（M6 R2）：全屏居中，打开期间独占键盘 */
     public HelpPanel $help;
 
     /** 顶部菜单栏（Backlog 接入）：F10 或点击激活，不进入焦点循环 */
     public MenuBarPanel $menuBar;
+
+    /** 插件管理浮层（V1.1 入口）：菜单「插件 → 已安装插件」唤出，列出插件与配置文件路径 */
+    public PluginsPanel $pluginsPanel;
+
+    /** 用户 ~/.vicerc 的 plugins.<id> 段原始覆盖（供 PluginsPanel 展示有效配置） */
+    public array $userPluginConfig = [];
 
     /**
      * AI 对话状态（M5）：消息历史 / 流式生成 / Provider 选择。
@@ -146,6 +177,14 @@ class App
 
     /** 底部状态栏 */
     public StatusBarPanel $statusBar;
+
+    /**
+     * 已加载的插件（V1：运行时动态加载，目录扫描 plugins 下各子目录的 plugin.json + 运行时 require）。
+     * 由 PluginLoader 在构造末尾填充；插件文件不在 composer autoload 内，
+     * 产品版由内嵌 Zend 运行时解释（见 project_plugin.md）。
+     * @var list<\App\Plugin\PluginInterface>
+     */
+    public array $plugins = [];
 
     /** 退出与未保存确认状态机（R8） */
     public Lifecycle $lifecycle;
@@ -181,16 +220,118 @@ class App
         $this->chat = new ChatModel($this);
         $this->help = new HelpPanel($this);
         $this->menuBar = new MenuBarPanel($this);
-        // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
-        $this->lifecycle = new Lifecycle($this, function () {
+        $this->pluginsPanel = new PluginsPanel($this);
+        $this->clip = new Clipboard();        // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
+        $this->lifecycle = new Lifecycle($this, function (): void {
             $this->chat->shutdown();
             $this->search->shutdown();
             $this->terminal->shutdown();
         });
+        // 退出时若开启持久化，shutdown 闭包会经 terminal->saveSession() 存盘；
+        // 这里在构造末尾尝试恢复上次的 pty 会话（开启且存在快照时）。
+        $this->terminal->maybeRestore();
         $roots = $this->sidebar->tree()->roots;
         if (!empty($roots)) {
             $this->selectedPath = $roots[0]->path;
         }
+        // V1 插件：运行时动态加载（目录扫描 + 运行时 require，避开 composer autoload 的
+        // Closure::bind 以兼容 AOT 产品版）。单个插件失败已在 Loader 内跳过，不影响启动。
+        $this->plugins = PluginLoader::load(__DIR__ . '/..');
+        // 插件配置注入：VSCode 式「插件声明默认（configDefaults）+ 用户 ~/.vicerc 覆盖」。
+        // 可选能力——插件若实现 configure()/configDefaults() 则注入合并后的配置，否则跳过
+        // （不影响未实现它们的插件）。配置段来自 $cfg['plugins']（即 ~/.vicerc）。
+        $userPlugins = ConfigStore::loadPlugins();
+        $this->userPluginConfig = $userPlugins;
+        foreach ($this->plugins as $plugin) {
+            $defaults = method_exists($plugin, 'configDefaults')
+                ? $plugin->configDefaults()
+                : [];
+            $user = $userPlugins[$plugin->id()] ?? [];
+            if (is_array($user) && method_exists($plugin, 'configure')) {
+                $plugin->configure(array_merge($defaults, $user));
+            }
+        }
+    }
+
+    /**
+     * 计算单个插件的「有效配置」= 默认(configDefaults) ∩ 用户 ~/.vicerc 覆盖。
+     * 与构造期注入用的是同一套合并逻辑，供 PluginsPanel / SidebarPanel 展示当前生效值。
+     * @return array<string,mixed>
+     */
+    public function pluginEffectiveConfig(\App\Plugin\PluginInterface $p): array
+    {
+        $defaults = method_exists($p, 'configDefaults') ? $p->configDefaults() : [];
+        $user = $this->userPluginConfig[$p->id()] ?? [];
+        return is_array($user) ? array_merge($defaults, $user) : $defaults;
+    }
+
+    /**
+     * 在 ViceCode 自己的编辑器里打开**插件专用配置文件**（~/.vicecode.plugins.json，
+     * 与 ~/.vicerc 分离）供编辑（VSCode「打开设置(JSON)」同款，而非甩给外部编辑器）。
+     * 文件不存在时，先落一份含当前生效插件配置的专用文件，避免打开空文件把配置冲掉。
+     */
+    public function openPluginConfig(): void
+    {
+        $path = ConfigStore::pluginsPath();
+        if (!is_file($path)) {
+            $data = [];
+            foreach ($this->plugins as $p) {
+                $cfg = $this->pluginEffectiveConfig($p);
+                if ($cfg !== []) {
+                    $data[$p->id()] = $cfg;
+                }
+            }
+            ConfigStore::savePlugins($data);
+        }
+        $this->editor->openFile($path);
+    }
+
+    /**
+     * 重新加载插件配置（VSCode「重载窗口」的平替，但无需退出进程）。
+     * 重读专用插件配置文件（与 ~/.vicerc 分离），按「默认 ∩ 用户覆盖」重新注入每个插件。
+     */
+    public function reloadPluginConfig(): void
+    {
+        $userPlugins = ConfigStore::loadPlugins();
+        $this->userPluginConfig = $userPlugins;
+        foreach ($this->plugins as $plugin) {
+            $defaults = method_exists($plugin, 'configDefaults') ? $plugin->configDefaults() : [];
+            $user = $userPlugins[$plugin->id()] ?? [];
+            if (is_array($user) && method_exists($plugin, 'configure')) {
+                $plugin->configure(array_merge($defaults, $user));
+            }
+        }
+    }
+
+    /**
+     * 聚合所有插件本帧的状态栏段，统一交给 StatusBarPanel 与系统段一起裁剪/摆放。
+     * @return array<int,array{k:string,p:int,o:int,t:string}>
+     */
+    public function pluginSegments(): array
+    {
+        $out = [];
+        foreach ($this->plugins as $plugin) {
+            foreach ($plugin->statusSegments($this) as $seg) {
+                $out[] = ['k' => $seg->key, 'p' => $seg->priority, 'o' => $seg->order, 't' => $seg->text];
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * 聚合插件要求的最小周期重绘间隔（秒），null=无需周期重绘。
+     * 主循环据此在 idle 时按最小间隔触发重绘，使时钟等插件持续更新。
+     */
+    public function minTickInterval(): ?int
+    {
+        $min = null;
+        foreach ($this->plugins as $plugin) {
+            $tick = $plugin->tickInterval();
+            if ($tick !== null && $tick > 0) {
+                $min = $min === null ? $tick : min($min, $tick);
+            }
+        }
+        return $min;
     }
 
     /** 取图标；未配置返回空串（调用方据此回退到纯文字标签） */
@@ -312,6 +453,9 @@ class App
         if ($this->help->isAboutOpen()) {
             $overlays[] = $this->help->aboutWidget($vp->width, $vp->height);
         }
+        if ($this->pluginsPanel->isOpen()) {
+            $overlays[] = $this->pluginsPanel->widget($vp->width, $vp->height);
+        }
         if ($overlays === []) {
             return $base;
         }
@@ -324,6 +468,19 @@ class App
     public function build(array $a): Widget
     {
         $focus = $this->focusPanel();
+
+        // 渲染前把文本选择矩形注入编辑/终端面板（content() 内部做反显高亮）。
+        // 归一化矩形 [r0,c0,r1,c1]；无选择时传 null 清掉上一帧高亮。
+        if ($this->select !== null && $this->select['panel'] === 'editor') {
+            $this->editor->setSelection($this->normalizeRect($this->select));
+        } else {
+            $this->editor->setSelection(null);
+        }
+        if ($this->select !== null && $this->select['panel'] === 'terminal') {
+            $this->terminal->setSelection($this->normalizeRect($this->select));
+        } else {
+            $this->terminal->setSelection(null);
+        }
 
         // ── Sidebar ──
         $sidebarInner = $this->sidebar->content($a['sidebar'], $focus === 'sidebar');
@@ -395,11 +552,19 @@ class App
             ));
 
         // ── AI Input ──
+        // 输入框内部 = 框高 - 上下边框(2)，恒为输入内容（默认 3 行）。
+        // 工具栏（发送/换行/清空）用图标放在顶边框右对齐，不占用输入行。
         $aiInput = BlockWidget::default()
             ->borders(Borders::ALL)
             ->borderStyle($this->borderStyle($focus === 'ai_input'))
-            ->titles(Title::fromString(' ' . $this->i18n->t('panel.ai_input') . ' ' . $this->i18n->t('ai.input_hint') . ' '))
-            ->widget($this->ai->inputContent());
+            ->titles(
+                Title::fromString(' ' . $this->i18n->t('panel.ai_input') . ' '),
+                Title::fromString($this->ai->toolbarTitleString())->horizontalAlignment(HorizontalAlignment::Right),
+            )
+            ->widget($this->ai->inputContent(
+                max(0, ($a['ai_input']->width ?? 0) - 2),
+                max(0, ($a['ai_input']->height ?? 0) - 2),
+            ));
 
         $ai = GridWidget::default()
             ->direction(Direction::Vertical)
@@ -522,6 +687,11 @@ class App
                 break;
             case 'file.save':
                 $this->editor->save();
+                // 保存的若是插件专用配置文件，则重新注入插件配置（在 ViceCode 内改完即生效，无需重启）
+                if ($this->buffer !== null && $this->buffer->path === ConfigStore::pluginsPath()) {
+                    $this->reloadPluginConfig();
+                    $this->setMessage($this->t('plugins.reloaded'));
+                }
                 break;
             case 'file.close':
                 if ($this->buffer !== null) {
@@ -561,10 +731,13 @@ class App
             case 'help.about':
                 $this->help->openAbout();
                 break;
+            case 'plugins.open':
+                $this->pluginsPanel->open();
+                break;
         }
     }
 
-    public function handle($event, Area $vp): void
+    public function handle(\PhpTui\Term\Event $event, Area $vp): void
     {
         // 未保存确认进行中：拦截所有输入，只响应 y/n/Esc（及 Ctrl+Q 视为确认）
         if ($this->confirm !== null) {
@@ -612,6 +785,27 @@ class App
                 return;
             }
             return; // 其余字符键一律吞掉
+        }
+
+        // 插件管理浮层打开期间**独占键盘**（与帮助页同机制）：Esc/q 关闭，上下/翻页滚动，
+        // 不往下层面板分发，否则在浮层里按 q 会顺带把应用退了。
+        if ($this->pluginsPanel->isOpen()) {
+            $viewH = $this->pluginsPanel->viewHeightFor($vp->width, $vp->height);
+            if ($event instanceof MouseEvent) {
+                if ($event->kind === MouseEventKind::ScrollUp) {
+                    $this->pluginsPanel->scrollBy(-3);
+                } elseif ($event->kind === MouseEventKind::ScrollDown) {
+                    $this->pluginsPanel->scrollBy(3);
+                }
+                return;
+            }
+            if ($event instanceof CharKeyEvent && $this->pluginsPanel->onChar($event)) {
+                return;
+            }
+            if ($event instanceof CodedKeyEvent && $this->pluginsPanel->onKey($event, $viewH)) {
+                return;
+            }
+            return; // 其余键一律吞掉：浮层是模态的
         }
 
         // 帮助页/关于页打开期间**独占键盘**：不往下层面板分发，否则在帮助页里按 q
@@ -704,6 +898,12 @@ class App
                 $this->cycleTheme();
                 return;
             }
+            // Ctrl+V 粘贴（读剪贴板）：编辑区/终端/AI 输入框按当前焦点插入。
+            // 必须在面板拿到字符之前处理，否则会把字符打进文档。
+            if (($event->modifiers & KeyModifiers::CONTROL) && strtolower($event->char) === 'v') {
+                $this->requestPaste();
+                return;
+            }
             // AI 输入/消息流：键入进输入框；Ctrl+P 切 Provider、Ctrl+N 切模型、
             // Ctrl+L 清空 —— 消息流聚焦时也要能用（不要求在输入框才能切）。
             $f = $this->focusPanel();
@@ -786,10 +986,15 @@ class App
         if ($e->kind === MouseEventKind::Drag) {
             if ($this->drag !== null) {
                 $this->updateDrag($e, $a, $vp);
+            } elseif ($this->select !== null) {
+                $this->updateSelect($e, $a);
             }
             return;
         }
         if ($e->kind === MouseEventKind::Up) {
+            if ($this->select !== null) {
+                $this->finishSelect($a);
+            }
             $this->drag = null;
             return;
         }
@@ -826,6 +1031,8 @@ class App
             return;
         }
         if ($e->kind === MouseEventKind::Down) {
+            // 任何新点击先清掉上一次文本选择高亮（选区在 Up 后保留显示，直到下次点击）。
+            $this->select = null;
             // 菜单栏点击：菜单打开时点下拉条目/空白关闭；关闭时点菜单标签激活。
             // 菜单栏在第 0 行，与 PANELS 各面板不重叠（split 已把它切到独立区域）。
             if ($this->menuBar->isOpen()) {
@@ -841,6 +1048,14 @@ class App
             if ($this->tryStartDrag($e, $a)) {
                 return;
             }
+            // 文本选择锚点：在编辑器内容区 / 终端区内按下左键即记锚点；随后若发生 Drag
+            // 则拉出选区，Up 时复制。纯点击（无 Drag）在 finishSelect 里清掉，不影响聚焦。
+            $pos = new Position($e->column, $e->row);
+            if (isset($a['editor']) && $this->editor->isSelectableAt($pos, $a['editor'])) {
+                $this->select = ['panel' => 'editor', 'aRow' => $e->row, 'aCol' => $e->column, 'bRow' => $e->row, 'bCol' => $e->column];
+            } elseif (isset($a['terminal']) && $a['terminal']->containsPosition($pos)) {
+                $this->select = ['panel' => 'terminal', 'aRow' => $e->row, 'aCol' => $e->column, 'bRow' => $e->row, 'bCol' => $e->column];
+            }
             $this->handleClick($e, $a);
         }
     }
@@ -848,12 +1063,15 @@ class App
     /**
      * 判定鼠标按下是否命中某条分隔条。命中则记下拖拽目标并返回 true（调用方据此不再走点击逻辑）。
      * 四条可拖边界：侧栏右、AI 左（竖直）；编辑器下、AI 输入框上（水平）。
-     * 命中窗口取边界 ±DRAG_TOL，且限制在对应面板的范围内，避免误抓相邻面板内部。
+     * 命中窗口取边界 ±DRAG_TOL（当前为 0 = 精确命中分隔条所在行列），且限制在对应面板范围内，避免误抓相邻面板内部。
      * @param array<string,Area> $a
      */
     private function tryStartDrag(MouseEvent $e, array $a): bool
     {
         $tol = self::DRAG_TOL;
+        // 面板在拖拽轴上的最小可点击尺寸：小于它的面板，其拖拽容差带会吞掉整个内部，
+        // 导致"点中间反而拖不动、无法聚焦"。此时把点击交给焦点逻辑；从相邻的大面板一侧仍可拖动调整。
+        $min = 2 * $tol + 1;
         $mainTop = $a['sidebar']->position->y;
         $mainBottom = $a['status']->position->y; // 状态栏起始 = 主区底部
 
@@ -861,16 +1079,22 @@ class App
         $sidebarEdge = $a['sidebar']->position->x + $a['sidebar']->width;
         if (abs($e->column - $sidebarEdge) <= $tol
             && $e->row >= $mainTop && $e->row < $mainBottom) {
-            $this->drag = ['which' => 'sidebar', 'horizontal' => false];
-            return true;
+            $key = $e->column <= $sidebarEdge ? 'sidebar' : 'editor';
+            if ($a[$key]->width > $min) {
+                $this->drag = ['which' => 'sidebar', 'horizontal' => false];
+                return true;
+            }
         }
 
         // 竖分隔条②：AI 列左边界（x = ai_stream.x）
         $aiEdge = $a['ai_stream']->position->x;
         if (abs($e->column - $aiEdge) <= $tol
             && $e->row >= $mainTop && $e->row < $mainBottom) {
-            $this->drag = ['which' => 'ai', 'horizontal' => false];
-            return true;
+            $key = $e->column < $aiEdge ? 'editor' : 'ai_stream';
+            if ($a[$key]->width > $min) {
+                $this->drag = ['which' => 'ai', 'horizontal' => false];
+                return true;
+            }
         }
 
         // 横分隔条①：编辑器下边界（y = editor.y + editor.height），且仅在中间列水平范围内
@@ -879,8 +1103,11 @@ class App
         $editorEdge = $a['editor']->position->y + $a['editor']->height;
         if (abs($e->row - $editorEdge) <= $tol
             && $e->column >= $centerX && $e->column < $centerX + $centerW) {
-            $this->drag = ['which' => 'center', 'horizontal' => true];
-            return true;
+            $key = $e->row < $editorEdge ? 'editor' : 'terminal';
+            if ($a[$key]->height > $min) {
+                $this->drag = ['which' => 'center', 'horizontal' => true];
+                return true;
+            }
         }
 
         // 横分隔条②：AI 消息流下边界（y = ai_stream.y + ai_stream.height），且在 AI 列水平范围内
@@ -889,8 +1116,16 @@ class App
         $aiEdgeY = $a['ai_stream']->position->y + $a['ai_stream']->height;
         if (abs($e->row - $aiEdgeY) <= $tol
             && $e->column >= $aiX && $e->column < $aiX + $aiW) {
-            $this->drag = ['which' => 'ai_input', 'horizontal' => true];
-            return true;
+            // 工具栏图标画在 ai_input 顶边框（== aiEdgeY），点图标区应触发按钮而非拖拽，
+            // 否则 tryStartDrag 会抢先返回 true，handleClick 永远收不到 → 按钮无反应。
+            if ($this->ai->isToolbarBorderHit($e->column, $e->row, $a['ai_input'])) {
+                return false;
+            }
+            $key = $e->row < $aiEdgeY ? 'ai_stream' : 'ai_input';
+            if ($a[$key]->height > $min) {
+                $this->drag = ['which' => 'ai_input', 'horizontal' => true];
+                return true;
+            }
         }
 
         return false;
@@ -941,6 +1176,126 @@ class App
         return $this->drag !== null;
     }
 
+    // ── 文本选择（鼠标拖拽 + 写入剪贴板）─────────────────
+
+    /** 拖拽中：把头点夹到所属面板内，避免选区越出面板边界 */
+    private function updateSelect(MouseEvent $e, array $a): void
+    {
+        $panel = $this->select['panel'];
+        $area = $a[$panel];
+        $this->select['bRow'] = max($area->position->y, min($e->row, $area->position->y + $area->height - 1));
+        $this->select['bCol'] = max($area->position->x, min($e->column, $area->position->x + $area->width - 1));
+    }
+
+    /** 松手：a≠b 则取矩形文字写入剪贴板并状态栏提示；a==b 视为纯点击，清掉选区 */
+    private function finishSelect(array $a): void
+    {
+        $s = $this->select;
+        if ($s['aRow'] === $s['bRow'] && $s['aCol'] === $s['bCol']) {
+            $this->select = null;
+            return;
+        }
+        [$r0, $c0, $r1, $c1] = $this->normalizeRect($s);
+        $panel = $s['panel'];
+        if ($panel === 'editor') {
+            $text = $this->editor->getTextRect($a['editor'], $r0, $c0, $r1, $c1);
+        } else {
+            $text = $this->terminal->getTextRect($a['terminal'], $r0, $c0, $r1, $c1);
+        }
+        $this->clip->copy($text);
+        $n = mb_strlen($text);
+        $this->message = $this->t('status.copied', ['n' => (string) $n]);
+        // 保留 $this->select（归一化矩形）以便持续高亮，下次 Down 清掉。
+    }
+
+    /** 把 [aRow,aCol,bRow,bCol] 归一化成 [r0,c0,r1,c1]（小行/列在前） */
+    private function normalizeRect(array $s): array
+    {
+        return [
+            min($s['aRow'], $s['bRow']),
+            min($s['aCol'], $s['bCol']),
+            max($s['aRow'], $s['bRow']),
+            max($s['aCol'], $s['bCol']),
+        ];
+    }
+
+    /** 取内存剪贴板内容（非 tty 降级路径；主要给单测断言用） */
+    public function clipboardPeek(): string
+    {
+        return $this->clip->peek();
+    }
+
+    /** 写入系统剪贴板（复制）：tty 走 OSC 52，非 tty 降级内存。供各面板调用。 */
+    public function clipboardCopy(string $text): void
+    {
+        $this->clip->copy($text);
+    }
+
+    /**
+     * 请求粘贴（读剪贴板）：按当前焦点定插入目标，再读剪贴板内容插入。
+     * - editor  → 编辑器缓冲区光标处
+     * - terminal → runner 输入行光标处 / pty 捕获态转发给 shell；pty 非捕获态忽略
+     * - ai_input / ai_stream → AI 输入框
+     * - 其余（sidebar 等）→ 无目标，忽略
+     * tty 环境走 OSC 52 异步读取（暂存 pasteTarget，响应回来再插入）；
+     * 非 tty 降级为粘贴内存剪贴板（即时插入）。
+     */
+    public function requestPaste(): void
+    {
+        $f = $this->focusPanel();
+        $target = match ($f) {
+            'editor' => 'editor',
+            'terminal' => ($this->terminal->mode === 'pty' && !$this->terminal->captured) ? null : 'terminal',
+            'ai_input', 'ai_stream' => 'ai_input',
+            default => null,
+        };
+        if ($target === null) {
+            return; // 当前焦点无粘贴目标，静默忽略
+        }
+
+        if (!stream_isatty(STDOUT)) {
+            // 非 tty：没有系统剪贴板，粘贴进程内内存剪贴板（copy 写入的）
+            $text = $this->clip->peek();
+            if ($text !== '') {
+                $this->applyPaste($target, $text);
+            }
+            return;
+        }
+
+        // tty：发 OSC 52 查询，响应异步经 stdin 回传 → onClipboardRead
+        $this->pasteTarget = $target;
+        $this->clip->requestRead();
+        $this->setMessage($this->t('status.paste_pending'));
+    }
+
+    /** OSC 52 剪贴板响应回调：把内容插入到请求时记录的面板。 */
+    public function onClipboardRead(string $text): void
+    {
+        if ($this->pasteTarget === null) {
+            return;
+        }
+        $target = $this->pasteTarget;
+        $this->pasteTarget = null;
+        $this->applyPaste($target, $text);
+    }
+
+    /** 把剪贴板文本插入到指定目标面板，并更新状态栏。 */
+    private function applyPaste(string $target, string $text): void
+    {
+        switch ($target) {
+            case 'editor':
+                $this->buffer?->insertText($text);
+                break;
+            case 'terminal':
+                $this->terminal->pasteText($text);
+                break;
+            case 'ai_input':
+                $this->ai->insertText($text);
+                break;
+        }
+        $this->setMessage($this->t('status.pasted', ['n' => (string) mb_strlen($text)]));
+    }
+
     /** 拖拽时状态栏显示的布局摘要（如「侧栏30 AI45 编辑60% 输入3」），走 i18n */
     public function layoutSummary(): string
     {
@@ -967,7 +1322,13 @@ class App
     public function saveConfig(): bool
     {
         try {
-            return ConfigStore::save([
+            // 合并已有配置（而非整体覆盖）：保留用户手改的其它键（如 persistSession），
+            // 否则每次干净退出都会把 .vicerc 重写掉、丢掉用户设置。
+            $existing = ConfigStore::load();
+            if (!is_array($existing)) {
+                $existing = [];
+            }
+            $data = array_merge($existing, [
                 'layout' => [
                     'sidebarWidth' => $this->layout->sidebarWidth,
                     'aiWidth' => $this->layout->aiWidth,
@@ -977,6 +1338,7 @@ class App
                 'theme' => $this->theme->id,
                 'locale' => $this->i18n->locale(),
             ]);
+            return ConfigStore::save($data);
         } catch (\Throwable $e) {
             return false;
         }
@@ -984,6 +1346,12 @@ class App
 
     private function handleCoded(CodedKeyEvent $e, array $a): void
     {
+        // Shift+Ins（及 Ins）粘贴：与 Ctrl+V 同源，按当前焦点插入剪贴板内容。
+        if ($e->code === KeyCode::Insert) {
+            $this->requestPaste();
+            return;
+        }
+
         // 键盘横向滚动（Shift+←/→）：与鼠标 ScrollLeft/ScrollRight 同源，按焦点分发到 onScrollH(±4)。
         // 必须在各面板 onKey 之前拦截——编辑器的 ←/→ 已被光标移动占用，Shift+方向键单独用作横滚；
         // 菜单打开时由上方菜单独占分支吞掉，不会落到这里。
@@ -1061,6 +1429,23 @@ class App
                 if ($key === 'editor') {
                     // 点 tab 栏切 buffer / 按坐标定位光标，都由编辑器面板处理（它会自己聚焦）
                     $this->editor->onClick($pos, $a);
+                    return;
+                }
+                if ($key === 'ai_input') {
+                    // 点顶边框（图标工具栏）命中按钮；否则聚焦输入
+                    $topRow = $a['ai_input']->position->y;
+                    if ($row === $topRow
+                        && $this->ai->onToolbarBorderClick($col, $a['ai_input'])) {
+                        $this->focusIndex = array_search('ai_input', self::PANELS);
+                        return;
+                    }
+                    $this->focusIndex = array_search('ai_input', self::PANELS);
+                    return;
+                }
+                if ($key === 'ai_stream') {
+                    // 点击 AI 消息流：命中某条消息则整条复制到剪贴板（不拖拽选区），随后照常聚焦。
+                    $this->ai->copyMessageAtRow($row, $a['ai_stream']);
+                    $this->focusIndex = array_search('ai_stream', self::PANELS);
                     return;
                 }
                 $this->focusIndex = array_search($key, self::PANELS);

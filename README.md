@@ -135,9 +135,24 @@ Press **F2** to allocate a **real PTY** and launch an interactive shell (bash); 
 
 > Window size is synced to the shell via `stty` as the panel resizes; wide characters (CJK) are rendered at 2 columns.
 
+### Session persistence (opt-in)
+
+By default the interactive shell dies when you quit ViceCode (the PTY is an OS process, killed on exit). With session persistence enabled, ViceCode saves a snapshot of the terminal on exit — scrollback + the current main screen as **plain text** plus the startup working directory — and on the next launch automatically spawns a fresh shell and replays the snapshot, so the session appears to continue.
+
+- **Off by default** — opt in by adding `"persistSession": true` to your config (`~/.vicerc`, or the file pointed to by `VICECODE_CONFIG`).
+- The snapshot is written to `~/.vicecode_session` (next to the config, or `dirname(VICECODE_CONFIG)/.vicecode_session`) with `0600` permissions, and is consumed (deleted) after a successful restore so it is not replayed twice.
+- **Privacy**: scrollback may contain passwords / tokens typed at prompts. The file is `0600`, but consider it sensitive and only enable persistence on trusted machines.
+
+**Limitations (v1, by design):**
+
+- Only the **main screen** is persisted; full-screen programs (`vim` / `top` / `less` / `ssh`) run on the alternate screen and are intentionally excluded — their frozen UI would be garbage after restart.
+- **No colors** — plain text only.
+- Only the **startup** working directory is restored; a `cd` performed inside the shell is *not* restored.
+- The PTY process itself cannot be serialized; what is restored is a brand-new shell with the snapshot text injected above its fresh prompt.
+
 ## Configuration & Language
 
-- Config is persisted to `~/.vicerc` (JSON: layout / theme / language) and auto-saved on exit.
+- Config is persisted to `~/.vicerc` (JSON: layout / theme / language, and `persistSession` if you set it) and auto-saved on exit. On save, ViceCode **merges** with the existing file so hand-edited keys (like `persistSession`) are preserved.
 - Override the config path with the `VICECODE_CONFIG` env var (used for test isolation to avoid polluting the home directory).
 - UI language is switched via `APP_LOCALE`, default `zh_CN`, `en` also available; missing keys fall back to English.
 
@@ -146,6 +161,30 @@ APP_LOCALE=en php bin/vicecode.php
 VICECODE_CONFIG=/tmp/my_vicecode.json php bin/vicecode.php
 ```
 
+## Plugins (V1)
+
+Plugins are loaded **at runtime**: on startup the app scans `plugins/<id>/plugin.json`, reads the entry file and loads/instantiates the plugin class via `require` (not through composer autoload). A single failing plugin is skipped without breaking startup.
+
+In V1 a plugin can extend the **bottom status bar** — it injects custom segments that are trimmed by priority and ordered together with the built-in segments.
+
+**Built-in example: the `clock` plugin** (`plugins/clock/`): shows the current time on the right of the status bar and refreshes every second (driven by the plugin's `tickInterval`, which makes the main loop redraw periodically).
+
+**Writing a plugin**:
+
+1. Create `plugins/<id>/plugin.json`:
+   ```json
+   { "id": "myplugin", "entry": "MyPlugin.php", "class": "MyPlugin" }
+   ```
+2. Implement `App\Plugin\PluginInterface`:
+   - `id()`: stable unique id;
+   - `statusSegments(App $app)`: return a list of `StatusSegment` (key / text / priority / order);
+   - `tickInterval()`: return a number of seconds (e.g. `1`) when periodic refresh is needed, otherwise `null`.
+3. Drop the entry file in place — no recompilation required.
+
+Plugin files are plain PHP; the core loader deliberately uses a runtime `require`, so plugins can be dropped in or removed independently without rebuilding the app.
+
+Full plugin developer guide (authoring / loading / segment fields / testing) is at [docs/plugins.md](docs/plugins.md).
+
 ## Tests
 
 `tests/` contains both headless unit tests and real-pty end-to-end acceptance tests (require a real terminal; wrapped in `timeout` as a safety net):
@@ -153,6 +192,8 @@ VICECODE_CONFIG=/tmp/my_vicecode.json php bin/vicecode.php
 ```bash
 php tests/interactive_term_unit.php     # Interactive PTY: emulator + pty pipe headless unit test
 timeout 90 php tests/pty_interactive.php # Interactive PTY: real pty end-to-end (F2/echo/Ctrl+D)
+php tests/session_unit.php              # Session persistence: export/import + App restore (headless)
+timeout 120 php tests/pty_session.php   # Session persistence: save on exit -> restore on restart (real pty)
 php tests/m6_unit.php                   # terminal/editor/keybinding-drift regression
 ```
 

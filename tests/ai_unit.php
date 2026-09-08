@@ -735,4 +735,80 @@ check($mixed === ['你', '好', '世', '界a', 'b'],
 $over = array_values(array_filter($mixed, static fn($l) => mb_strwidth($l) > 3));
 check($over === [], 'mbWrapDisp 每行宽度都不超过给定宽度（混排越界行：' . (implode(',', $over) ?: '无') . '）');
 
+// ── AI 输入框「输入三行」：框高 5 → 内容 3 行，长输入换行、超长向上滚出 ──
+echo "\n== AI 输入框三行渲染 ==\n";
+// 隔离配置：避开 ~/.vicerc 里残留的旧 aiInputHeight，确保走默认 5
+$tmpCfg = tempnam(sys_get_temp_dir(), 'vice_ai_');
+putenv('VICECODE_CONFIG=' . $tmpCfg);
+$appI = new App();
+// 框高默认 5 → 内容高 = 5 - 2 = 3；框宽取 12 → 内容宽 = 10
+$boxH = $appI->layout->aiInputHeight; // 默认 5
+check($boxH === 5, 'aiInputHeight 默认 5（上下边框+3行输入；工具栏图标在顶边框）');
+$inH = $boxH - 2; // 减上下边框(2)，工具栏图标在顶边框不占输入行
+check($inH === 3, '输入框内容行 = 框高-2（上下边框）= 3');
+$inW = 10;
+// 短输入：占 1 行，'>' + 内容 + 光标块
+$appI->ai->onChar(CharKeyEvent::new('h', 0));
+$appI->ai->onChar(CharKeyEvent::new('i', 0));
+// 用 mbWrapDisp 复算（inputContent 同款逻辑）做等价断言
+$expShort = DisplayWidth::mbWrapDisp('> hi', $inW);
+$expShort[count($expShort) - 1] .= '▌';
+check(count($expShort) === 1, '短输入占 1 行（实际 ' . count($expShort) . '）');
+// 长输入：28 个字母 + 提示符 '> '(2列) = 30 列，宽 10 下恰好 3 行（框内满 3 行、不滚动）
+$appI->ai->backspace(); // 退掉 'i'
+$appI->ai->backspace(); // 退掉 'h'
+$long = str_repeat('a', 28);
+foreach (mb_str_split($long) as $c) {
+    $appI->ai->onChar(CharKeyEvent::new($c, 0));
+}
+$expLong = DisplayWidth::mbWrapDisp('> ' . $long, $inW);
+check(count($expLong) === 3, '28 字母在宽 10 下恰好换 3 行（框内满 3 行，实际 ' . count($expLong) . '）');
+// 超长（50 字母）：超过 3 行 → inputContent 只显最后 3 行（向上滚出）
+$veryLong = str_repeat('b', 50);
+$expVL = DisplayWidth::mbWrapDisp('> ' . $veryLong, $inW);
+$shown = array_slice($expVL, -$inH);
+check(count($expVL) > $inH && count($shown) === $inH,
+    '超长输入只显最后 3 行（总 ' . count($expVL) . ' 行 → 显 ' . count($shown) . '）');
+
+// ── 工具栏：软回车（换行）/发送/清空（逆向思路：Enter 仍发送，换行交工具栏）──
+echo "\n== AI 输入框工具栏 ==\n";
+// 图标串 ' [→][↵][✕] '：相对串左沿 0 基区间 → [→]1..3  [↵]4..6  [✕]7..9
+check($appI->ai->onToolbarClick(2) === true, '点顶边框[→发送]命中');
+check($appI->ai->input() === '', '发送后输入框清空（Enter 仍发送，工具栏发送等价）');
+$appI->ai->onChar(CharKeyEvent::new('h', 0));
+$appI->ai->onChar(CharKeyEvent::new('i', 0));
+check($appI->ai->onToolbarClick(5) === true, '点顶边框[↵换行]命中');
+check(str_contains($appI->ai->input(), "\n"), '换行按钮在输入里插入硬换行（软回车）');
+$appI->ai->onToolbarClick(2); // 发送 'hi\n'（trim 后为 hi）
+check($appI->ai->input() === '', '再次发送后清空');
+$appI->ai->onChar(CharKeyEvent::new('x', 0));
+check($appI->ai->onToolbarClick(8) === true, '点顶边框[✕清空]命中');
+check($appI->ai->input() === '', '清空按钮清空输入');
+check($appI->ai->onToolbarClick(50) === false, '点顶边框空白处不命中任何按钮');
+
+// 顶边框右对齐几何：用真实 ai_input 矩形验证绝对列换算
+$area = $appI->areas(TuiArea::fromDimensions(120, 40))['ai_input'];
+$rightCol = $area->position->x + $area->width - 2; // 顶边框最右（清空图标区）
+$appI->ai->onChar(CharKeyEvent::new('z', 0));
+check($appI->ai->onToolbarBorderClick($rightCol, $area) === true, '点顶边框右端图标（清空）命中');
+check($appI->ai->input() === '', '顶边框清空图标生效（绝对列换算正确）');
+$leftCol = $area->position->x + 2; // 顶边框左端（面板名区，非图标）
+check($appI->ai->onToolbarBorderClick($leftCol, $area) === false, '点顶边框左端（面板名）不命中');
+
+// ── 回归：工具栏点击经真实 handle() 路径生效 ──
+// 之前 clickDropdown 同款陷阱：ai_input 顶边框恰是「AI 输入框上」拖拽分隔条，
+// tryStartDrag 在 handleClick 之前抢先返回 true，导致点工具栏图标只进拖拽、按钮无反应。
+// 直接调 onToolbarBorderClick 的单测发现不了，必须走真实 handle()→handleMouse 路径。
+$vp = TuiArea::fromDimensions(120, 40);
+$a2 = $appI->areas($vp);
+$aiArea = $a2['ai_input'];
+$topRow = $aiArea->position->y;
+$rightCol2 = $aiArea->position->x + $aiArea->width - 2; // 顶边框最右（清空图标）
+$appI->ai->onChar(CharKeyEvent::new('x', 0)); // 直接 API 填 'x'
+check($appI->ai->input() === 'x', '回归前置：输入已填入 x');
+$appI->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $rightCol2, $topRow, 0), $vp);
+check($appI->ai->input() === '', '回归：真实路径点顶边框清空图标经 handle() 清空输入（不被 tryStartDrag 吞掉）');
+
+@unlink($tmpCfg);
+
 exit($failed ? 1 : 0);

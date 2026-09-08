@@ -42,8 +42,8 @@ use PhpTui\Tui\Widget\Widget;
  */
 final class SidebarPanel
 {
-    /** 0=Explorer 1=GIT 2=Search */
-    public const TABS = ['explorer', 'git', 'search'];
+    /** 0=Explorer 1=GIT 2=Search 3=Extensions(插件) */
+    public const TABS = ['explorer', 'git', 'search', 'plugins'];
 
     private const DOUBLE_CLICK_MS = 400;
 
@@ -84,6 +84,12 @@ final class SidebarPanel
 
     public int $tabIndex = 0;
 
+    /** 扩展(插件) tab 列表选中项索引 */
+    public int $pluginSel = 0;
+
+    /** 扩展(插件) tab 列表可视区首行索引 */
+    public int $pluginOffset = 0;
+
     private ?float $lastClickAtMs = null;
     private ?string $lastClickPath = null;
     private ?int $lastClickRow = null;
@@ -117,7 +123,7 @@ final class SidebarPanel
         // 在「渲染之前」就把 hScroll 钳到合法上界，避免本帧用越界 hScroll 把行切成空串）。
         $this->maxHScroll = $this->computeMaxHScroll($sidebar);
         $this->hScroll = max(0, min($this->hScroll, max(0, $this->maxHScroll - $innerW)));
-        $seg = max(1, intdiv(max(1, $innerW), 3)); // 每段可用显示列宽
+        $seg = max(1, intdiv(max(1, $innerW), count(self::TABS))); // 每段可用显示列宽
         $tabLine = '';
         foreach (self::TABS as $i => $key) {
             $icon = $this->shell->icon($key);
@@ -170,8 +176,10 @@ final class SidebarPanel
             }
         } elseif ($this->tabIndex === 1) {
             $this->gitContent($sidebar, $lines);
-        } else {
+        } elseif ($this->tabIndex === 2) {
             $this->searchContent($sidebar, $lines);
+        } else {
+            $this->pluginsContent($sidebar, $lines);
         }
 
         // 横向滚动上界钳制：仅当最宽行超出视口时才允许右移，避免滚出空白
@@ -234,7 +242,7 @@ final class SidebarPanel
                     }
                 }
             }
-        } else {
+        } elseif ($this->tabIndex === 2) {
             foreach ($this->shell->search->buildVisibleRows() as $row) {
                 if ($row->kind === SearchRow::HEADER) {
                     $mark = isset($this->shell->search->collapsed[$row->path]) ? '▶ ' : '▼ ';
@@ -242,6 +250,16 @@ final class SidebarPanel
                 } else {
                     $text = '  ' . ($row->hit?->line ?? 0) . ': ' . ltrim($row->hit?->text ?? '');
                 }
+                if ($w($text) > $max) {
+                    $max = $w($text);
+                }
+            }
+        } else {
+            foreach ($this->shell->plugins as $p) {
+                $cfg = $this->shell->pluginEffectiveConfig($p);
+                $cfgStr = $cfg === [] ? $this->shell->t('plugins.no_config')
+                    : implode(' ', array_map(static fn($k, $v): string => $k . '=' . $v, array_keys($cfg), $cfg));
+                $text = '» ' . $p->id() . ' [' . $this->shell->t('plugins.enabled') . '] ' . $cfgStr;
                 if ($w($text) > $max) {
                     $max = $w($text);
                 }
@@ -600,6 +618,68 @@ final class SidebarPanel
         }
     }
 
+    /** 扩展(插件) tab 按键：↑/↓ 移动、Enter 打开配置浮层 */
+    private function pluginsKey(CodedKeyEvent $e): bool
+    {
+        switch ($e->code) {
+            case KeyCode::Up:
+                $this->movePluginSelection(-1);
+                return true;
+            case KeyCode::Down:
+                $this->movePluginSelection(1);
+                return true;
+            case KeyCode::Enter:
+                $plugins = $this->shell->plugins;
+                if (isset($plugins[$this->pluginSel])) {
+                    $this->shell->pluginsPanel->open();
+                }
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** 扩展(插件) tab 内容：列出已加载插件及其有效配置；Enter/点击打开配置浮层。 */
+    private function pluginsContent(Area $sidebar, array &$lines): void
+    {
+        $innerW = max(0, $sidebar->width - 2);
+        $plugins = $this->shell->plugins;
+        if ($plugins === []) {
+            $lines[] = Line::fromSpans(Span::styled('(无插件)', $this->shell->theme->style('dim')));
+            return;
+        }
+        $this->pluginSel = max(0, min($this->pluginSel, count($plugins) - 1));
+        $rowsH = max(0, $sidebar->height - 2 - 2); // 边框 + tab行 + 分隔
+        if ($rowsH <= 0) {
+            return;
+        }
+        if ($this->pluginSel < $this->pluginOffset) {
+            $this->pluginOffset = $this->pluginSel;
+        } elseif ($this->pluginSel >= $this->pluginOffset + $rowsH) {
+            $this->pluginOffset = $this->pluginSel - $rowsH + 1;
+        }
+        if ($this->pluginOffset < 0) {
+            $this->pluginOffset = 0;
+        }
+        for ($i = $this->pluginOffset; $i < min($this->pluginOffset + $rowsH, count($plugins)); $i++) {
+            $p = $plugins[$i];
+            $cfg = $this->shell->pluginEffectiveConfig($p);
+            $cfgStr = $cfg === []
+                ? $this->shell->t('plugins.no_config')
+                : implode(' ', array_map(static fn($k, $v): string => $k . '=' . $v, array_keys($cfg), $cfg));
+            $tick = method_exists($p, 'tickInterval') ? $p->tickInterval() : null;
+            $tickStr = $tick !== null ? "tick={$tick}s" : 'tick=none';
+            $sel = $i === $this->pluginSel;
+            $marker = $sel ? '» ' : '  ';
+            $text = $marker . $p->id() . '  [' . $this->shell->t('plugins.enabled') . ' · ' . $tickStr . ']  ' . $cfgStr;
+            $style = $sel
+                ? Style::default()->addModifier(Modifier::REVERSED)
+                : Style::default();
+            $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW), $style));
+            $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
+        }
+    }
+
     /** GIT 状态类别 → 颜色（与 VSCode gutter 着色近似） */
     private function gitColor(string $cat): AnsiColor
     {
@@ -796,8 +876,8 @@ final class SidebarPanel
         if ($pos->y === $sb->position->y + 1
             && $pos->x >= $sb->position->x && $pos->x < $sb->position->x + $sb->width) {
             $inner = $pos->x - ($sb->position->x + 1);
-            $seg = max(1, intdiv(max(1, $sb->width - 2), 3));
-            $this->tabIndex = min(2, intdiv($inner, $seg));
+            $seg = max(1, intdiv(max(1, $sb->width - 2), count(self::TABS)));
+            $this->tabIndex = min(count(self::TABS) - 1, intdiv($inner, $seg));
             $this->shell->focus('sidebar');
             // 切到 GIT tab 即异步刷新 status/log/branch（M3 R1/R2/R3）
             if ($this->tabIndex === 1) {
@@ -814,6 +894,19 @@ final class SidebarPanel
         // SEARCH tab：交给 searchClick 处理（输入框/状态/结果列表）
         if ($this->tabIndex === 2) {
             return $this->searchClick($pos, $areas);
+        }
+
+        // 扩展(插件) tab：点击插件行 → 打开配置浮层（与「文件 → 已安装插件」同一浮层）
+        if ($this->tabIndex === 3) {
+            if ($pos->y >= $sb->position->y + 3) {
+                $idx = ($pos->y - ($sb->position->y + 3)) + $this->pluginOffset;
+                $plugins = $this->shell->plugins;
+                if (isset($plugins[$idx])) {
+                    $this->pluginSel = $idx;
+                    $this->shell->pluginsPanel->open();
+                }
+            }
+            return true;
         }
 
         // 树条目（inner 第 2 行起）
@@ -863,6 +956,10 @@ final class SidebarPanel
         // SEARCH tab 用自己的导航语义（↑/↓/Enter/Backspace）
         if ($this->tabIndex === 2) {
             return $this->searchKey($e);
+        }
+        // 扩展(插件) tab：↑/↓ 移动、Enter 打开配置浮层
+        if ($this->tabIndex === 3) {
+            return $this->pluginsKey($e);
         }
         switch ($e->code) {
             case KeyCode::Enter:
@@ -970,6 +1067,8 @@ final class SidebarPanel
             $this->shell->search->moveSelection($delta);
         } elseif ($this->tabIndex === 1) {
             $this->shell->git->moveSelection($delta);
+        } elseif ($this->tabIndex === 3) {
+            $this->movePluginSelection($delta);
         } else {
             $this->moveSelection($delta);
         }
@@ -980,6 +1079,17 @@ final class SidebarPanel
     public function onScrollH(int $delta): void
     {
         $this->hScroll = max(0, $this->hScroll + $delta);
+    }
+
+    /** 扩展(插件) tab 列表选择移动（钳到合法范围；无插件时不越界） */
+    private function movePluginSelection(int $delta): void
+    {
+        $n = count($this->shell->plugins);
+        if ($n === 0) {
+            $this->pluginSel = 0;
+            return;
+        }
+        $this->pluginSel = max(0, min($n - 1, $this->pluginSel + $delta));
     }
 
     // ── 内部 ────────────────────────────────────────

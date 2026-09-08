@@ -145,9 +145,24 @@ TUI_USE_SWOOLE=0 php bin/vicecode.php   # 强制回退到纯 php-tui/term 阻塞
 
 > 窗口尺寸随面板大小自动通过 `stty` 同步给 shell；宽字符（CJK）按 2 列占位渲染。
 
+### 会话持久化（默认关闭，需手动开启）
+
+默认情况下，退出 ViceCode 时交互式 shell 会随进程一起死掉（PTY 是 OS 进程，退出即被 SIGKILL）。开启会话持久化后，退出时会把终端快照——滚动历史 + 当前**主屏纯文本** + 启动工作目录——落盘；下次启动时自动起一个新 shell 并把快照灌回去，让会话看起来「续上了」。
+
+- **默认关闭**：在配置（`~/.vicerc`，或 `VICECODE_CONFIG` 指向的文件）里加上 `"persistSession": true` 开启。
+- 快照写到 `~/.vicecode_session`（与配置同目录，或 `dirname(VICECODE_CONFIG)/.vicecode_session`），权限 `0600`；恢复成功后即被消费（删除），不会二次恢复。
+- **隐私提示**：滚动历史可能含在提示符后键入的密码 / 令牌。文件为 `0600`，但仍属敏感，只在可信机器上开启。
+
+**局限性（v1，设计使然）：**
+
+- 只持久化**主屏**；`vim` / `top` / `less` / `ssh` 等全屏程序跑在交替屏，刻意排除——它们的冻结 UI 重启后会变成垃圾。
+- **不含颜色**，仅纯文本。
+- 只恢复**启动**工作目录；在 shell 内 `cd` 过的目录不恢复。
+- PTY 进程本身无法序列化；恢复的是一个灌入了快照文本的新 shell，其新提示符接在快照之后。
+
 ## 配置与语言
 
-- 配置落盘到 `~/.vicerc`（JSON：布局 / 主题 / 语言），退出时自动保存。
+- 配置落盘到 `~/.vicerc`（JSON：布局 / 主题 / 语言，以及你设置的 `persistSession`），退出时自动保存。保存时 ViceCode 会**合并**已有配置，手改的 key（如 `persistSession`）不会被覆盖丢失。
 - 用环境变量 `VICECODE_CONFIG` 可覆盖配置文件路径（测试隔离用，避免污染家目录）。
 - 界面语言通过 `APP_LOCALE` 切换，默认 `zh_CN`，可选 `en`；缺失的 key 回退英文。
 
@@ -156,6 +171,30 @@ APP_LOCALE=en php bin/vicecode.php
 VICECODE_CONFIG=/tmp/my_vicecode.json php bin/vicecode.php
 ```
 
+## 插件系统（V1）
+
+插件在**运行时**动态加载：应用启动时扫描 `plugins/<id>/plugin.json`，读取入口文件后用 `require` 加载并实例化插件类（不走 composer autoload）。单个插件加载失败会被跳过，不影响整体启动。
+
+当前 V1 版本插件可扩展**底部状态栏**——向状态栏注入自定义段（与系统段统一按优先级裁剪、按顺序排列）。
+
+**内置示例：`clock` 插件**（`plugins/clock/`）：在状态栏右侧显示当前时间，并每秒自动刷新（通过插件声明的 `tickInterval` 驱动主循环周期重绘）。
+
+**编写插件**：
+
+1. 在 `plugins/<id>/` 下创建 `plugin.json`：
+   ```json
+   { "id": "myplugin", "entry": "MyPlugin.php", "class": "MyPlugin" }
+   ```
+2. 实现 `App\Plugin\PluginInterface`：
+   - `id()`：稳定唯一标识；
+   - `statusSegments(App $app)`：返回 `StatusSegment` 列表（含 key / 文本 / 优先级 / 显示顺序）；
+   - `tickInterval()`：如需周期刷新返回秒数（如 `1`），否则返回 `null`。
+3. 放置入口文件即生效，无需重新编译。
+
+插件文件写普通 PHP 即可；核心加载器刻意使用运行时 `require`，插件可独立放置、随时增删，无需重新构建应用。
+
+完整插件开发文档（编写 / 加载机制 / 字段取值 / 测试）见 [docs/plugins.md](docs/plugins.md)。
+
 ## 测试
 
 `tests/` 下既有 headless 单测，也有真实 pty 端到端验收（须真实终端环境，外层已加 `timeout` 兜底）：
@@ -163,6 +202,8 @@ VICECODE_CONFIG=/tmp/my_vicecode.json php bin/vicecode.php
 ```bash
 php tests/interactive_term_unit.php     # 交互式 PTY：仿真器 + pty 管道 headless 单测
 timeout 90 php tests/pty_interactive.php # 交互式 PTY：真实 pty 端到端（F2/echo/Ctrl+D）
+php tests/session_unit.php              # 会话持久化：导出/导入 + App 恢复（headless）
+timeout 120 php tests/pty_session.php   # 会话持久化：退出保存 → 重启恢复（真实 pty）
 php tests/m6_unit.php                   # 终端/编辑器/键位漂移等回归
 ```
 

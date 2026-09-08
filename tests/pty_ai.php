@@ -50,6 +50,25 @@ $readPty = static function ($stream, int $len) {
     }
 };
 
+// 抽干直到静默：普通 readPty 一遇空 fread 就返回，可能只抓到部分帧；这里一直读到静默，
+// 确保拿到点击后那次完整的差分重绘（含状态栏焦点标签的连续写入）。
+$drainPty = static function ($stream, float $idleSec = 0.25) use ($readPty) {
+    $s = '';
+    $idle = 0.0;
+    $start = microtime(true);
+    while ($idle < $idleSec && (microtime(true) - $start) < 8.0) {
+        $chunk = $readPty($stream, 65536);
+        if ($chunk === '' || $chunk === false) {
+            usleep(20000);
+            $idle += 0.02;
+        } else {
+            $s .= $chunk;
+            $idle = 0.0;
+        }
+    }
+    return $s;
+};
+
 $failed = false;
 function check(bool $cond, string $msg): void
 {
@@ -88,13 +107,29 @@ if (!$up) {
 // ── 起应用（pty）──────────────────────────────────────
 $base = 'http://127.0.0.1:' . $port . '/v1';
 $env = array_merge(getenv(), [
-    'COLUMNS'          => '120',
-    'LINES'            => '40',
+    'COLUMNS'          => '200',
+    'LINES'            => '50',
+    'VICECODE_CONFIG' => tempnam(sys_get_temp_dir(), 'vc_ai'),
     'OPENAI_BASE_URL'  => $base,
     'OPENAI_API_KEY'   => 'test-key-local-mock',
     'DEEPSEEK_BASE_URL' => $base,
     'DEEPSEEK_API_KEY' => 'test-key-local-mock',
 ]);
+
+// 临时禁用插件目录：内置 clock 插件每秒在状态栏写时间数字，差分渲染会把「你好」两个字与时钟
+// 数字跨行穿插进归一化流，导致「你好」不连续（时钟每秒变 → 偶发失败）。中文输入验收只关心
+// 输入盒本身，禁用插件后断言稳定。shutdown 时还原。
+$pluginsDir = __DIR__ . '/../plugins';
+$pluginsBackup = $pluginsDir . '.disabled_for_ai';
+if (is_dir($pluginsDir)) {
+    rename($pluginsDir, $pluginsBackup);
+    register_shutdown_function(static function () use ($pluginsDir, $pluginsBackup): void {
+        if (is_dir($pluginsBackup)) {
+            rename($pluginsBackup, $pluginsDir);
+        }
+    });
+}
+
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
 $proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes, null, $env);
 if ($proc === false) {
@@ -106,9 +141,11 @@ stream_set_blocking($pipes[1], false);
 usleep(300000);
 $readPty($pipes[1], 16384); // 吃掉首帧
 
-// 探针算 ai_input 面板中心（0-based → SGR 1-based）
+// 探针算 ai_input 面板中心（0-based → SGR 1-based）。视口用 200x50：窄屏（如 120 列）下
+// 状态栏会按优先级丢弃焦点段（focus 优先级最低），导致「=AI_INPUT」根本不渲染，无法观测；
+// 加宽后焦点段稳定出现，且 ai_input 坐标由本探针动态算出、随视口自适应。
 $probe = new App();
-$ai = $probe->areas(Area::fromDimensions(120, 40))['ai_input'];
+$ai = $probe->areas(Area::fromDimensions(200, 50))['ai_input'];
 $ac = $ai->position->x + intdiv($ai->width, 2) + 1;
 $ar = $ai->position->y + intdiv($ai->height, 2) + 1;
 
@@ -116,9 +153,14 @@ $ar = $ai->position->y + intdiv($ai->height, 2) + 1;
 fwrite($pipes[0], "\x1b[<0;{$ac};{$ar}M");
 fwrite($pipes[0], "\x1b[<0;{$ac};{$ar}m");
 usleep(400000);
-$out0 = normalize($readPty($pipes[1], 16384));
-// 只看 'aiinput'：状态栏前缀（focus/焦点）随语言包变化，断言不要绑死文案
-check(str_contains($out0, 'aiinput'), '点击 AI 输入框 → 焦点切到 ai_input（状态栏可见）');
+$clickRaw = $drainPty($pipes[1]); // 抽干点击后的整次差分重绘（含状态栏焦点标签）
+// 状态栏焦点标签恒为 strtoupper(panelId)，即 focus=ai_input 时渲染「=AI_INPUT」（与语言包
+// 无关：无论 zh「焦点」还是 en「focus」，值都是未翻译的 AI_INPUT）。php-tui 差分渲染把它拆成
+// col68 的 A 与 col70 起的 _INPUT，中间 col69 是边框分隔符、并非可恢复的 I——所以整词
+// 「aiinput」在单帧里永不连续，跨帧重建也补不出（那个位置本来就不是 I）。
+// 但点击帧里 _INPUT 是连续写入的，且五个面板标识符里只有 AI_INPUT 带下划线（边框标题用空格
+// 「AI Input」、无下划线），故直接对原始字节查 '_input' 即可，跨语言、抗拆词。
+check(str_contains(strtolower($clickRaw), '_input'), '点击 AI 输入框 → 焦点切到 ai_input（状态栏可见）');
 
 // ── 打字 + 回车发送 ───────────────────────────────────
 // 刻意打中文：pty 里 IME/UTF-8 是真实多字节路径，headless 用 CharKeyEvent 构造不出来

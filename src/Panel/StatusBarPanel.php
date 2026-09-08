@@ -116,7 +116,7 @@ final class StatusBarPanel
         // 非拖拽时 t 为空，join() 会跳过，不占空间。
         $layout = $this->shell->isDragging() ? $this->shell->layoutSummary() : '';
 
-        return [
+        $segs = [
             // k=标识, p=丢弃优先级(大者留), o=显示顺序(小者靠左)
             //
             // 焦点/标签排得低是刻意的：它们**在界面上已经有视觉表达**（聚焦面板边框高亮、
@@ -134,9 +134,22 @@ final class StatusBarPanel
             // ⚠️ tab 不能排太低：侧栏 tab **只显示图标不显示文字**，状态栏这行是它
             // 唯一的文字标识，丢了用户就分不清当前在哪个 tab。
             ['k' => 'tab',     'p' => 75,  'o' => 6, 't' => $t('status.tab') . '=' . $this->shell->sidebar->tabLabel()],
+            // 终端 cwd：仅在聚焦终端时显示（避免与其它面板争抢状态栏空间）。
+            // 值来自 PROMPT_COMMAND 钩子经 OSC 实时上报的 shell 工作目录。
+            ['k' => 'cwd',     'p' => 60,  'o' => 10, 't' => $this->shell->focusPanel() === 'terminal'
+                ? $t('status.cwd') . '=' . $this->shell->terminal->cwd()
+                : ''],
             // 拖拽尺寸段：排最右、优先级最高，拖拽时必定显示，松手即消失。
             ['k' => 'layout',  'p' => 95,  'o' => 11, 't' => $layout],
         ];
+
+        // 插件段（V1）：与系统段统一走「按优先级丢弃 + 按 order 摆放」逻辑，
+        // 不单独处理，避免两套裁剪规则错位导致插件段与系统段争抢位置。
+        foreach ($this->shell->pluginSegments() as $ps) {
+            $segs[] = $ps;
+        }
+
+        return $segs;
     }
 
     private function confirmText(): string

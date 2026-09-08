@@ -19,6 +19,19 @@ require __DIR__ . '/../vendor/autoload.php';
 
 putenv('APP_LOCALE=zh_CN');
 
+// 隔离插件：clock 等插件让状态栏时钟每秒变化，会使 diff 不变量对比出现非确定残留。
+// 测试期间临时移走 plugins 目录，结束时（含异常/exit）经 shutdown 函数恢复。
+$pluginsDir = __DIR__ . '/../plugins';
+$pluginsBackup = $pluginsDir . '.disabled_for_test';
+if (is_dir($pluginsDir)) {
+    rename($pluginsDir, $pluginsBackup);
+    register_shutdown_function(static function () use ($pluginsDir, $pluginsBackup): void {
+        if (is_dir($pluginsBackup)) {
+            rename($pluginsBackup, $pluginsDir);
+        }
+    });
+}
+
 use App\App;
 use PhpTui\Term\Event\CharKeyEvent;
 use PhpTui\Term\Event\CodedKeyEvent;
@@ -30,6 +43,7 @@ use PhpTui\Tui\Display\BufferUpdates;
 use PhpTui\Tui\Display\ClearType;
 use PhpTui\Tui\DisplayBuilder;
 use PhpTui\Tui\Position\Position;
+use PhpTui\Tui\Widget\Widget;
 
 /** 忠实模拟真实终端：写宽字符会覆盖右邻格 */
 final class TermSimBackend implements Backend
@@ -105,11 +119,13 @@ $W = 120;
 $H = 40;
 $vp = Area::fromScalars(0, 0, $W, $H);
 
-function fullRender(App $app, Area $vp, int $W, int $H): array
+// 接收「已渲染出的 Widget」：persist 与 fullRender 各自独立调用 $app->render()，
+// 贴近真实环境每帧重建 Widget 的语义。时钟等非确定源由测试开头临时移走 plugins 消除。
+function fullRender(Widget $widget, int $W, int $H): array
 {
     $b = new TermSimBackend($W, $H);
     $d = DisplayBuilder::default($b)->fixed(0, 0, $W, $H)->build();
-    $d->draw($app->render($vp));
+    $d->draw($widget);
     return $b->toLines();
 }
 
@@ -166,7 +182,7 @@ function runCase(string $file, int $W, int $H, Area $vp, bool &$totalFailed): vo
             $app->handle($e, $vp);
         }
         $display->draw($app->render($vp));
-        $d = diffGrids($persist->toLines(), fullRender($app, $vp, $W, $H));
+        $d = diffGrids($persist->toLines(), fullRender($app->render($vp), $W, $H));
         if ($d === []) {
             echo "  [OK] $label\n";
             return;

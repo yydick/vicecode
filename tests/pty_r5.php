@@ -21,6 +21,20 @@ $env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40', 'APP_LOCALE' 
 // 隔离配置：pty 退出会写 ~/.vicerc，落到临时文件避免污染真实家目录配置。
 $env['VICECODE_CONFIG'] = tempnam(sys_get_temp_dir(), 'vc_r5cfg');
 
+// 临时禁用插件目录：内置 clock 插件每秒在状态栏写时间数字，与布局摘要段（side/AI/edit/input）
+// 同处一行，跨帧位置漂移会让 rebuildScreen 把时钟数字穿插进摘要段、产生「input52」「side 缺数字」
+// 这类乱码。拖拽验收只关心布局摘要本身，禁用插件后状态栏该段位置稳定、重建干净。
+$pluginsDir = __DIR__ . '/../plugins';
+$pluginsBackup = $pluginsDir . '.disabled_for_r5';
+if (is_dir($pluginsDir)) {
+    rename($pluginsDir, $pluginsBackup);
+    register_shutdown_function(static function () use ($pluginsDir, $pluginsBackup): void {
+        if (is_dir($pluginsBackup)) {
+            rename($pluginsBackup, $pluginsDir);
+        }
+    });
+}
+
 /** ANSI 屏幕重建：同 tests/pty_menu.php，按光标/擦除序列重建最终可见帧（详见该文件注释） */
 function rebuildScreen(string $raw, int $w, int $h): string
 {

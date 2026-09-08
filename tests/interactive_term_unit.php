@@ -193,6 +193,9 @@ check($term->mode === 'runner', '初始为 runner 模式');
 $term->toggleInteractive();
 check($term->mode === 'pty', 'F2 进入 pty 模式');
 check($term->isCaptured(), '进入后处于捕获态');
+// 触发首帧渲染消费 ptyStartPending：F2 切 pty 后 pty 推迟到首帧 ptyContent()
+// 用真实面板尺寸起（避免按错误 LINES 渲染全屏程序），故需先渲染一帧才能 isRunning()。
+$term->content(\PhpTui\Tui\Display\Area::fromDimensions(120, 40), true);
 check($term->isRunning(), 'pty shell 在运行');
 $term->exitCapture();
 check(!$term->isCaptured(), 'exitCapture 退出捕获（shell 仍在跑）');

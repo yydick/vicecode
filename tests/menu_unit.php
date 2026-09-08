@@ -10,6 +10,10 @@ declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
 
+// 固化 locale：本测试断言中文菜单名（文件/帮助），但 App 优先读 ~/.vicerc 的 locale，
+// 未隔离会随操作员配置漂移。APP_LOCALE 优先级高于配置文件，故此处 pin zh_CN 保证确定性。
+putenv('APP_LOCALE=zh_CN');
+
 use App\App;
 use App\Panel\MenuBarPanel;
 use PhpTui\Term\Event\CodedKeyEvent;
@@ -51,14 +55,14 @@ check(in_array('文件', $labels, true) && in_array('帮助', $labels, true), '�
 $actionCount = 0;
 $known = ['file.open','file.save','file.close','file.quit','view.theme','view.focus.editor',
     'view.focus.terminal','view.focus.explorer','view.focus.ai','view.lang','term.cancel',
-    'term.clear','help.shortcuts','help.about'];
+    'term.clear','help.shortcuts','help.about','plugins.open'];
 foreach ($defs as $m) {
     foreach ($m['items'] as $it) {
         $actionCount++;
         check(in_array($it['action'], $known, true), "菜单项 {$it['label']} 的 action({$it['action']}) 是真实命令");
     }
 }
-check($actionCount === 14, "共 14 个菜单项（实际 " . $actionCount . "）");
+check($actionCount === 15, "共 15 个菜单项（实际 " . $actionCount . "）");
 
 // ─════════ 2) 菜单栏在常规视口可见、矮视口不画 ═════════
 echo "\n== 菜单栏可见性 ==\n";
@@ -109,8 +113,10 @@ $startXHelp = $app6->menuBar->menuStartX(3);
 $widthHelp = $app6->menuBar->menuWidth(3);
 $clicked = $app6->menuBar->clickBar($startXHelp + intdiv($widthHelp, 2));
 check($clicked && $app6->menuBar->isOpen(), '点击「帮助」标签激活该菜单');
-// 现在菜单打开且 active=3（帮助），点下拉第 0 项（快捷键）→ 打开帮助页
-$app6->menuBar->clickDropdown($startXHelp, 1);
+// 现在菜单打开且 active=3（帮助），点下拉第 0 项（快捷键）→ 打开帮助页。
+// clickDropdown 第二参是绝对行：下拉顶边框在绝对行 1（菜单栏 row0 下方），
+// 条目从绝对行 2 起（itemsTop = top+1），故首项在绝对行 2。
+$app6->menuBar->clickDropdown($startXHelp, 2);
 check($app6->help->isOpen() === true, '点下拉「快捷键」打开帮助页');
 check($app6->menuBar->isOpen() === false, '点条目后菜单关闭');
 // 单独验证「点其它标签可切换（不崩）」——用新实例，避免改掉上面的 active

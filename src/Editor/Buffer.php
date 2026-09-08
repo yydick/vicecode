@@ -175,6 +175,31 @@ final class Buffer
         $this->recompute();
     }
 
+    /**
+     * 粘贴整段文本到光标处（多字节安全）。
+     * 按 \r\n / \r / \n 拆行：第 0 段插在当前行光标处（光标随之后移），
+     * 之后的每段先插入换行（到新行行首）再接上；空文本是 no-op。
+     */
+    public function insertText(string $text): void
+    {
+        if ($this->readOnly || $text === '') {
+            return;
+        }
+        $segs = explode("\n", str_replace("\r\n", "\n", str_replace("\r", "\n", $text)));
+        foreach ($segs as $i => $seg) {
+            if ($i > 0) {
+                $this->insertNewline();
+            }
+            $line = $this->currentLine();
+            $before = mb_substr($line, 0, $this->cursorCol);
+            $after = mb_substr($line, $this->cursorCol);
+            $this->lines[$this->cursorRow] = $before . $seg . $after;
+            $this->cursorCol += mb_strlen($seg);
+        }
+        $this->dirty = true;
+        $this->recompute();
+    }
+
     public function backspace(): void
     {
         if ($this->readOnly) {

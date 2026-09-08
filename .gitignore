@@ -7,3 +7,7 @@ tests/*.log
 # 本地覆盖用环境变量（若后续新增）
 .env
 .env.local
+
+# 会话持久化快照（可能含提示符后键入的密码/令牌，隐私敏感，不入库）
+.vicecode_session
+**/.vicecode_session

@@ -64,6 +64,13 @@ final class EditorPanel
     public bool $hLeft = false;
     public bool $hRight = false;
 
+    /**
+     * 文本选择矩形（归一化 [r0,c0,r1,c1]，视口绝对行列）；null=无选择。
+     * 由 App 在渲染前注入，content() 据此反显高亮。坐标含边框/行号列——
+     * 反显时只作用于文本区（排除行号栏），取字时按同款数学映射回 Buffer 行/字符。
+     */
+    private ?array $sel = null;
+
     public function __construct(private App $shell)
     {
     }
@@ -188,6 +195,17 @@ final class EditorPanel
                 $buf->scrollLeft,
                 $textW
             );
+            // 文本选择反显：本可见行落在选区行范围内时，反显文本区内 [c0,c1] 显示列
+            $absRow = $inner->position->y + $tabH + $i;
+            if ($this->sel !== null
+                && $absRow >= $this->sel[0] && $absRow <= $this->sel[2]) {
+                $contentSpans = $this->invertSpans(
+                    $contentSpans,
+                    $inner->position->x + $gutterW,
+                    $this->sel[1],
+                    $this->sel[3]
+                );
+            }
             $lines[] = Line::fromSpans(
                 Span::styled($gutter, $gutterStyle),
                 ...$contentSpans
@@ -555,5 +573,99 @@ final class EditorPanel
             }
         }
         $buf->scrollLeft = max(0, min($buf->scrollLeft + $delta, max(0, $maxW - 1)));
+    }
+
+    /** 点击是否落在编辑器内容区（可起文本选择）：在面板内、且在内容起始行之下（排除 tab 栏与边框） */
+    public function isSelectableAt(Position $pos, Area $editor): bool
+    {
+        if (!$editor->containsPosition($pos)) {
+            return false;
+        }
+        $inner = $editor->inner(new Margin(1, 1));
+        $tabH = $this->hasTabs() ? 1 : 0;
+        return $pos->y >= $inner->position->y + $tabH;
+    }
+
+    /** 渲染前注入文本选择矩形（归一化 [r0,c0,r1,c1]）；null 清掉高亮 */
+    public function setSelection(?array $r): void
+    {
+        $this->sel = $r;
+    }
+
+    /**
+     * 对一组内容 Span 反显 [c0,c1] 绝对显示列区间（落在文本区内的部分）。
+     * 文本区显示列从 $textX0 起；对跨入选区的 Span 切成「前/选中/后」三段，
+     * 选中段加 REVERSED modifier。不改原 Span（新建避免副作用）。
+     * @param Span[] $spans
+     * @return Span[]
+     */
+    private function invertSpans(array $spans, int $textX0, int $c0, int $c1): array
+    {
+        if ($c1 < $c0) {
+            return $spans;
+        }
+        $out = [];
+        $col = $textX0;
+        foreach ($spans as $span) {
+            $text = $span->content;
+            $w = DisplayWidth::dispWidth($text);
+            $s0 = $col;
+            $s1 = $col + $w;
+            $col = $s1;
+            $a = max($s0, $c0);
+            $b = min($s1, $c1 + 1); // c1 含
+            if ($a >= $b) {
+                $out[] = $span;
+                continue;
+            }
+            if ($a > $s0) {
+                $out[] = new Span(DisplayWidth::mbSubDisp($text, 0, $a - $s0), $span->style);
+            }
+            $selText = DisplayWidth::mbSubDisp($text, $a - $s0, $b - $a);
+            $out[] = new Span($selText, $span->style->addModifier(Modifier::REVERSED));
+            if ($b < $s1) {
+                $out[] = new Span(DisplayWidth::mbSubDisp($text, $b - $s0, $s1 - $b), $span->style);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * 取编辑器文本选择矩形内的文字（无软换行 → 精确）。
+     * 坐标均为视口绝对行列，用 positionCursorAtClick 同款数学反推 Buffer 行/字符区间。
+     */
+    public function getTextRect(Area $editor, int $r0, int $c0, int $r1, int $c1): string
+    {
+        $buf = $this->shell->buffer;
+        if ($buf === null) {
+            return '';
+        }
+        $inner = $editor->inner(new Margin(1, 1));
+        $W = max(0, $inner->width);
+        $gutterW = min($W, $buf->maxLineNoWidth + 1);
+        $hasTabs = $this->hasTabs();
+        $tabH = $hasTabs ? 1 : 0;
+        $textX0 = $inner->position->x + $gutterW;
+        $contentTop = $inner->position->y + $tabH;
+
+        $out = [];
+        for ($row = $r0; $row <= $r1; $row++) {
+            if ($row < $contentTop) {
+                $out[] = ''; // 边框/tab 栏行不是内容
+                continue;
+            }
+            $li = ($row - $contentTop) + $buf->scrollTop;
+            if ($li < 0 || $li >= count($buf->lines)) {
+                $out[] = '';
+                continue;
+            }
+            $line = $buf->lines[$li];
+            $dispA = max(0, $c0 - $textX0);
+            $dispB = max(0, $c1 - $textX0);
+            $chA = DisplayWidth::mbDispToCharIndex($line, $dispA);
+            $chB = DisplayWidth::mbDispToCharIndex($line, $dispB + 1);
+            $out[] = mb_substr($line, $chA, $chB - $chA);
+        }
+        return implode("\n", $out);
     }
 }
