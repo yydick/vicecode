@@ -86,6 +86,7 @@ final class EditorPanel
     public function removeBuffer(string $path): void
     {
         unset($this->buffers[$path]);
+        $this->shell->emitPluginEvent('file.closed', ['path' => $path]);
     }
 
     public function hasTabs(): bool
@@ -468,6 +469,7 @@ final class EditorPanel
         }
         $this->scrollPinned = false; // 打开新文件：光标跟随（从列 0 显示）
         $this->shell->focus('editor');
+        $this->shell->emitPluginEvent('file.opened', ['path' => $path, 'virtual' => false]);
     }
 
     public function switchBuffer(string $path): void
@@ -475,6 +477,7 @@ final class EditorPanel
         if (isset($this->buffers[$path])) {
             $this->shell->buffer = $this->buffers[$path];
             $this->scrollPinned = false;
+            $this->shell->emitPluginEvent('buffer.switched', ['path' => $path]);
         }
     }
 
@@ -495,6 +498,7 @@ final class EditorPanel
         $this->shell->buffer = $this->buffers[$path];
         $this->scrollPinned = false;
         $this->shell->focus('editor');
+        $this->shell->emitPluginEvent('file.opened', ['path' => $path, 'virtual' => true]);
     }
 
     /** Ctrl+Tab：在已开文件间环形切换 */
@@ -510,6 +514,7 @@ final class EditorPanel
         }
         $next = $paths[($idx + 1) % count($paths)];
         $this->shell->buffer = $this->buffers[$next];
+        $this->shell->emitPluginEvent('buffer.switched', ['path' => $next]);
     }
 
     /** Ctrl+S 保存，结果写进状态栏消息 */
@@ -529,6 +534,7 @@ final class EditorPanel
             return;
         }
         $ok = $buf->save();
+        $this->shell->emitPluginEvent('file.saved', ['path' => $path, 'ok' => $ok]);
         $this->shell->setMessage($ok
             ? $this->shell->t('editor.saved')
             : $this->shell->t('editor.save_failed', ['msg' => (error_get_last()['message'] ?? 'unknown')]));

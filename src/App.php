@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App;
 
+use Throwable;
 use App\Core\Config;
 use App\Core\KeyBindings;
 use App\Core\KeyInput;
@@ -24,6 +25,8 @@ use App\Panel\PluginsPanel;
 use App\Panel\SidebarPanel;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
+use App\Plugin\PluginCommand;
+use App\Plugin\PluginEvent;
 use App\Plugin\PluginInterface;
 use App\Plugin\PluginLoader;
 use App\Search\SearchModel;
@@ -189,6 +192,25 @@ class App
     /** 退出与未保存确认状态机（R8） */
     public Lifecycle $lifecycle;
 
+    // ── V1.1 插件交互（命令 / 快捷键 / 事件）─────────────────────
+    // 注册发生在 App 构造末尾（装载期一次性），之后每帧只读这些表：
+    // 菜单项形状恒定是 MenuBarPanel 索引稳定性的前提（见 MenuBarPanel::definitions）。
+
+    /** 完全限定命令 id（"<插件id>.<局部id>"） => ['p'=>插件, 'c'=>PluginCommand] */
+    private array $pluginCommands = [];
+
+    /** 归一化快捷键 => 完全限定命令 id（只有绑定成功的才入表） */
+    private array $pluginShortcuts = [];
+
+    /** 完全限定命令 id => ['reason'=>…, 'owner'=>…]（供插件页给出可见提示） */
+    private array $pluginConflicts = [];
+
+    /** 装载期冻结的菜单项快照（每帧只读，形状不变） */
+    private array $pluginMenuSnapshot = [];
+
+    /** 事件重入保护：插件在回调里又触发事件时丢弃内层 */
+    private bool $inPluginEvent = false;
+
     public function __construct()
     {
         // R7：从 ~/.vicerc 加载持久化偏好。优先级 env > 配置文件 > 默认；
@@ -236,7 +258,12 @@ class App
         }
         // V1 插件：运行时动态加载（目录扫描 + 运行时 require，避开 composer autoload 的
         // Closure::bind 以兼容 AOT 产品版）。单个插件失败已在 Loader 内跳过，不影响启动。
-        $this->plugins = PluginLoader::load(__DIR__ . '/..');
+        // VICECODE_PLUGINS_DIR 可把插件根目录指到别处（测试用；仿 ConfigStore::pluginsPath()
+        // 的 env 覆盖惯例）—— 这样测试能在 tmp 下造命令型插件而不污染 plugins/。
+        $pluginBase = getenv('VICECODE_PLUGINS_DIR');
+        $this->plugins = PluginLoader::load(
+            (is_string($pluginBase) && $pluginBase !== '') ? $pluginBase : __DIR__ . '/..'
+        );
         // 插件配置注入：VSCode 式「插件声明默认（configDefaults）+ 用户配置覆盖」。
         // 可选能力——插件若实现 configure()/configDefaults() 则注入合并后的配置，否则跳过
         // （不影响未实现它们的插件）。用户配置来自插件专用文件 ConfigStore::loadPlugins()。
@@ -251,6 +278,9 @@ class App
                 $plugin->configure(array_merge($defaults, $user));
             }
         }
+        // 命令在**装载期**注册一次即可（不重新 require 插件，重注册只会产生 duplicate 冲突）
+        $this->registerPluginCommands();
+        $this->emitPluginEvent('app.ready');
     }
 
     /**
@@ -301,18 +331,254 @@ class App
                 $plugin->configure(array_merge($defaults, $user));
             }
         }
+        $this->emitPluginEvent('config.reloaded');
+    }
+
+    // ── V1.1：插件命令注册与执行 ──────────────────────────────
+
+    /**
+     * 装载期一次性注册插件命令，并冻结菜单快照。
+     *
+     * 容错哲学与 PluginLoader 一致：任一插件出错都只影响它自己（记进冲突表并在插件页提示），
+     * 不让它带崩启动或影响别的插件。命令 id 一律加插件 id 前缀，跨插件天然不撞。
+     *
+     * ⚠️ 只在构造末尾调用一次：热重载不重新 require 插件，重注册只会产生 duplicate 冲突。
+     */
+    private function registerPluginCommands(): void
+    {
+        foreach ($this->plugins as $p) {
+            if (!method_exists($p, 'commands')) {
+                continue;                       // V1 老插件（如 clock）零负担
+            }
+            if (!method_exists($p, 'executeCommand')) {
+                // 声明了命令却没有执行体 → 全部不可用，但要在插件页说清楚原因
+                $this->pluginConflicts[$p->id() . '.*'] = ['reason' => 'no_executor', 'owner' => ''];
+                continue;
+            }
+            try {
+                $cmds = $p->commands();
+            } catch (Throwable $e) {
+                $this->pluginConflicts[$p->id() . '.*'] = ['reason' => 'commands_threw', 'owner' => ''];
+                continue;
+            }
+            if (!is_array($cmds)) {
+                continue;
+            }
+            foreach ($cmds as $c) {
+                if (!$c instanceof PluginCommand) {
+                    continue;                   // 类型防御：插件返回了别的东西
+                }
+                $local = trim($c->id);
+                if ($local === '') {
+                    continue;
+                }
+                $fq = $p->id() . '.' . $local;
+                if (isset($this->pluginCommands[$fq])) {
+                    $this->pluginConflicts[$fq] = ['reason' => 'duplicate', 'owner' => ''];
+                    continue;
+                }
+                $this->pluginCommands[$fq] = ['p' => $p, 'c' => $c];
+                $this->bindShortcut($fq, $c);
+            }
+        }
+        $this->rebuildPluginMenuSnapshot();
+    }
+
+    /** 按 order 升序重建菜单快照（插件装载顺序由 glob 的目录名字典序决定） */
+    private function rebuildPluginMenuSnapshot(): void
+    {
+        $rows = [];
+        foreach ($this->pluginCommands as $fq => $e) {
+            $c = $e['c'];
+            $p = $e['p'];
+            $name = method_exists($p, 'name') ? (string) $p->name() : $p->id();
+            $rows[] = [
+                'label' => $name . ': ' . $c->title,   // 插件文案，不过 t()
+                'action' => 'plugin:' . $fq,
+                // 只有真正绑定成功的快捷键才显示：菜单不承诺一个按了没反应的组合
+                'shortcut' => $this->shortcutOf($fq) ?? '',
+                'order' => $c->order,
+            ];
+        }
+        usort($rows, static fn (array $a, array $b): int => $a['order'] <=> $b['order']);
+        $this->pluginMenuSnapshot = array_map(static fn (array $r): array => [
+            'label' => $r['label'],
+            'action' => $r['action'],
+            'shortcut' => $r['shortcut'],
+        ], $rows);
+    }
+
+    /** 该命令绑定成功的快捷键（归一化串），未绑定返回 null */
+    private function shortcutOf(string $fq): ?string
+    {
+        $k = array_search($fq, $this->pluginShortcuts, true);
+        return $k === false ? null : (string) $k;
+    }
+
+    /**
+     * 归一化插件声明的快捷键：只接受 `Ctrl+字母` 与 `F1`–`F12`，其余返回 null。
+     *
+     * 为什么不支持 Alt/Shift：真实 pty 下 `Alt+字母` 被解析成**不带修饰**的 CharKeyEvent，
+     * 与直接按该字母不可区分（MenuBarPanel 顶部注释有实测结论）；Shift+字母同理。
+     * @return string|null 归一化串（'Ctrl+K' / 'F3'），null = 语法不支持
+     */
+    private static function normalizeShortcut(string $s): ?string
+    {
+        $s = trim($s);
+        if (preg_match('/^ctrl\+([a-z])$/i', $s, $m) === 1) {
+            return 'Ctrl+' . strtoupper($m[1]);
+        }
+        if (preg_match('/^f(\d{1,2})$/i', $s, $m) === 1) {
+            $n = (int) $m[1];
+            return ($n >= 1 && $n <= 12) ? 'F' . $n : null;
+        }
+        return null;
+    }
+
+    /**
+     * 系统保留键：由帮助页登记表派生（自动同步，不写字面量），再加 F2/F10。
+     * 保留面刻意放宽到面板级键（Ctrl+S/W/P/N/L/C）——插件抢走任何一个，
+     * 用户都会觉得「这个编辑器坏了」，宁可保守。
+     * @return list<string>
+     */
+    private static function reservedShortcutKeys(): array
+    {
+        $out = ['F2', 'F10'];   // F2=交互式 PTY 捕获，F10=菜单栏（见 handle() 顶部）
+        foreach (KeyBindings::documentedCtrlKeys() as $letter) {
+            $out[] = 'Ctrl+' . strtoupper((string) $letter);
+        }
+        return array_values(array_unique($out));
+    }
+
+    /** 把事件映射成归一化快捷键串；不是可绑定键型返回 null */
+    private function pluginShortcutKeyFor(\PhpTui\Term\Event $event): ?string
+    {
+        if ($event instanceof CharKeyEvent) {
+            $ch = $event->char;
+            // php-tui/term 的 EventParser 已把控制字节（\x0b=Ctrl+K …）规范成对应字母 + CONTROL 修饰，
+            // 这里直接读规范后的 char 即可：转大写后用 ctype_alpha 判断，不逐个字母比字符，
+            // 否则会被 tests/m6_unit.php 的「快捷键漂移扫描」当成未登记的 Ctrl 绑定误报。
+            $up = strtoupper($ch);
+            if (strlen($up) === 1 && ctype_alpha($up) && ($event->modifiers & KeyModifiers::CONTROL)) {
+                return 'Ctrl+' . $up;
+            }
+            return null;
+        }
+        if ($event instanceof FunctionKeyEvent) {
+            return ($event->number >= 1 && $event->number <= 12) ? 'F' . $event->number : null;
+        }
+        return null;
+    }
+
+    /**
+     * 绑定一条命令声明的快捷键。失败只降级快捷键（命令仍可从菜单触发），并记冲突原因。
+     */
+    private function bindShortcut(string $fq, PluginCommand $c): void
+    {
+        if ($c->shortcut === null || trim($c->shortcut) === '') {
+            return;
+        }
+        $norm = self::normalizeShortcut($c->shortcut);
+        if ($norm === null) {
+            $this->pluginConflicts[$fq] = ['reason' => 'unsupported', 'owner' => $c->shortcut];
+            return;
+        }
+        if (in_array($norm, self::reservedShortcutKeys(), true)) {
+            $this->pluginConflicts[$fq] = ['reason' => 'reserved', 'owner' => $norm];
+            return;
+        }
+        if (isset($this->pluginShortcuts[$norm])) {
+            // 先到先得：装载顺序 = glob() 的目录名字典序
+            $this->pluginConflicts[$fq] = ['reason' => 'taken', 'owner' => $this->pluginShortcuts[$norm]];
+            return;
+        }
+        $this->pluginShortcuts[$norm] = $fq;
+    }
+
+    /** 菜单项快照（每帧只读，形状恒定）；无插件命令时为空数组 */
+    public function pluginMenuItems(): array
+    {
+        return $this->pluginMenuSnapshot;
+    }
+
+    /** 某插件注册成功的命令：局部 id => PluginCommand */
+    public function pluginCommandsOf(string $pluginId): array
+    {
+        $out = [];
+        foreach ($this->pluginCommands as $fq => $e) {
+            if ($e['p']->id() === $pluginId) {
+                $out[substr($fq, strlen($pluginId) + 1)] = $e['c'];
+            }
+        }
+        return $out;
+    }
+
+    /** 某命令绑定成功的快捷键（归一化串），未绑定返回 null */
+    public function pluginShortcutOf(string $fq): ?string
+    {
+        return $this->shortcutOf($fq);
+    }
+
+    /** 某插件的冲突信息：完全限定 id => ['reason','owner'] */
+    public function pluginConflictsOf(string $pluginId): array
+    {
+        $out = [];
+        foreach ($this->pluginConflicts as $fq => $info) {
+            if (str_starts_with($fq, $pluginId . '.')) {
+                $out[$fq] = $info;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * 执行一条插件命令（菜单 / 快捷键 / 状态栏点击三条路径的公共终点）。
+     * @return bool 是否命中已注册的命令
+     */
+    public function runPluginCommand(string $fq): bool
+    {
+        $entry = $this->pluginCommands[$fq] ?? null;
+        if ($entry === null) {
+            return false;
+        }
+        $p = $entry['p'];
+        $local = substr($fq, strlen($p->id()) + 1) ?: '';
+        try {
+            $p->executeCommand($local, $this);
+        } catch (Throwable $e) {
+            // 静默失败是最差的 UX：至少让用户知道这次点击/按键没有效果
+            $this->setMessage($this->t('plugins.command_failed', [
+                'plugin' => $p->id(),
+                'cmd' => $local,
+            ]));
+        }
+        return true;
     }
 
     /**
      * 聚合所有插件本帧的状态栏段，统一交给 StatusBarPanel 与系统段一起裁剪/摆放。
-     * @return array<int,array{k:string,p:int,o:int,t:string}>
+     * cmd 为该段声明且**确实注册成功**的完全限定命令 id（V1.1 状态栏点击用；失败则 null）。
+     * @return array<int,array{k:string,p:int,o:int,t:string,cmd:?string}>
      */
     public function pluginSegments(): array
     {
         $out = [];
         foreach ($this->plugins as $plugin) {
             foreach ($plugin->statusSegments($this) as $seg) {
-                $out[] = ['k' => $seg->key, 'p' => $seg->priority, 'o' => $seg->order, 't' => $seg->text];
+                $cmd = null;
+                if ($seg->commandId !== null) {
+                    $fq = $plugin->id() . '.' . $seg->commandId;
+                    if (isset($this->pluginCommands[$fq])) {
+                        $cmd = $fq;
+                    }
+                }
+                $out[] = [
+                    'k' => $seg->key,
+                    'p' => $seg->priority,
+                    'o' => $seg->order,
+                    't' => $seg->text,
+                    'cmd' => $cmd,
+                ];
             }
         }
         return $out;
@@ -353,7 +619,47 @@ class App
     /** 切换焦点面板（供面板回写，如侧栏点中条目后聚焦自己） */
     public function focus(string $panel): void
     {
-        $this->focusIndex = array_search($panel, self::PANELS);
+        $i = array_search($panel, self::PANELS, true);
+        if ($i === false) {
+            // 面板名不在常量里：静默忽略（老实现会把 false 赋给 int 属性，埋着 TypeError）
+            return;
+        }
+        $from = self::PANELS[$this->focusIndex] ?? $panel;
+        $this->focusIndex = $i;
+        if ($from !== $panel) {
+            $this->emitPluginEvent('focus.changed', ['from' => $from, 'to' => $panel]);
+        }
+    }
+
+    /**
+     * V1.1：向所有实现了可选方法 `onEvent(PluginEvent $e): void` 的插件广播应用事件。
+     *
+     * - 单个插件抛异常不影响其它插件与主流程（与 PluginLoader 的容错同套哲学）；
+     * - 事件回调里再触发事件会被丢弃（防重入），避免插件"打开文件→又触发事件"递归爆栈；
+     * - 这是**唯一**的出口：所有埋点都调它，插件只认事件名。
+     * @param array<string,mixed> $payload
+     */
+    public function emitPluginEvent(string $name, array $payload = []): void
+    {
+        if ($this->inPluginEvent) {
+            return;
+        }
+        $this->inPluginEvent = true;
+        try {
+            $ev = new PluginEvent($name, $payload, $this);
+            foreach ($this->plugins as $p) {
+                if (!method_exists($p, 'onEvent')) {
+                    continue;
+                }
+                try {
+                    $p->onEvent($ev);
+                } catch (Throwable $e) {
+                    // 单个插件出错只影响它自己；不让它带崩主流程
+                }
+            }
+        } finally {
+            $this->inPluginEvent = false;
+        }
     }
 
     public function hasTabs(): bool
@@ -734,6 +1040,12 @@ class App
             case 'plugins.open':
                 $this->pluginsPanel->open();
                 break;
+            default:
+                // V1.1：插件命令（`plugin:<插件id>.<局部id>`）
+                if (str_starts_with($id, 'plugin:')) {
+                    $this->runPluginCommand(substr($id, 7));
+                }
+                break;
         }
     }
 
@@ -859,6 +1171,16 @@ class App
             if ($bytes !== null) {
                 $this->terminal->sendToPty($bytes);
             }
+            return;
+        }
+
+        // V1.1 插件快捷键钩子。位置是刻意选的：
+        //  - 在菜单/插件浮层/帮助页独占之后 → 模态打开时不抢键；
+        //  - 在交互式 PTY 捕获之后 → 捕获态按键仍原样喂给子进程；
+        //  - 在 Ctrl+Q/T/V 等全局键之前能进到这里是因为它们已列入保留表，永远绑不到插件。
+        $pluginKey = $this->pluginShortcutKeyFor($event);
+        if ($pluginKey !== null && isset($this->pluginShortcuts[$pluginKey])) {
+            $this->runPluginCommand($this->pluginShortcuts[$pluginKey]);
             return;
         }
 
@@ -1041,6 +1363,15 @@ class App
             }
             if (isset($a['menu']) && $e->row === $a['menu']->position->y) {
                 if ($this->menuBar->clickBar($e->column)) {
+                    return;
+                }
+            }
+            // V1.1 状态栏插件段点击。**放在 tryStartDrag 之前**做双重保险：
+            // 状态栏行本就不在拖拽区间（mainTop..status.y-1），先判就彻底不会和拖拽争。
+            // 命中判据是 StatusBarPanel 最后一帧的 placed，与取舍同源（被丢弃的段不可点）。
+            if (isset($a['status']) && $e->row === $a['status']->position->y) {
+                $fq = $this->statusBar->clickSegment($e->column - $a['status']->position->x);
+                if ($fq !== null && $this->runPluginCommand($fq)) {
                     return;
                 }
             }
@@ -1385,7 +1716,8 @@ class App
                 break;
             case KeyCode::Tab:
                 // Ctrl+Tab 切 buffer 已由 EditorPanel::onKey 处理，这里只剩全局切焦点
-                $this->focusIndex = ($this->focusIndex + 1) % count(self::PANELS);
+                // 走 focus() 而不是直接改下标：这样焦点变化才会广播 focus.changed 事件
+                $this->focus(self::PANELS[($this->focusIndex + 1) % count(self::PANELS)]);
                 break;
             case KeyCode::Backspace:
                 // AI 输入框退格（AiPanel::onKey 已处理，这里是历史遗留的空分支，保留以防
@@ -1436,19 +1768,19 @@ class App
                     $topRow = $a['ai_input']->position->y;
                     if ($row === $topRow
                         && $this->ai->onToolbarBorderClick($col, $a['ai_input'])) {
-                        $this->focusIndex = array_search('ai_input', self::PANELS);
+                        $this->focus('ai_input');
                         return;
                     }
-                    $this->focusIndex = array_search('ai_input', self::PANELS);
+                    $this->focus('ai_input');
                     return;
                 }
                 if ($key === 'ai_stream') {
                     // 点击 AI 消息流：命中某条消息则整条复制到剪贴板（不拖拽选区），随后照常聚焦。
                     $this->ai->copyMessageAtRow($row, $a['ai_stream']);
-                    $this->focusIndex = array_search('ai_stream', self::PANELS);
+                    $this->focus('ai_stream');
                     return;
                 }
-                $this->focusIndex = array_search($key, self::PANELS);
+                $this->focus($key);
                 return;
             }
         }

@@ -60,6 +60,7 @@ final class MenuBarPanel
         $this->open = true;
         $this->active = $this->active; // 保留上次激活的菜单
         $this->sel = 0;
+        $this->clampSelection();       // 插件组数量可变，打开时先把下标夹回合法范围
     }
 
     public function close(): void
@@ -82,7 +83,7 @@ final class MenuBarPanel
     public function definitions(): array
     {
         $t = fn(string $k): string => $this->shell->t($k);
-        return [
+        $defs = [
             [
                 'label' => $t('menu.file'),
                 'items' => [
@@ -119,6 +120,33 @@ final class MenuBarPanel
                 ],
             ],
         ];
+        // V1.1：插件命令组**只追加在末尾** —— 系统 4 组的下标与项序一概不变，
+        // 下面那些按 $this->active/$this->sel 取数组的地方才不会错位。
+        $pluginItems = $this->shell->pluginMenuItems();
+        if ($pluginItems !== []) {
+            $defs[] = ['label' => $t('menu.plugins'), 'items' => $pluginItems];
+        }
+        return $defs;
+    }
+
+    /** 当前激活菜单的条目列表（带兜底，避免越界取到 undefined index） */
+    private function activeItems(): array
+    {
+        $defs = $this->definitions();
+        return $defs[$this->active]['items'] ?? [];
+    }
+
+    /**
+     * 把 active / sel 夹回合法范围。
+     * 插件组是运行时追加的（数量可变），菜单已打开时若条目数变化，旧下标可能越界。
+     */
+    private function clampSelection(): void
+    {
+        $defs = $this->definitions();
+        $n = count($defs);
+        $this->active = $n === 0 ? 0 : max(0, min($n - 1, $this->active));
+        $items = $this->activeItems();
+        $this->sel = $items === [] ? 0 : max(0, min(count($items) - 1, $this->sel));
     }
 
     /** 第 $i 个菜单在菜单栏里的起始 x 列（用于下拉对齐与鼠标命中） */
@@ -149,6 +177,7 @@ final class MenuBarPanel
         if (!$this->open) {
             return false;
         }
+        $this->clampSelection();
         $defs = $this->definitions();
         $nMenus = count($defs);
         switch ($e->code) {
@@ -164,13 +193,13 @@ final class MenuBarPanel
                 $this->sel = 0;
                 return true;
             case \PhpTui\Term\KeyCode::Up:
-                $items = $defs[$this->active]['items'];
+                $items = $this->activeItems();
                 if (count($items) > 0) {
                     $this->sel = ($this->sel - 1 + count($items)) % count($items);
                 }
                 return true;
             case \PhpTui\Term\KeyCode::Down:
-                $items = $defs[$this->active]['items'];
+                $items = $this->activeItems();
                 if (count($items) > 0) {
                     $this->sel = ($this->sel + 1) % count($items);
                 }
@@ -186,7 +215,7 @@ final class MenuBarPanel
     public function runActive(): void
     {
         $defs = $this->definitions();
-        $item = $defs[$this->active]['items'][$this->sel] ?? null;
+        $item = $this->activeItems()[$this->sel] ?? null;
         if ($item !== null) {
             $this->shell->menuAction($item['action']);
         }
@@ -232,7 +261,7 @@ final class MenuBarPanel
         }
         $startX = $this->menuStartX($this->active);
         $defs = $this->definitions();
-        $items = $defs[$this->active]['items'];
+        $items = $this->activeItems();
         $top = 1;                 // 菜单栏 row0 下方：面板顶边框所在绝对行
         $itemsTop = $top + 1;    // 跳过面板顶边框，条目从第 2 行起
         $itemW = $this->dropdownWidth();
@@ -268,7 +297,7 @@ final class MenuBarPanel
     private function dropdownWidth(): int
     {
         $defs = $this->definitions();
-        $items = $defs[$this->active]['items'];
+        $items = $this->activeItems();
         $w = 0;
         foreach ($items as $it) {
             $line = ' ' . $it['label'] . '  ' . $it['shortcut'] . ' ';
@@ -325,7 +354,7 @@ final class MenuBarPanel
         }
         $startX = $this->menuStartX($this->active);
         $defs = $this->definitions();
-        $items = $defs[$this->active]['items'];
+        $items = $this->activeItems();
         $contentW = $this->dropdownWidth();   // 下拉内容（含内边距）的宽度
         $contentH = count($items);            // 条目数
         // ⚠️ BlockWidget 的边框要占 2 列 + 2 行，故面板尺寸必须算上边框，

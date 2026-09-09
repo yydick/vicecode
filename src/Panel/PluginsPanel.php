@@ -149,12 +149,48 @@ final class PluginsPanel
             $tickStr = $tick !== null ? "tick={$tick}s" : 'tick=none';
             $lines[] = '• ' . $id . '  [' . $t('plugins.enabled') . ' · ' . $tickStr . ']';
             $lines[] = '   ' . $cfgStr;
+            // V1.1：命令清单（快捷键只列绑定成功的，避免菜单/页面承诺一个按了没反应的组合）
+            $cmds = $this->shell->pluginCommandsOf($id);
+            if ($cmds !== []) {
+                $lines[] = '   ' . $t('plugins.commands') . ' (' . count($cmds) . '):';
+                foreach ($cmds as $local => $c) {
+                    $sc = $this->shell->pluginShortcutOf($id . '.' . $local);
+                    $lines[] = '     ⌘ ' . $c->title . ($sc !== null ? '  (' . $sc . ')' : '');
+                }
+            }
+            // 冲突必须可见：静默忽略一个快捷键，用户会以为插件坏了
+            foreach ($this->shell->pluginConflictsOf($id) as $info) {
+                $lines[] = '     ⚠ ' . $this->conflictText($info);
+            }
             $lines[] = '';
         }
         $lines[] = $t('plugins.config_path') . ': ' . ConfigStore::pluginsPath();
         $lines[] = $t('plugins.hint');
         $lines[] = $t('plugins.close');
         return $lines;
+    }
+
+    /**
+     * 冲突原因 → 可见文案（都用 i18n，避免硬编码中文）。
+     * @param array{reason:string,owner:string} $info
+     */
+    private function conflictText(array $info): string
+    {
+        $t = $this->shell->t(...);           // 带占位符的翻译（闭包 $t 只收一个参数，不能复用）
+        $reason = $info['reason'] ?? '';
+        $owner = $info['owner'] ?? '';
+        switch ($reason) {
+            case 'reserved':
+                return $t('plugins.shortcut_reserved', ['key' => $owner]);
+            case 'taken':
+                return $t('plugins.shortcut_taken', ['key' => $owner, 'owner' => $owner]);
+            case 'unsupported':
+                return $t('plugins.shortcut_unsupported', ['key' => $owner]);
+            case 'no_executor':
+                return $t('plugins.no_executor');
+            default:
+                return $t('plugins.command_unavailable', ['reason' => $reason]);
+        }
     }
 
     public function contentLineCount(): int

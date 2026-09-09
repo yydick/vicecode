@@ -41,6 +41,12 @@ final class StatusBarPanel
     /** 兜底截断用的省略号（1 列） */
     private const ELLIPSIS = '…';
 
+    /** 上次 assemble 的宽度（调试与断言用） */
+    private int $lastWidth = 0;
+
+    /** 上次 assemble 各段的命中矩形（V1.1 状态栏点击的唯一判据） */
+    private array $lastPlaced = [];
+
     /**
      * 值型段截断后保底要有的宽度（含标签前缀与省略号）。
      * 低于这个宽度，`目录=…rc` 这种结果也读不出信息，不如整段丢弃把位置让给别人。
@@ -59,13 +65,21 @@ final class StatusBarPanel
     /**
      * 组装状态栏文本，保证显示宽度 <= $width。
      *
-     * @return array{text:string,dropped:string[]} dropped 供测试断言「丢了哪些」
+     * @return array{text:string,dropped:string[],placed:array<int,array{k:string,cmd:?string,x0:int,x1:int}>}
+     *         dropped 供测试断言「丢了哪些」；placed 是最后一段的**命中矩形**（相对状态栏左沿的列），
+     *         只有它才是点击判据 —— 与取舍同源，被丢弃的段天然不可点。
      */
     public function assemble(int $width): array
     {
-        // 确认态独占整条：用户在做"要不要丢改动"这种决定，必须完整可读
+        // 确认态独占整条：用户在做"要不要丢改动"这种决定，必须完整可读（也不可点）
         if ($this->shell->confirm !== null) {
-            return ['text' => $this->hardTruncate($this->confirmText(), max(0, $width)), 'dropped' => []];
+            $this->lastPlaced = [];
+            $this->lastWidth = $width;
+            return [
+                'text' => $this->hardTruncate($this->confirmText(), max(0, $width)),
+                'dropped' => [],
+                'placed' => [],
+            ];
         }
 
         $segs = $this->segments();
@@ -94,11 +108,63 @@ final class StatusBarPanel
         // 丢弃看 p，摆放看 o。
         usort($kept, static fn(array $a, array $b): int => $a['o'] <=> $b['o']);
 
+        // V1.1：算出本帧各段的 x 区间（必须与 join() 逐列对齐，否则点击会错位）
+        $this->lastWidth = $width;
+        $this->lastPlaced = $this->placeWidths($kept, $width);
+
         $text = $this->join($kept);
         if (DisplayWidth::dispWidth($text) > $width) {
             $text = $this->hardTruncate($text, $width);
         }
-        return ['text' => $text, 'dropped' => $dropped];
+        return ['text' => $text, 'dropped' => $dropped, 'placed' => $this->lastPlaced];
+    }
+
+    /**
+     * 按最终 join 顺序给出每段的列区间 [x0,x1]（相对状态栏左沿，含端点）。
+     * 必须与 join() 逐列对齐：join() 结果带前导 1 空格 → 起始 x=1；
+     * 't'==='' 的段被 join() 跳过 → 不产出矩形；段间分隔符不归入任何段。
+     * @param array<int,array{k:string,p:int,o:int,t:string,pfix?:string,cmd?:?string}> $kept
+     * @return array<int,array{k:string,cmd:?string,x0:int,x1:int}>
+     */
+    private function placeWidths(array $kept, int $width): array
+    {
+        $placed = [];
+        $x = 1;                                     // join() 的前导空格占 1 列
+        $sepW = DisplayWidth::dispWidth(self::SEP);
+        foreach ($kept as $s) {
+            if (($s['t'] ?? '') === '') {
+                continue;
+            }
+            $w = DisplayWidth::dispWidth(($s['pfix'] ?? '') . $s['t']);
+            if ($w <= 0 || $x >= $width) {
+                continue;
+            }
+            $placed[] = [
+                'k' => $s['k'],
+                'cmd' => $s['cmd'] ?? null,
+                'x0' => $x,
+                'x1' => min($x + $w - 1, $width - 1),
+            ];
+            $x += $w + $sepW;
+        }
+        return $placed;
+    }
+
+    /**
+     * 命中测试：相对状态栏左沿的列 → 该段要执行的完全限定命令 id。
+     * 未命中（空列 / 分隔符 / 系统段 / 无命令的段 / 已被整条确认占用）返回 null。
+     *
+     * 取舍：只有段**文本所占列**算命中，宁可难点也不让"点错也触发"。
+     * V1.1 不给可点段加视觉标识，文档建议插件自己在文案里加标记（如 `🕐 12:00 ⟳`）。
+     */
+    public function clickSegment(int $x): ?string
+    {
+        foreach ($this->lastPlaced as $p) {
+            if ($p['cmd'] !== null && $x >= $p['x0'] && $x <= $p['x1']) {
+                return $p['cmd'];
+            }
+        }
+        return null;
     }
 
     public function text(int $width = 0): string
@@ -202,6 +268,8 @@ final class StatusBarPanel
             'p' => $seg['p'],
             'o' => $seg['o'],
             't' => $pfix . self::ELLIPSIS . DisplayWidth::mbTailDisp($seg['t'], $valueRoom),
+            // 保真：截断只改文本，命令归属不变（插件段无 pfix 走不到这里，但别让将来踩坑）
+            'cmd' => $seg['cmd'] ?? null,
         ];
     }
 

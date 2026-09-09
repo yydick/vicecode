@@ -173,6 +173,8 @@ final class TerminalPanel
         }
         $got = $this->runner->poll(function (string $bytes, bool $isErr): void {
             $this->buf->append($bytes, $isErr);
+            // V1.1：给插件的是**原始字节**（可能含 ANSI 与 OSC 7 的 cwd 上报），且不节流
+            $this->shell->emitPluginEvent('terminal.output', ['bytes' => $bytes]);
         });
         if (!$this->runner->isRunning()) {
             // 命令结束：结算未终止的半行，并把视口拉回底部看结果
@@ -202,6 +204,7 @@ final class TerminalPanel
         if ($bytes === '') {
             return false;
         }
+        $this->shell->emitPluginEvent('terminal.output', ['bytes' => $bytes]);
         $this->emu?->write($bytes);
         // 消费 shell 经 OSC 回显的工作目录（实时 cwd 捕获）
         $cwd = $this->emu?->consumeCwd();

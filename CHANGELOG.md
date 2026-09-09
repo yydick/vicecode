@@ -10,7 +10,7 @@
 
 ## [Unreleased]
 
-> 本轮主题：**边界深挖**（侧栏横滚 / 深层与超长路径 / 状态栏长值）。全部改动**尚未提交**。
+> 本轮主题：**边界深挖**（侧栏横滚 / 深层与超长路径 / 状态栏长值）+ **插件系统 V1.1**（命令钩子 / 状态栏段点击 / 生命周期事件）。全部改动**尚未提交**。
 
 ### 修复
 
@@ -32,6 +32,11 @@
 
 - `DisplayWidth::mbTailDisp()`：按显示列宽取**尾部**（字素边界对齐），供状态栏截断复用。
 - `DisplayWidth::stripControl()`：字节级剔除控制字符（非法 UTF-8 也不会让 preg 返回 null）。
+- **插件系统 V1.1**（详见 `docs/plugins.md` §3.6–3.8，向后兼容 V1 老插件）：
+  - **命令钩子**：插件通过 `commands()` 声明 `PluginCommand`，由菜单「插件（🔌）」组与可选快捷键（`Ctrl+字母` / `F1`–`F12`）触发，经 `executeCommand(string $id, App $app)` 执行。快捷键与系统保留键或其它插件撞键时自动降级为该命令不可用（仍可从菜单触发），并在「已安装插件」浮层给出原因。
+  - **状态栏段点击**：`StatusSegment` 第 5 参数绑定命令局部 id，渲染时记录每段 `[起始列, 宽度]`，点击命中即触发其命令；被裁剪丢弃的段不可点。
+  - **生命周期事件**：`onEvent(PluginEvent)` 接收 `app.ready` / `config.reloaded` / `focus.changed` / `editor.opened|saved|bufferChanged` / `terminal.output` 等事件，带防重入与单插件容错。`terminal.output` 给的是经过 pty 的**原始字节**（可能含 ANSI 与 OSC 7 的 cwd 上报），插件自行解析。
+  - 配套值对象 `src/Plugin/PluginCommand.php`、`src/Plugin/PluginEvent.php`；加载支持环境变量 `VICECODE_PLUGINS_DIR` 覆盖插件根目录。
 
 ### 测试
 
@@ -41,7 +46,9 @@
 - `tests/m1_smoke.php` 增加侧栏 ←/→ 导航 6 条断言（展开 / 进子项 / 回父级 / 折叠 / 文件上无动作）。
 - `tests/hscroll_unit.php` 补充五节：横滚后点击定位光标（ASCII / CJK —— 屏幕显示列必须加 `scrollLeft` 才是字符索引）、超长行 200k（上界钳到「行宽 − 视口宽」、行尾可见、渲染 60ms）、极小视口（8×3 / 5×3 / 2×2）横滚不为负不抛异常、**终端长输出**（5000 列上界与行尾可见、横滚后拖拽选区复制的内容必须跟着偏移、极小视口）、**多行文件光标在短行也能横滚**（上界为可见最长行）。编辑器相关节**没发现新 bug**（本来就正确），终端那节抓到 B10。 `tests/probe_edge_deep.php`、`tests/probe_tree_hscroll.php`（`run_tests.sh` 会跳过带 `probe` 的文件）。
 - `tests/m6_unit.php` 增加「状态栏长值截断 + 外部值净化」11 条断言。
-- 全量 **51/51 通过**（`tools/run_tests.sh`，约 240s）。所有新断言都做了「回退修复注入」校验，确认能失败。
+- 新增 `tests/plugin_v11_unit.php`（headless）：命令注册 / 菜单合并且不破坏前 4 组 action / 快捷键三级冲突（系统保留 · 占用 · 语法不支持）/ 状态栏段点击命中（逐列含 CJK、dropped 段不可点、confirm 态不可点）/ 生命周期事件序列（标准 6 点 + 防重入）。所有新断言做过回退注入校验。
+- 新增 `tests/pty_plugin_v11.php`：真实 pty 复验 Ctrl+K 快捷键、`F10`→右×4→`Enter` 菜单链路、状态栏段点击（含点空白列不触发）三条端到端路径。
+- 全量 **54/54 通过**（`tools/run_tests.sh`，约 244s）。所有新断言都做了「回退修复注入」校验，确认能失败。
 
 ### 发版前要做
 
