@@ -285,60 +285,71 @@ final class AiPanel
      */
     private function buildLinesWithMap(int $W): array
     {
-        $lines = [];
-        $map = [];
+        // 先构造「未横滚」的原始行（text + 样式 + 所属消息下标），最后统一切片。
+        // 这样 hScroll 的上界能在本帧就算出来并生效，不必依赖上一帧的统计。
+        /** @var list<array{0:string,1:Style,2:int}> $rows */
+        $rows = [];
         $chat = $this->chat();
 
         if ($chat->messages() === []) {
             // 空态给操作提示：Provider/模型怎么切、怎么停。没有这段用户无从发现 Ctrl+P。
             foreach ($this->helpLines() as $t) {
-                $lines[] = Line::fromSpans(Span::styled(
-                    DisplayWidth::mbSubDisp($t, $this->hScroll, $W),
-                    $this->shell->theme->style('aiDim'),
-                ));
-                $map[] = -1;
+                $rows[] = [$t, $this->shell->theme->style('aiDim'), -1];
             }
-            return ['lines' => $lines, 'map' => $map];
-        }
+        } else {
+            foreach ($chat->messages() as $i => $m) {
+                $isUser = $m['role'] === 'user';
+                $prefix = $isUser ? 'You: ' : 'AI: ';
+                $style = $isUser
+                    ? $this->shell->theme->style('aiUser')
+                    : Style::default();
 
-        foreach ($chat->messages() as $i => $m) {
-            $isUser = $m['role'] === 'user';
-            $prefix = $isUser ? 'You: ' : 'AI: ';
-            $style = $isUser
-                ? $this->shell->theme->style('aiUser')
-                : Style::default();
+                $body = $m['content'];
+                // 最后一条 assistant 消息且正在生成 → 末尾追加光标，让人看出还在出字
+                $streaming = !$isUser && $chat->isStreaming() && $i === count($chat->messages()) - 1;
+                if ($streaming) {
+                    $body .= '▌';
+                }
 
-            $body = $m['content'];
-            // 最后一条 assistant 消息且正在生成 → 末尾追加光标，让人看出还在出字
-            $streaming = !$isUser && $chat->isStreaming() && $i === count($chat->messages()) - 1;
-            if ($streaming) {
-                $body .= '▌';
+                $indent = str_repeat(' ', mb_strlen($prefix));
+                // ⚠️ 正文要按「扣除缩进后的宽度」折行：续行会再加上 $indent，
+                // 若按整宽 $W 折，续行就是 $W + 缩进宽 → 超出面板，
+                // 末尾被切掉（长消息的续行末尾会少几个字符，看起来像内容丢了）。
+                $bodyW = max(1, $W - mb_strlen($indent));
+                $first = true;
+                foreach (DisplayWidth::mbWrapDisp($body, $bodyW) as $wl) {
+                    // 首行带前缀、续行用等宽缩进对齐，否则换行后看起来像新的一条消息
+                    $rows[] = [$first ? $prefix . $wl : $indent . $wl, $style, $i];
+                    $first = false;
+                }
             }
 
-            $indent = str_repeat(' ', mb_strlen($prefix));
-            $first = true;
-            foreach (DisplayWidth::mbWrapDisp($prefix . $body, max(1, $W)) as $wl) {
-                // 续行要缩进对齐首行的正文起点，否则换行后看起来像新的一条消息
-                $text = $first ? $wl : $indent . $wl;
-                $first = false;
-                $lines[] = Line::fromSpans(Span::styled(
-                    DisplayWidth::mbSubDisp($text, $this->hScroll, $W),
-                    $style,
-                ));
-                $map[] = $i;
-            }
-        }
-
-        if ($chat->error() !== null) {
-            foreach (DisplayWidth::mbWrapDisp('! ' . $chat->error(), max(1, $W)) as $wl) {
-                $lines[] = Line::fromSpans(Span::styled(
-                    DisplayWidth::mbSubDisp($wl, $this->hScroll, $W),
-                    $this->shell->theme->style('aiErr'),
-                ));
-                $map[] = -1;
+            if ($chat->error() !== null) {
+                foreach (DisplayWidth::mbWrapDisp('! ' . $chat->error(), max(1, $W)) as $wl) {
+                    $rows[] = [$wl, $this->shell->theme->style('aiErr'), -1];
+                }
             }
         }
 
+        // ⚠️ hScroll 必须钳到「最宽行 - 视口宽」：消息行是先软换行再渲染的，
+        // 行宽**本来就不超过 $W**，横滚不会露出任何新内容，只会把左侧切掉、右侧留白；
+        // 没有上界时一路滚下去整片空白（内容像丢了），且要反向滚很多次才回得来。
+        // 上界通常为 0（= 不可横滚），只有退化到极窄视口出现超宽行时才允许滚一点。
+        $maxW = 0;
+        foreach ($rows as $r) {
+            $maxW = max($maxW, DisplayWidth::dispWidth($r[0]));
+        }
+        $this->hScroll = max(0, min($this->hScroll, max(0, $maxW - $W)));
+
+        $lines = [];
+        $map = [];
+        foreach ($rows as [$text, $style, $msgIdx]) {
+            $lines[] = Line::fromSpans(Span::styled(
+                DisplayWidth::mbSubDisp($text, $this->hScroll, $W),
+                $style,
+            ));
+            $map[] = $msgIdx;
+        }
         return ['lines' => $lines, 'map' => $map];
     }
 

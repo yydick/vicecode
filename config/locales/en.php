@@ -166,6 +166,7 @@ return [
     'help.t_cancel'        => 'Interrupt running command',
     'help.t_interactive'   => 'F2 enter / exit interactive terminal',
     'help.x_move'          => 'Move selection',
+    'help.x_nav'           => 'Expand (→ into child) / collapse (← to parent)',
     'help.x_enter'         => 'Expand/collapse dir or open file',
     'help.x_open'          => 'Open file',
     'help.x_arrow'         => 'Expand / collapse',

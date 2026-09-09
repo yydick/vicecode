@@ -76,6 +76,44 @@ final class DisplayWidth
         return $out;
     }
 
+    /**
+     * 取**末尾** $disp 显示列（在字素边界对齐，不劈开 CJK）。
+     * 用于「放不下时保留尾部」的截断：路径/文件名这类信息，尾部（当前目录名、
+     * 扩展名）比头部更有用，且头部往往还有标签前缀占位置。
+     */
+    public static function mbTailDisp(string $s, int $disp): string
+    {
+        if ($disp <= 0 || $s === '') {
+            return '';
+        }
+        $w = self::dispWidth($s);
+        if ($w <= $disp) {
+            return $s;
+        }
+        $out = '';
+        $acc = 0;
+        foreach (array_reverse(mb_str_split($s)) as $g) {
+            $cw = self::dispWidth($g);
+            if ($acc + $cw > $disp) {
+                break;
+            }
+            $out = $g . $out;
+            $acc += $cw;
+        }
+        return $out;
+    }
+
+    /**
+     * 剔除控制字符（\x00–\x1F、\x7F，含 \n / \r / ESC 序列的起始字节）。
+     * 用于净化外部上报值（shell 经 OSC 报的 cwd、文件名、分支名）：控制字符
+     * 不显示却仍被 dispWidth 算作 1 列，会让固定宽度的面板少显内容。
+     * 走字节级替换（不加 /u），非法 UTF-8 输入也不会让 preg 返回 null。
+     */
+    public static function stripControl(string $s): string
+    {
+        return (string) preg_replace('/[\x00-\x1F\x7F]/', '', $s);
+    }
+
     /** 按显示列宽右侧补空格对齐 */
     public static function mbPadDisp(string $s, int $disp): string
     {

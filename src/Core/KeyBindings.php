@@ -73,6 +73,7 @@ final class KeyBindings
             ]),
             self::group('help.group_explorer', [
                 ['↑ / ↓', 'help.x_move'],
+                ['← / →', 'help.x_nav'],
                 ['Enter', 'help.x_enter'],
                 ['keys.click_file', 'help.x_open'],
                 ['keys.click_triangle', 'help.x_arrow'],

@@ -113,6 +113,40 @@ foreach ($vis1 as $n) {
     }
 }
 check(count($vis1) === 3 && $hasB, '展开目录后子项 b.txt 可见');
+
+// ←/→ 树导航（VSCode 语义）：→ 展开/进子项，← 折叠/回父级
+$oldCwd = getcwd();
+chdir($dir);
+$appNav = new App();
+$appNav->focus('sidebar');
+$navVp = Area::fromDimensions(120, 40);   // 本节在第 4 部分的 $vp 之前，自建视口
+$navTree = $appNav->sidebar->tree();
+$key = static fn (string $code): CodedKeyEvent => CodedKeyEvent::new(constant(KeyCode::class . '::' . $code), 0);
+$selName = static function () use ($appNav, $navTree): string {
+    foreach ($navTree->visible() as $n) {
+        if ($n->path === $appNav->selectedPath) {
+            return $n->name;
+        }
+    }
+    return '';
+};
+// 选中 sub（目录，未展开）
+$appNav->selectedPath = $dir . '/sub';
+$appNav->handle($key('Right'), $navVp);
+check($selName() === 'sub' && $navTree->visible()[0]->expanded === true, '→：未展开的目录被展开（选中项不变）');
+$appNav->handle($key('Right'), $navVp);
+check($selName() === 'b.txt', '→：已展开的目录 → 选中其第一个子项 b.txt');
+$appNav->handle($key('Left'), $navVp);
+check($selName() === 'sub', '←：在子项上 → 回到父目录 sub');
+check($navTree->visible()[0]->expanded === true, '←：回到父目录时只移动选中，不折叠父目录');
+$appNav->handle($key('Left'), $navVp);
+check($navTree->visible()[0]->expanded === false, '←：在已展开的目录上 → 折叠');
+// 文件上按 → 不应有任何动作
+$appNav->selectedPath = $dir . '/a.txt';
+$appNav->handle($key('Right'), $navVp);
+check($selName() === 'a.txt', '→：文件上按 → 无动作（没有下一级）');
+chdir($oldCwd ?: '/');
+
 // 打开文件
 $app = new App();
 $found = null;

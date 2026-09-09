@@ -187,11 +187,25 @@ In V1 a plugin can extend the **bottom status bar** — it injects custom segmen
 
 Plugin files are plain PHP; the core loader deliberately uses a runtime `require`, so plugins can be dropped in or removed independently without rebuilding the app.
 
+**Configuring plugins**: open *File → Installed Plugins…* (or the 🧩 *Extensions* tab in the sidebar, then `Enter`) and ViceCode opens its own editor on the plugin-only config file `~/.vicecode.plugins.json` (separate from the app's own `~/.vicerc`). `Ctrl+S` saves and hot-reloads the plugin config — no restart, no external editor.
+
 Full plugin developer guide (authoring / loading / segment fields / testing) is at [docs/plugins.md](docs/plugins.md).
+
+Release notes: [CHANGELOG.md](CHANGELOG.md). Root-cause and regression-test catalogue for every fixed bug: [docs/BUGFIXES.md](docs/BUGFIXES.md).
 
 ## Tests
 
-`tests/` contains both headless unit tests and real-pty end-to-end acceptance tests (require a real terminal; wrapped in `timeout` as a safety net):
+Run everything with the bundled runner (pass/fail is decided by each test's **exit code**; supports name filtering and a per-test timeout):
+
+```bash
+tools/run_tests.sh          # all tests, ~220s
+tools/run_tests.sh pty      # only tests whose filename contains "pty"
+composer test               # same thing
+```
+
+> Do not judge results by grepping the output — test names contain words like "Uncaught"/"Fatal", and not every test prints a PASS marker. Always rely on exit codes.
+
+`tests/` contains both headless unit tests and real-pty end-to-end acceptance tests (require a real terminal; wrapped in `timeout` as a safety net). Or run individual tests:
 
 ```bash
 php tests/interactive_term_unit.php     # Interactive PTY: emulator + pty pipe headless unit test

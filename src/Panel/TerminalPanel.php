@@ -636,10 +636,11 @@ final class TerminalPanel
                 continue;
             }
             $text = $src['text'] ?? '';
-            // 显示文本 = mbSubDisp(text, hScroll, W)：可见文本从 inner.x 起、显示列 0..W-1。
-            // 选区绝对列 → 可见文本显示列 = absCol - inner.x - hScroll。
-            $dispA = max(0, $c0 - $inner->position->x - $this->hScroll);
-            $dispB = max(0, $c1 - $inner->position->x - $this->hScroll);
+            // 显示文本 = mbSubDisp(text, hScroll, W)：屏幕上第 d 列显示的是**文本第 d+hScroll 列**。
+            // 故选区绝对列 → 文本显示列 = (absCol - inner.x) + hScroll（**加**回偏移）。
+            // 曾写成减 hScroll（符号反了）：未横滚时无差别，一横滚抓到的就是行首那几个字。
+            $dispA = max(0, $c0 - $inner->position->x + $this->hScroll);
+            $dispB = max(0, $c1 - $inner->position->x + $this->hScroll);
             $chA = DisplayWidth::mbDispToCharIndex($text, $dispA);
             $chB = DisplayWidth::mbDispToCharIndex($text, $dispB + 1);
             $out[] = mb_substr($text, $chA, $chB - $chA);

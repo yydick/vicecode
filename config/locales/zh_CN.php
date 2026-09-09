@@ -158,6 +158,7 @@ return [
     'help.t_cancel'        => '中断正在跑的命令',
     'help.t_interactive'   => 'F2 进入 / 退出交互终端',
     'help.x_move'          => '移动选中',
+    'help.x_nav'           => '展开（→ 进入子项）/ 折叠（← 回父级）',
     'help.x_enter'         => '展开折叠目录 或 打开文件',
     'help.x_open'          => '打开文件',
     'help.x_arrow'         => '展开 / 折叠',
