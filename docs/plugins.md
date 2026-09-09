@@ -135,7 +135,7 @@ interface PluginInterface
 }
 ```
 
-此外还有两个**可选**能力（VSCode 式「插件声明默认 + 用户 `~/.vicerc` 覆盖」）：
+此外还有两个**可选**能力（VSCode 式「插件声明默认 + 用户配置覆盖」）：
 
 ```php
 // 可选：返回本插件默认配置（键 => 默认值）。不实现则无默认。
@@ -146,87 +146,7 @@ public function configDefaults(): array;
 public function configure(array $config): void;
 ```
 
-用户配置写在 `~/.vicerc` 的 `plugins.<id>` 段（详见 §3.4）。`configDefaults()` 与用户配置会做 `array_merge`（用户覆盖默认），再传给 `configure()`。
-
-### 3.4 配置插件（可选能力）
-
-VSCode 的插件都是可配置的：扩展在 `package.json` 里声明默认设置，用户在 `settings.json` 里覆盖。ViceCode 沿用同一模型：
-
-- **插件声明默认**：在插件类里实现 `configDefaults(): array`，返回 `键 => 默认值`。
-- **用户覆盖**：编辑 `~/.vicerc`，在 `plugins.<id>` 段写入要覆盖的键。
-- **合并与注入**：核心在启动时做 `array_merge($defaults, $userConfig)`，把结果传给 `configure(array $config)`。
-- 未实现 `configDefaults()` / `configure()` 的插件**完全不受影响**——配置是可选能力，核心用 `method_exists` 探测。
-
-> `~/.vicerc` 同时也是应用自身（布局/主题/语言）的持久化文件，由 `ConfigStore` 读写。
-> 应用退出时的 `saveConfig()` 采用「合并已有配置」策略，因此你手改的 `plugins` 段**不会被冲掉**。
-> 测试或沙箱环境可用环境变量 `VICECODE_CONFIG` 指定配置文件路径，避免污染真实家目录。
-
-配置写入示例（`~/.vicerc`）：
-
-```json
-{
-    "plugins": {
-        "clock": {
-            "timezone": "Asia/Shanghai",
-            "format": "H:i:s"
-        }
-    }
-}
-```
-
-插件侧读取：
-
-```php
-class ClockPlugin implements \App\Plugin\PluginInterface
-{
-    private string $tz = 'Asia/Shanghai';
-    private string $fmt = 'H:i:s';
-
-    public function configDefaults(): array
-    {
-        return ['timezone' => 'Asia/Shanghai', 'format' => 'H:i:s'];
-    }
-
-    public function configure(array $c): void
-    {
-        $tz = $c['timezone'] ?? 'Asia/Shanghai';
-        if ($tz === 'local') {
-            $tz = date_default_timezone_get();
-        }
-        $this->tz = is_string($tz) && $tz !== '' ? $tz : 'Asia/Shanghai';
-        $this->fmt = is_string($c['format'] ?? null) ? $c['format'] : 'H:i:s';
-    }
-
-    public function statusSegments(\App\App $app): array
-    {
-        $dt = new \DateTime('now', new \DateTimeZone($this->tz));
-        return [new \App\Plugin\StatusSegment('clock', $dt->format($this->fmt), 55, 12)];
-    }
-    // id() / tickInterval() 略
-}
-```
-
-### 3.4.1 配置入口（UI）
-
-配置**就在 ViceCode 自己的编辑器里改**——我们本身就是 IDE，不会甩给你外部编辑器。两个入口都能到达：
-
-- **菜单栏「文件 → 已安装插件...」**：打开一个浮层，列出所有已加载插件及其当前**有效配置**（默认 ∩ 用户覆盖）。
-- **侧栏「扩展」tab（🧩 图标）**：同样列出已加载插件，选中后 `↑/↓` 移动、`Enter` 或点击行打开配置。
-
-在浮层里按 **`Enter`**（或在侧栏扩展 tab 里 `Enter`/点击）即会**用 ViceCode 自带的编辑器打开插件专用配置文件 `~/.vicecode.plugins.json`**——这就是 VSCode「打开设置(JSON)」的同款体验。`~/.vicecode.plugins.json` 与 ViceCode 自身配置 `~/.vicerc`（存布局/主题/语言）**完全分离**，互不干扰。文件内容即「插件 id => 配置」映射，例如：
-
-```json
-{
-    "clock": { "timezone": "Asia/Shanghai", "format": "H:i:s" }
-}
-```
-
-直接改对应插件的段，`Ctrl+S` 保存**立即重新加载配置生效**，无需退出进程（相当于 VSCode 的「重载窗口」，但更顺滑）。
-
-> 浮层是模态的：打开期间 `Esc` / `q` 关闭，方向键 / 翻页滚动，`Enter` 在 ViceCode 编辑器内打开**插件专用**配置文件。
-> 测试或沙箱可用环境变量 `VICECODE_PLUGINS_CONFIG` 指定插件配置文件路径，避免污染真实家目录。
-> 兼容说明：旧版写在 `~/.vicerc` 的 `plugins` 段仍会被读取（一次性回退），用户首次在 ViceCode 内编辑后会写入专用文件。
-
+用户配置写在插件专用文件 `~/.vicecode.plugins.json` 的 `<id>` 段（详见 §3.4）。`configDefaults()` 与用户配置会做 `array_merge`（用户覆盖默认），再传给 `configure()`。
 
 ### 3.1 `statusSegments(App $app)`
 
@@ -289,6 +209,85 @@ final class StatusSegment
 - 想让段「靠左显示」→ order 取较小值（如 0–5）；「靠右」→ order 取较大值（如 11–15）。
 - 不要与系统段抢最高优先级（message/file 等），它们没有第二处显示位置，丢了用户会困惑。
 
+### 3.4 配置插件（可选能力）
+
+VSCode 的插件都是可配置的：扩展在 `package.json` 里声明默认设置，用户在 `settings.json` 里覆盖。ViceCode 沿用同一模型：
+
+- **插件声明默认**：在插件类里实现 `configDefaults(): array`，返回 `键 => 默认值`。
+- **用户覆盖**：编辑**插件专用配置文件** `~/.vicecode.plugins.json`，在 `<id>` 段写入要覆盖的键（推荐直接在 ViceCode 内打开编辑，见 §3.5）。
+- **合并与注入**：核心在启动时做 `array_merge($defaults, $userConfig)`，把结果传给 `configure(array $config)`。
+- 未实现 `configDefaults()` / `configure()` 的插件**完全不受影响**——配置是可选能力，核心用 `method_exists` 探测。
+
+> **插件配置与 ViceCode 自身配置是两个文件**：插件专用 `~/.vicecode.plugins.json`（整份即「插件 id => 配置」映射，**无 `plugins` 包裹层**），
+> 应用自身（布局/主题/语言）用 `~/.vicerc`，由 `ConfigStore` 分别读写、互不干扰。
+> 测试或沙箱环境可用环境变量 `VICECODE_PLUGINS_CONFIG` 指定插件配置文件路径，避免污染真实家目录。
+
+配置写入示例（`~/.vicecode.plugins.json`）：
+
+```json
+{
+    "clock": {
+        "timezone": "Asia/Shanghai",
+        "format": "H:i:s"
+    }
+}
+```
+
+插件侧读取：
+
+```php
+class ClockPlugin implements \App\Plugin\PluginInterface
+{
+    private string $tz = 'Asia/Shanghai';
+    private string $fmt = 'H:i:s';
+
+    public function configDefaults(): array
+    {
+        return ['timezone' => 'Asia/Shanghai', 'format' => 'H:i:s'];
+    }
+
+    public function configure(array $c): void
+    {
+        $tz = $c['timezone'] ?? 'Asia/Shanghai';
+        if ($tz === 'local') {
+            $tz = date_default_timezone_get();
+        }
+        $this->tz = is_string($tz) && $tz !== '' ? $tz : 'Asia/Shanghai';
+        $this->fmt = is_string($c['format'] ?? null) ? $c['format'] : 'H:i:s';
+    }
+
+    public function statusSegments(\App\App $app): array
+    {
+        $dt = new \DateTime('now', new \DateTimeZone($this->tz));
+        return [new \App\Plugin\StatusSegment('clock', $dt->format($this->fmt), 55, 12)];
+    }
+    // id() / tickInterval() 略
+}
+```
+
+### 3.5 配置入口（UI）
+
+配置**就在 ViceCode 自己的编辑器里改**——我们本身就是 IDE，不会甩给你外部编辑器。两个入口都能到达：
+
+- **菜单栏「文件 → 已安装插件...」**：打开一个浮层，列出所有已加载插件及其当前**有效配置**（默认 ∩ 用户覆盖）。
+- **侧栏「扩展」tab（🧩 图标）**：同样列出已加载插件，选中后 `↑/↓` 移动、`Enter` 或点击行打开配置。
+
+在浮层里按 **`Enter`**（或在侧栏扩展 tab 里 `Enter`/点击）即会**用 ViceCode 自带的编辑器打开插件专用配置文件 `~/.vicecode.plugins.json`**——这就是 VSCode「打开设置(JSON)」的同款体验。`~/.vicecode.plugins.json` 与 ViceCode 自身配置 `~/.vicerc`（存布局/主题/语言）**完全分离**，互不干扰。文件内容即「插件 id => 配置」映射，例如：
+
+```json
+{
+    "clock": { "timezone": "Asia/Shanghai", "format": "H:i:s" }
+}
+```
+
+直接改对应插件的段，`Ctrl+S` 保存**立即重新加载配置生效**，无需退出进程（相当于 VSCode 的「重载窗口」，但更顺滑）。
+
+> 浮层是模态的：打开期间 `Esc` / `q` 关闭，方向键 / 翻页滚动，`Enter` 在 ViceCode 编辑器内打开**插件专用**配置文件。
+> 测试或沙箱可用环境变量 `VICECODE_PLUGINS_CONFIG` 指定插件配置文件路径，避免污染真实家目录。
+> 兼容说明：旧版写在 `~/.vicerc` 的 `plugins` 段仍会被读取（一次性回退），用户首次在 ViceCode 内编辑后会写入专用文件。
+
+
+
 ---
 
 ## 4. 周期刷新：`tickInterval()` 与主循环
@@ -318,7 +317,7 @@ public function tickInterval(): ?int
 `plugins/clock/` 是最小「动态内容」示范，同时展示**插件配置**能力（见 §3.4）。
 
 要点：
-- 用 `DateTime` + **显式时区**，独立于 php.ini 的 `date.timezone`——这样无论本机 php.ini 怎么设，时钟都按配置的时区显示。**这直接修复了「php.ini 设成 UTC 时时钟慢 8 小时」这类问题**：默认 `Asia/Shanghai`（UTC+8），想改成 UTC 或纽约时间，改 `~/.vicerc` 即可，无需动 php.ini。
+- 用 `DateTime` + **显式时区**，独立于 php.ini 的 `date.timezone`——这样无论本机 php.ini 怎么设，时钟都按配置的时区显示。**这直接修复了「php.ini 设成 UTC 时时钟慢 8 小时」这类问题**：默认 `Asia/Shanghai`（UTC+8），想改成 UTC 或纽约时间，改 `~/.vicecode.plugins.json`（见 §3.5 的编辑器入口）即可，无需动 php.ini。
 - `tickInterval()=1` 让主循环每秒重绘一次，时钟持续走动。
 - 文本用纯 ASCII `HH:MM:SS`，显示宽度固定 8 列，避免在窄状态栏里被意外折行。
 
@@ -347,7 +346,7 @@ public function statusSegments(\App\App $app): array
 }
 ```
 
-> 若只想要「跟随本机 php.ini 时区」的原始行为，把 `~/.vicerc` 里 clock 的 `timezone` 设为 `"local"` 即可。
+> 若只想要「跟随本机 php.ini 时区」的原始行为，把 `~/.vicecode.plugins.json` 里 clock 的 `timezone` 设为 `"local"` 即可。
 
 ---
 
@@ -407,12 +406,12 @@ php-tui 采用**差分渲染**——只在重绘时发送相对上一帧**变化
 
 **V1 局限**：插件只能扩展**状态栏段**。`statusSegments()` 是唯一扩展点；不能新增面板、修改菜单、拦截按键或命令。
 
-**V1 已支持**：每个插件可通过 `configDefaults()` / `configure()` 声明并接收配置，用户在 `~/.vicerc` 的 `plugins.<id>` 段覆盖（见 §3.4）。
+**V1 已支持**：每个插件可通过 `configDefaults()` / `configure()` 声明并接收配置，用户在 `~/.vicecode.plugins.json` 的 `<id>` 段覆盖（见 §3.4）。
 
 **后续可扩展方向（待定）**：
 - 命令 / 快捷键钩子（`onKey` / `onCommand`）
 - 自定义面板（如 TODO 列表、数据库浏览器）
 - 事件订阅（文件保存、git 提交、AI 回复完成等生命周期事件）
-- 插件的启用 / 禁用开关（在 `~/.vicerc` 增加 `plugins.<id>.enabled` 约定，由核心加载时读取）
+- 插件的启用 / 禁用开关（在 `~/.vicecode.plugins.json` 增加 `<id>.enabled` 约定，由核心加载时读取）
 
 路线图以产品需求为准；任何扩展都会保持「运行时动态加载、单插件失败不影响整体」的设计原则。

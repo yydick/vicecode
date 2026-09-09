@@ -2,6 +2,10 @@
 
 A VSCode-style multi-panel terminal workspace (TUI). Built on **PHP 8.3 + php-tui/php-tui 0.2.1 + Swoole 6.2.1**, it provides a coordinated six-panel environment in your terminal: Explorer / Editor / Terminal / GIT / Search / AI Chat.
 
+[简体中文](README.zh.md)
+
+> The sidebar holds four tabs: Explorer / GIT / Search / 🧩 Plugins. The top menu bar opens with **F10** (File / View / Terminal / Help).
+
 ```
 ┌───────────┬────────────────────────────┬──────────────┐
 │ Sidebar   │  Editor                    │ Terminal     │
@@ -15,7 +19,7 @@ A VSCode-style multi-panel terminal workspace (TUI). Built on **PHP 8.3 + php-tu
 └───────────────────────────────────────────────────────────┘
 ```
 
-The top menu bar opens with **F10** (File / View / Terminal / Help).
+> The sidebar holds four tabs: Explorer / GIT / Search / 🧩 Plugins; the top menu bar opens with **F10** (File / View / Terminal / Help).
 
 ## Preview
 

@@ -24,9 +24,9 @@ use PhpTui\Tui\Widget\Direction;
 use PhpTui\Tui\Widget\Widget;
 
 /**
- * 插件管理浮层（V1.1 入口）：菜单「插件 → 已安装插件」唤出，列出已加载插件及其当前配置，
- * 并给出 ~/.vicerc 的路径，让用户在外部编辑器里改 JSON（VSCode 式「可视化或改 JSON 二选一」的
- * JSON 那一侧）。启禁 / 装卸 / 市场等后续再加。
+ * 插件管理浮层（V1.1 入口）：菜单「文件 → 已安装插件」唤出，列出已加载插件及其当前配置，
+ * 按 Enter 直接用 ViceCode 自带编辑器打开插件专用配置文件 ~/.vicecode.plugins.json
+ * （VSCode「打开设置(JSON)」的同款体验，保存即热重载，不甩给用户外部编辑器）。
  *
  * 复用 HelpPanel 的 CompositeWidget 居中浮层 + 打开期间独占键盘的范式（见 HelpPanel 注释）。
  */

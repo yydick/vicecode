@@ -252,5 +252,58 @@ foreach ([Area::fromDimensions(120, 40), Area::fromDimensions(80, 24)] as $vp2) 
     }
 }
 
+// ───────── 9) 文件内容边界：Tab 列对齐 / 超长行 / 无末尾换行 / CRLF ─────────
+echo "== 文件内容边界 ==\n";
+$appE = new App();
+$appE->focusIndex = array_search('editor', App::PANELS);
+$edE = $appE->areas($vp)['editor'];
+
+// Tab 必须与「等宽普通字符」落在同一显示列：dispWidth("\t")=1，若某处按 0 或 8 计，
+// 光标 / 横向滚动 / 文本选择会整体错位，且每个 Tab 累积一列。
+$tabBuf = Buffer::empty('t');
+$tabBuf->lines = ["\tabc", 'second'];
+$tabBuf->cursorRow = 0;
+$tabBuf->cursorCol = 1;
+$appE->buffer = $tabBuf;
+$pTab = findReversed(render($appE, $vp), $edE);
+$plainBuf = Buffer::empty('t');
+$plainBuf->lines = ['Xabc', 'second'];
+$plainBuf->cursorRow = 0;
+$plainBuf->cursorCol = 1;
+$appE->buffer = $plainBuf;
+$pPlain = findReversed(render($appE, $vp), $edE);
+check(
+    $pTab !== null && $pPlain !== null && $pTab[0] === $pPlain[0],
+    'Tab 与等宽普通字符光标列一致（Tab 计 1 列不累积错位）'
+        . '：Tab=' . json_encode($pTab) . ' 普通=' . json_encode($pPlain)
+);
+
+// 超长单行：渲染必须既不抛错也不卡死（高亮 + 折行都在行内做，长度是真实风险）
+$longBuf = Buffer::empty('t');
+$longBuf->lines = [str_repeat('x', 50000), 'tail'];
+$appE->buffer = $longBuf;
+$threw = false;
+$t0 = microtime(true);
+try {
+    render($appE, $vp);
+} catch (\Throwable $e) {
+    $threw = true;
+    $msg = $e->getMessage();
+}
+$ms = (microtime(true) - $t0) * 1000;
+check(!$threw && $ms < 2000, sprintf('50k 字符超长行渲染不崩且耗时 %.0fms < 2000ms', $ms) . ($threw ? " ($msg)" : ''));
+
+$tmp = tempnam(sys_get_temp_dir(), 'vcedge') . '.txt';
+file_put_contents($tmp, "a\nb\nc"); // 末尾无换行
+$bNoEol = Buffer::fromFile($tmp);
+check($bNoEol->lines === ['a', 'b', 'c'], '末尾无换行文件按 3 行载入（不多出空行），实际 ' . json_encode($bNoEol->lines));
+$bNoEol->save();
+check(file_get_contents($tmp) === "a\nb\nc", '保存后不追加多余换行，实际 ' . json_encode(file_get_contents($tmp)));
+
+file_put_contents($tmp, "a\r\nb\r\n"); // CRLF
+$bCrlf = Buffer::fromFile($tmp);
+check($bCrlf->lines === ['a', 'b'], 'CRLF 文件载入不残留 \\r，实际 ' . json_encode($bCrlf->lines));
+unlink($tmp);
+
 echo $failed ? "\nRESULT: FAIL\n" : "\nRESULT: PASS\n";
 exit($failed ? 1 : 0);

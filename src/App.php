@@ -163,10 +163,10 @@ class App
     /** 顶部菜单栏（Backlog 接入）：F10 或点击激活，不进入焦点循环 */
     public MenuBarPanel $menuBar;
 
-    /** 插件管理浮层（V1.1 入口）：菜单「插件 → 已安装插件」唤出，列出插件与配置文件路径 */
+    /** 插件管理浮层（V1.1 入口）：菜单「文件 → 已安装插件」唤出，列出插件与配置文件路径 */
     public PluginsPanel $pluginsPanel;
 
-    /** 用户 ~/.vicerc 的 plugins.<id> 段原始覆盖（供 PluginsPanel 展示有效配置） */
+    /** 用户插件配置原始覆盖（来自 ~/.vicecode.plugins.json 的 <id> 段，供 PluginsPanel 展示有效配置） */
     public array $userPluginConfig = [];
 
     /**
@@ -237,9 +237,9 @@ class App
         // V1 插件：运行时动态加载（目录扫描 + 运行时 require，避开 composer autoload 的
         // Closure::bind 以兼容 AOT 产品版）。单个插件失败已在 Loader 内跳过，不影响启动。
         $this->plugins = PluginLoader::load(__DIR__ . '/..');
-        // 插件配置注入：VSCode 式「插件声明默认（configDefaults）+ 用户 ~/.vicerc 覆盖」。
+        // 插件配置注入：VSCode 式「插件声明默认（configDefaults）+ 用户配置覆盖」。
         // 可选能力——插件若实现 configure()/configDefaults() 则注入合并后的配置，否则跳过
-        // （不影响未实现它们的插件）。配置段来自 $cfg['plugins']（即 ~/.vicerc）。
+        // （不影响未实现它们的插件）。用户配置来自插件专用文件 ConfigStore::loadPlugins()。
         $userPlugins = ConfigStore::loadPlugins();
         $this->userPluginConfig = $userPlugins;
         foreach ($this->plugins as $plugin) {

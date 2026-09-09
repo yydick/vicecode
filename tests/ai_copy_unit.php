@@ -37,9 +37,17 @@ function expectClip(App $app, string $want, string $msg): void
     $got = $app->clipboardPeek();
     if (stream_isatty(STDOUT)) {
         check(true, $msg . '（tty：走 OSC52，不断言内存）');
-    } else {
-        check($got === $want, $msg . "（内存剪贴板：期望「{$want}」实际「{$got}」）");
+        return;
     }
+    // 超长正文只比对、不回显（否则一条 40k 的消息会把测试输出刷爆）
+    if (mb_strlen($want) > 60) {
+        check(
+            $got === $want,
+            $msg . sprintf('（内存剪贴板：长度期望 %d 实际 %d）', mb_strlen($want), mb_strlen($got))
+        );
+        return;
+    }
+    check($got === $want, $msg . "（内存剪贴板：期望「{$want}」实际「{$got}」）");
 }
 
 const VP_W = 120;
@@ -85,6 +93,53 @@ if (!stream_isatty(STDOUT)) {
 } else {
     check(true, 'AI：空态点击（tty 不断言）');
 }
+
+// ───── 滚动后点击：可见行 → 全量行的映射必须带 scroll 偏移 ─────
+echo "\n== AI 滚动后复制（防「复制错消息」回归）==\n";
+$many = [];
+for ($i = 0; $i < 80; $i++) {
+    $many[] = ['role' => $i % 2 === 0 ? 'user' : 'assistant', 'content' => "msg$i"];
+}
+$prop->setValue($chat, $many);
+$app->render($vp); // 触发 streamContent：算 lineCount 并把 follow 滚到底
+$scroll = $app->ai->scroll();
+check($scroll > 0, "消息数超过视口高度 → 已滚动（scroll=$scroll > 0）");
+$app->clipboardCopy('EMPTY');
+$app->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $inner->position->x, $inner->position->y, 0), $vp);
+expectClip($app, 'msg' . $scroll, 'AI：滚动后点首行 → 复制**可见**那条（全量第 ' . $scroll . ' 行）而非 msg0');
+$app->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $inner->position->x, $inner->position->y + $inner->height - 1, 0), $vp);
+expectClip($app, 'msg79', 'AI：滚动后点末行 → 复制最后一条消息 msg79');
+
+// ───── 超长消息：软换行不崩、行数与宽度自洽、复制拿到完整正文 ─────
+echo "\n== AI 超长消息 ==\n";
+$long = str_repeat('字', 20000); // 40000 显示列，远超面板宽
+$prop->setValue($chat, [['role' => 'user', 'content' => 'hi'], ['role' => 'assistant', 'content' => $long]]);
+$threw = false;
+$t0 = microtime(true);
+try {
+    $app->render($vp);
+} catch (\Throwable $e) {
+    $threw = true;
+    $msg = $e->getMessage();
+}
+$firstFrameMs = (microtime(true) - $t0) * 1000;
+check(!$threw, '20k CJK 超长消息渲染不抛异常' . ($threw ? " ($msg)" : ''));
+$rows = $app->ai->lineCount();
+check(
+    $rows >= 2 && $rows * $inner->width >= 40000,
+    sprintf('超长消息软换行行数 %d 与视口宽 %d 自洽（不截断、不漏行）', $rows, $inner->width)
+);
+// 流式追加期间每帧都重排，超长回复若退化成 O(n²) 会越打字越卡
+$t0 = microtime(true);
+for ($f = 0; $f < 20; $f++) {
+    $prop->setValue($chat, [['role' => 'user', 'content' => 'hi'], ['role' => 'assistant', 'content' => $long . str_repeat('字', 200 * $f)]]);
+    $app->render($vp);
+}
+$perFrame = ((microtime(true) - $t0) * 1000) / 20;
+check($perFrame < 100, sprintf('超长消息流式追加单帧 %.1fms < 100ms（首帧 %.1fms）', $perFrame, $firstFrameMs));
+$app->clipboardCopy('EMPTY');
+$app->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $inner->position->x, $inner->position->y + $inner->height - 1, 0), $vp);
+expectClip($app, $long . str_repeat('字', 200 * 19), 'AI：超长消息点末行 → 复制完整正文（未被截断）');
 
 echo "\n";
 if ($failed) {

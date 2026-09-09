@@ -365,11 +365,15 @@ final class AiPanel
         }
         $W = max(1, $inner->width);
         $map = $this->buildLinesWithMap($W)['map'];
-        if (!isset($map[$v]) || $map[$v] < 0) {
+        // ⚠️ map 的下标是**全量行**（软换行后的完整列表），不是可见行：
+        // 消息流滚动后可见第 v 行对应全量第 scroll+v 行。漏掉 scroll 会复制顶部那条消息
+        // （滚到中间点「第 50 条」实际复制第 1 条），且未滚动时一切正常，极难发现。
+        $abs = $this->scroll + $v;
+        if (!isset($map[$abs]) || $map[$abs] < 0) {
             return false;
         }
         $msgs = $this->chat()->messages();
-        $idx = $map[$v];
+        $idx = $map[$abs];
         if (!isset($msgs[$idx])) {
             return false;
         }

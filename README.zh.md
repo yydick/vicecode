@@ -2,6 +2,8 @@
 
 VSCode 风格的多面板终端工作台（TUI）。基于 **PHP 8.3 + php-tui/php-tui 0.2.1 + Swoole 6.2.1**，在终端里提供 Explorer / 编辑器 / 终端 / GIT / 搜索 / AI 对话 六面板协同的工作环境。
 
+[English](README.md)
+
 ```
 ┌───────────┬────────────────────────────┬──────────────┐
 │ Sidebar   │  Editor                    │ Terminal     │
@@ -15,7 +17,7 @@ VSCode 风格的多面板终端工作台（TUI）。基于 **PHP 8.3 + php-tui/p
 └───────────────────────────────────────────────────────────┘
 ```
 
-顶栏菜单栏用 **F10** 打开（File / View / Terminal / Help）。
+> 侧栏共四个 tab：Explorer / GIT / 搜索 / 🧩 插件；顶栏菜单栏用 **F10** 打开（File / View / Terminal / Help）。
 
 ## 界面预览
 

@@ -62,6 +62,32 @@ function check(bool $cond, string $msg): void
     }
 }
 
+/**
+ * 轮询 pty 输出直到出现任一 needle（normalize 后比对）或超时。
+ *
+ * 为什么不能「睡固定时间再读一次」：跑全量批时机器负载高，应用的事件循环会慢半拍，
+ * 固定等待偶尔读不到刚键入的内容（实测全量批里偶发一次「键入进搜索框」失败，单跑 5/5 通过）。
+ * 改成条件等待后快慢机器都稳，且**超时仍走原断言判失败**，不会把真 bug 等没。
+ *
+ * @param string[] $needles
+ */
+function waitForAny(array $pipes, array $needles, int $timeoutMs): string
+{
+    global $readPty;
+    $acc = '';
+    $end = microtime(true) + ($timeoutMs / 1000);
+    while (microtime(true) < $end) {
+        $acc .= normalize($readPty($pipes[1], 16384));
+        foreach ($needles as $n) {
+            if (str_contains($acc, (string) $n)) {
+                return $acc;
+            }
+        }
+        usleep(100000);
+    }
+    return $acc;
+}
+
 // 探针：同尺寸布局算 SEARCH tab 点击坐标（0-based → SGR 1-based）
 $probe = new App();
 $sb = $probe->areas(Area::fromDimensions(120, 40))['sidebar'];
@@ -88,32 +114,22 @@ usleep(300000);
 // 点 SEARCH tab
 fwrite($pipes[0], "\x1b[<0;{$tc};{$tr}M");
 fwrite($pipes[0], "\x1b[<0;{$tc};{$tr}m");
-usleep(500000);
-$outTab = normalize($readPty($pipes[1], 8192));
+// 等 tab 真正切过去再键入：否则负载高时字符会进到侧栏树而不是搜索框
+$outTab = waitForAny($pipes, ['searchfilecontents', '搜索文件内容'], 3000);
 check(str_contains($outTab, 'searchfilecontents') || str_contains($outTab, '搜索文件内容'),
     'SEARCH tab 显示输入占位提示（搜索文件内容）');
 
 // 键入关键词（focus=sidebar 且 SEARCH tab 时字符进 query）
 $query = 'ZZUNIQUEMARKER';
 fwrite($pipes[0], $query);
-usleep(300000);
-$outTyped = '';
-for ($i = 0; $i < 4; $i++) {
-    $outTyped .= normalize($readPty($pipes[1], 16384));
-    usleep(150000);
-}
+$outTyped = waitForAny($pipes, ['marker'], 3000);
 check(str_contains($outTyped, 'marker'), '键入进搜索框（捕获关键词 MARKER）');
 
 // 回车触发搜索（R1：Enter 触发）
 fwrite($pipes[0], "\r");
 
 // 等 grep 跑完（非阻塞管道 + 主循环 pollSearch 排空）；repo 不大、排除 vendor 后应很快
-usleep(1500000);
-$outRes = '';
-for ($i = 0; $i < 4; $i++) {
-    $outRes .= normalize($readPty($pipes[1], 16384));
-    usleep(200000);
-}
+$outRes = waitForAny($pipes, ['zzuniquemarker'], 6000);
 check(str_contains($outRes, 'zzuniquemarker'), 'R2：搜索结果在真实终端中出现（pollSearch 并入重绘生效）');
 check(!str_contains($outRes, 'nomatches') && !str_contains($outRes, 'noresults'),
     'R2：有命中时不显示「无匹配结果」');

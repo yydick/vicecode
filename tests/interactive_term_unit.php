@@ -132,6 +132,17 @@ $emu->write("\xbd");          // 第三字节
 $g = $emu->gridForRender(1, 0);
 check($g['lines'][0][0]->ch === '好', '被劈开的多字节 UTF-8 在块边界拼接后正确');
 
+// 裸 CR 覆盖（进度条 / \r 重绘同一行）：必须回到行首覆写，而不是换行
+$emu = new Vt100Emulator(20, 2);
+$emu->write("\x1b[1;1Hprogress 10%");
+$emu->write("\rprogress 20%");
+$g = $emu->gridForRender(2, 0);
+$row0 = '';
+foreach ($g['lines'][0] as $c) {
+    $row0 .= $c->ch;
+}
+check(rtrim($row0) === 'progress 20%', '裸 CR 覆盖同行（进度条）→ ' . json_encode(rtrim($row0)));
+
 // ── PtyProcess ───────────────────────────────────────
 echo "== PtyProcess ==\n";
 $pty = new PtyProcess();
