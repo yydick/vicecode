@@ -299,8 +299,8 @@ class App
     }
 
     /**
-     * 计算单个插件的「有效配置」= 默认(configDefaults) ∩ 用户 ~/.vicerc 覆盖。
-     * 与构造期注入用的是同一套合并逻辑，供 PluginsPanel / SidebarPanel 展示当前生效值。
+     * 计算单个插件的「有效配置」= 默认(configDefaults) ∩ 用户 ~/.vicecode.plugins.json 覆盖。
+     * 与构造期注入、reloadPluginConfig 用的是同一套合并逻辑，供 PluginsPanel / SidebarPanel 展示当前生效值。
      * @return array<string,mixed>
      */
     public function pluginEffectiveConfig(\App\Plugin\PluginInterface $p): array
@@ -1070,12 +1070,9 @@ class App
                 $this->focus('sidebar');
                 break;
             case 'file.save':
+                // 插件配置文件的热加载判断已下沉到 EditorPanel::save()（键盘 Ctrl+S 也走那里），
+                // 此处只负责统一分发，不再重复处理。
                 $this->editor->save();
-                // 保存的若是插件专用配置文件，则重新注入插件配置（在 ViceCode 内改完即生效，无需重启）
-                if ($this->buffer !== null && $this->buffer->path === ConfigStore::pluginsPath()) {
-                    $this->reloadPluginConfig();
-                    $this->setMessage($this->t('plugins.reloaded'));
-                }
                 break;
             case 'file.close':
                 if ($this->buffer !== null) {

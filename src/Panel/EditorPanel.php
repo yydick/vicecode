@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Panel;
 
+use App\Core\ConfigStore;
 use App\Core\KeyInput;
 use App\App;
 use App\Editor\Buffer;
@@ -535,6 +536,13 @@ final class EditorPanel
         }
         $ok = $buf->save();
         $this->shell->emitPluginEvent('file.saved', ['path' => $path, 'ok' => $ok]);
+        // 保存的若是插件专用配置文件，则重新注入插件配置（在 ViceCode 内改完即生效，无需重启）。
+        // 键盘 Ctrl+S 也走这里，所以热加载判断放此处而非 App::menuAction，才能覆盖全部保存路径。
+        if ($ok && $path === ConfigStore::pluginsPath()) {
+            $this->shell->reloadPluginConfig();
+            $this->shell->setMessage($this->shell->t('plugins.reloaded'));
+            return;
+        }
         $this->shell->setMessage($ok
             ? $this->shell->t('editor.saved')
             : $this->shell->t('editor.save_failed', ['msg' => (error_get_last()['message'] ?? 'unknown')]));

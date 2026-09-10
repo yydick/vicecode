@@ -167,6 +167,34 @@ check($app->pluginEffectiveConfig($clock)['timezone'] === 'UTC', 'reloadPluginCo
 @unlink($vc2);
 putenv('VICECODE_PLUGINS_CONFIG');
 
+echo "== 编辑器 Ctrl+S 保存触发热重载（防回归）==\n";
+
+// 构造时插件配置文件为空 → clock 走默认 Asia/Shanghai
+$vc3 = sys_get_temp_dir() . '/vc_plugins_save_' . uniqid() . '.json';
+@file_put_contents($vc3, json_encode([]));
+putenv('VICECODE_PLUGINS_CONFIG=' . $vc3);
+$app3 = new App();
+$clock3 = null;
+foreach ($app3->plugins as $p) {
+    if ($p->id() === 'clock') {
+        $clock3 = $p;
+    }
+}
+check($app3->pluginEffectiveConfig($clock3)['timezone'] === 'Asia/Shanghai', '保存前：clock 为默认 Asia/Shanghai');
+
+// 用户把时钟改成 UTC 后按 Ctrl+S：直接改盘上的插件配置文件，再由编辑器打开并保存
+// （键盘 Ctrl+S 在 EditorPanel::onChar 里直接调 EditorPanel::save()，不经 menuAction）
+@file_put_contents(ConfigStore::pluginsPath(), json_encode([
+    'clock' => ['timezone' => 'UTC', 'format' => 'H:i:s'],
+]));
+$app3->editor->openFile(ConfigStore::pluginsPath());
+$app3->editor->save();
+
+check($app3->pluginEffectiveConfig($clock3)['timezone'] === 'UTC',
+    '编辑器 Ctrl+S 保存插件配置文件后热重载生效（clock 时区变为 UTC，无需走菜单）');
+@unlink($vc3);
+putenv('VICECODE_PLUGINS_CONFIG');
+
 echo "== StatusSegment 值对象 ==\n";
 $seg = new StatusSegment('x', 'hello', 60, 9);
 check($seg->key === 'x' && $seg->text === 'hello' && $seg->priority === 60 && $seg->order === 9, 'StatusSegment 字段正确');
