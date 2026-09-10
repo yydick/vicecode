@@ -243,4 +243,10 @@ return [
     'keys.click_triangle'    => '单击行首三角',
     'keys.dblclick_dir'      => '双击目录',
     'keys.click_icon'        => '点击图标',
+
+    // 命令面板（F1）
+    'palette.title'          => '命令面板',
+    'palette.placeholder'    => '输入以筛选命令…',
+    'menu.command_palette'   => '命令面板',
+    'help.g_palette'         => '打开命令面板（F1）',
 ];

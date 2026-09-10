@@ -22,6 +22,7 @@ use App\Panel\EditorPanel;
 use App\Panel\HelpPanel;
 use App\Panel\MenuBarPanel;
 use App\Panel\PluginsPanel;
+use App\Panel\CommandPalettePanel;
 use App\Panel\SidebarPanel;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
@@ -169,6 +170,9 @@ class App
     /** 插件管理浮层（V1.1 入口）：菜单「文件 → 已安装插件」唤出，列出插件与配置文件路径 */
     public PluginsPanel $pluginsPanel;
 
+    /** 命令面板（F1 唤出）：汇聚系统命令与插件命令，模糊过滤 + 键盘选择，走 menuAction 分发 */
+    public CommandPalettePanel $palette;
+
     /** 用户插件配置原始覆盖（来自 ~/.vicecode.plugins.json 的 <id> 段，供 PluginsPanel 展示有效配置） */
     public array $userPluginConfig = [];
 
@@ -243,6 +247,7 @@ class App
         $this->help = new HelpPanel($this);
         $this->menuBar = new MenuBarPanel($this);
         $this->pluginsPanel = new PluginsPanel($this);
+        $this->palette = new CommandPalettePanel($this);
         $this->clip = new Clipboard();        // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function (): void {
             $this->chat->shutdown();
@@ -499,6 +504,27 @@ class App
     public function pluginMenuItems(): array
     {
         return $this->pluginMenuSnapshot;
+    }
+
+    /**
+     * 命令面板用的全量命令清单：直接扁平化 MenuBarPanel::definitions() 的全部 items
+     * （含 V1.1 插件命令组——其 action 已是 `plugin:<fq>`、label 已是 `Name: Title`）。
+     * 与菜单同源，故选中后直接走 App::menuAction() 分发，无需另立路径。
+     * @return list<array{id:string,title:string,shortcut:string}>
+     */
+    public function commandPaletteEntries(): array
+    {
+        $out = [];
+        foreach ($this->menuBar->definitions() as $menu) {
+            foreach ($menu['items'] as $it) {
+                $out[] = [
+                    'id' => $it['action'],
+                    'title' => $it['label'],
+                    'shortcut' => $it['shortcut'],
+                ];
+            }
+        }
+        return $out;
     }
 
     /** 某插件注册成功的命令：局部 id => PluginCommand */
@@ -761,6 +787,9 @@ class App
         }
         if ($this->pluginsPanel->isOpen()) {
             $overlays[] = $this->pluginsPanel->widget($vp->width, $vp->height);
+        }
+        if ($this->palette->isOpen()) {
+            $overlays[] = $this->palette->widget($vp->width, $vp->height);
         }
         if ($overlays === []) {
             return $base;
@@ -1040,6 +1069,9 @@ class App
             case 'plugins.open':
                 $this->pluginsPanel->open();
                 break;
+            case 'palette.open':
+                $this->palette->open();
+                break;
             default:
                 // V1.1：插件命令（`plugin:<插件id>.<局部id>`）
                 if (str_starts_with($id, 'plugin:')) {
@@ -1057,6 +1089,18 @@ class App
             return;
         }
 
+        // 全局退出键 Ctrl+Q：放在所有浮层模态分支之前，确保菜单/帮助/插件面板/命令面板
+        // 任意一个打开时都能直接退出（否则那些模态分支会把 Ctrl+Q 吞掉 → 应用卡死）。
+        // 唯一例外是交互式 PTY 捕获态：此时 Ctrl+Q 应原样喂给 shell（见下方捕获分支），
+        // 故这里排除，让捕获分支先于退出处理它。
+        if ($event instanceof CharKeyEvent
+            && ($event->modifiers & KeyModifiers::CONTROL)
+            && strtolower($event->char) === 'q'
+            && !($this->focusPanel() === 'terminal' && $this->terminal->isCaptured())) {
+            $this->lifecycle->requestQuit();
+            return;
+        }
+
         $a = $this->areas($vp);
 
         // F10 激活/收起菜单栏：真实 pty 下是 **FunctionKeyEvent**（独立类，带 number 属性），
@@ -1067,6 +1111,14 @@ class App
         //  导致 F10 在真实 pty 下完全不生效——只有 headless 单测喂 FunctionKeyEvent 才暴露。）
         if ($event instanceof FunctionKeyEvent && $event->number === 10) {
             $this->menuBar->toggle();
+            return;
+        }
+
+        // F1：唤出/收起命令面板（见 CommandPalettePanel 顶部注释：用 F1 而非 Ctrl+Shift+P
+        // 的原因——真实 pty 下 Shift 修饰不可区分）。放在模态独占分支之前，故面板打开时
+        // 再按 F1 也能收起。
+        if ($event instanceof FunctionKeyEvent && $event->number === 1) {
+            $this->palette->toggle();
             return;
         }
 
@@ -1152,6 +1204,21 @@ class App
             return; // 其余键一律吞掉：帮助页是模态的
         }
 
+        // 命令面板打开期间**独占键盘**（与帮助页/插件浮层同机制）：过滤框吃字符键、
+        // 上下/Enter/Esc/Backspace 交给面板自己，其余键一律吞掉，避免穿透到下层面板。
+        if ($this->palette->isOpen()) {
+            if ($event instanceof MouseEvent) {
+                return; // 暂不处理点击：吞掉，避免穿透
+            }
+            if ($event instanceof CharKeyEvent && $this->palette->onChar($event)) {
+                return;
+            }
+            if ($event instanceof CodedKeyEvent && $this->palette->onKey($event)) {
+                return;
+            }
+            return; // 其余键一律吞掉：命令面板是模态的
+        }
+
         // 交互式 PTY 捕获态：终端面板聚焦且已捕获时，除 F2/Esc 退出键外，
         // 所有按键经 KeyToPty 编码后转发给 PTY（由真实 shell / 全屏程序解释），
         // 不再走下面的面板导航分发。
@@ -1203,15 +1270,6 @@ class App
                 // 有些终端/解析器给的是原始字节 \x03 而不是带 CONTROL 修饰的 'c'
                 && (strtolower($event->char) === 'c' || $event->char === "\x03")) {
                 $this->terminal->cancel();
-                return;
-            }
-            // 全局：Ctrl+Q 退出（若有未保存改动先弹确认）。
-            // 退出热键原本是 Ctrl+C，但与「复制」冲突（习惯上 Ctrl+C 是复制，误按就退出了），
-            // 故换成 Ctrl+Q；Ctrl+C 只保留「中断终端里正在跑的命令」这个终端固有语义。
-            // 实测 php-tui/term 0.3.4 会把 0x11 解析成 CharKeyEvent(char:'q', modifiers:ctl)，
-            // 故无需另兜底原始字节——若写上 `\x11` 分支反而是死代码（它排在 CONTROL 判定之后）。
-            if (($event->modifiers & KeyModifiers::CONTROL) && strtolower($event->char) === 'q') {
-                $this->lifecycle->requestQuit();
                 return;
             }
             // Ctrl+T 切主题（M6 R4）。必须在面板拿到字符之前处理，

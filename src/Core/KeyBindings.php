@@ -42,6 +42,7 @@ final class KeyBindings
                 [self::HELP_KEY, 'help.g_help'],
                 ['Ctrl+T', 'help.g_theme'],
                 ['F10', 'help.g_menu'],
+                ['F1', 'help.g_palette'],
                 ['keys.wheel', 'help.g_wheel'],
                 ['keys.hwheel', 'help.g_wheel_h'],
                 ['keys.click', 'help.g_click'],

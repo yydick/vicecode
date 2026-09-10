@@ -350,16 +350,28 @@ public function statusSegments(\App\App $app): array
 
 插件可接收应用运行期事件，用于做 linter、git 提示、埋点等。`onEvent(PluginEvent $e)` 的 `$e->name` 为事件名，`$e->payload` 为关联数组。
 
+应用派发的全部事件（名称与 payload 以核心实现为准，照抄以免拼写不匹配）：
+
+- `app.ready`：启动完成（无 payload）。
+- `config.reloaded`：插件配置被保存并重载（无 payload）。
+- `focus.changed`：焦点切换，`payload['from']` / `payload['to']` 为面板 id。
+- `file.opened`：打开文件，`payload['path']` 为路径，`payload['virtual']` 为是否虚拟文件。
+- `file.saved`：保存文件，`payload['path']` 为路径，`payload['ok']` 为是否成功。
+- `file.closed`：关闭文件（缓冲区移除），`payload['path']` 为路径。
+- `buffer.switched`：当前编辑缓冲区切换，`payload['path']` 为路径。
+- `terminal.output`：终端收到原始字节，`payload['bytes']` 为原始字节（含 ANSI 与 OSC 7 的 cwd 上报）。
+
 ```php
 public function onEvent(\App\Plugin\PluginEvent $e): void
 {
     match ($e->name) {
-        'app.ready'      => /* 启动完成 */,
+        'app.ready'       => /* 启动完成 */,
         'config.reloaded' => /* 插件配置被保存重载 */,
-        'focus.changed'  => /* 焦点切到 $e->payload['panel'] */,
-        'editor.opened'  => /* 打开 $e->payload['path'] */,
-        'editor.saved'   => /* 保存了 $e->payload['path'] */,
-        'editor.bufferChanged' => /* 当前 buffer 内容变化（payload 含 path）*/,
+        'focus.changed'   => /* 焦点切到 $e->payload['to'] */,
+        'file.opened'     => /* 打开 $e->payload['path'] */,
+        'file.saved'      => /* 保存了 $e->payload['path'] */,
+        'file.closed'     => /* 关闭 $e->payload['path'] */,
+        'buffer.switched' => /* 当前 buffer 切到 $e->payload['path'] */,
         'terminal.output' => /* 终端收到原始字节 $e->payload['bytes']（含 ANSI）*/,
         default => null,
     };
@@ -368,7 +380,22 @@ public function onEvent(\App\Plugin\PluginEvent $e): void
 
 > 事件在**真实原始形态**下派发给插件：例如 `terminal.output` 给的是未经净化的原始字节（可能含 ANSI 转义与 OSC 7 的 cwd 上报），插件需自行解析。事件派发做了**防重入**（插件内再触发事件不会无限递归）与**单插件容错**（某个插件抛异常不影响其它插件)。
 
+### 3.9 命令面板（F1，V1.1）
 
+命令面板（Command Palette）让用户**用键盘快速检索并执行任意命令**，无需在菜单里逐层翻找。
+
+**唤起键：F1。** 你可能在别处见过 `Ctrl+Shift+P`（VSCode 的默认键），但 ViceCode 跑在**真实伪终端**上，而真实 pty 下 `Shift` 这类修饰键**无法被区分**（`Ctrl+Shift+P` 会被终端「吃掉」修饰，退化成裸 `Ctrl+P`，而 `Ctrl+P` 已被 AI 面板用作切换 Provider）。因此本项目统一用 **F1** 唤出命令面板。也可从菜单「视图 → 命令面板 (F1)」进入。
+
+**命令来源（自动汇聚）**：面板在打开时扁平化 `MenuBarPanel::definitions()` 的全部菜单项——既包含系统命令（如「视图 → 聚焦终端」「文件 → 保存」），也包含 §3.6 插件命令（已进入「插件」菜单组）。每条命令携带 `id`（即菜单项的 `action`，如 `view.focus.terminal`、`plugin:<fq>`）、`title`（菜单项 `label`，已是 `Name: Title` 形式）、以及原菜单里登记的 `shortcut`。**插件无需做任何额外工作**，声明了 `commands()` 的命令自动出现在面板里。
+
+**交互**：
+
+- 顶部是过滤框 `> `（占位提示 `输入以筛选命令…`），在此打字即**对标题 + action id 做不区分大小写的子串模糊过滤**；按 `Backspace` 删字，`Esc` 直接关闭面板。
+- `↑ / ↓` 在过滤后的结果里移动高亮项（选中行反白显示），`Enter` 执行当前项。
+- 选中执行时复用既有 `App::menuAction($id)` 分发——**与从菜单点击触发的是同一条执行路径**，所以命令面板不是「又一套命令系统」，只是菜单项的统一检索入口。执行后面板自动关闭。
+- 面板是模态浮层：打开期间独占键盘，鼠标点击被忽略，仅响应上述按键。
+
+**对插件作者意味着什么**：你只要按 §3.6 声明命令，它就**自动**同时获得「菜单项 + 可绑定快捷键 + 状态栏段点击 + 命令面板检索」四条触发路径，无需为命令面板单独适配。
 
 ## 4. 周期刷新：`tickInterval()` 与主循环
 
@@ -489,7 +516,7 @@ php-tui 采用**差分渲染**——只在重绘时发送相对上一帧**变化
 **V1.1 已支持**：
 - 命令钩子：`commands()` / `executeCommand()` 让插件从「只能显示」变成「能做事」，命令出现在菜单「插件」组，可绑定快捷键（§3.6）。
 - 状态栏段点击：`StatusSegment` 第 5 参数绑定命令局部 id，点击即触发（§3.7）。
-- 生命周期事件：`onEvent(PluginEvent)` 接收启动完成、配置重载、焦点切换、文件打开/保存、终端输出等事件（§3.8）。
+- 生命周期事件：`onEvent(PluginEvent)` 接收启动完成、配置重载、焦点切换、文件打开/保存/关闭、缓冲区切换、终端输出等事件（§3.8）。
 - 配置：`configDefaults()` / `configure()` 声明并接收配置，用户在 `~/.vicecode.plugins.json` 的 `<id>` 段覆盖（§3.4）。
 
 **仍未支持（设计取舍）**：

@@ -251,4 +251,10 @@ return [
     'keys.click_triangle'    => 'Click row triangle',
     'keys.dblclick_dir'      => 'Double-click dir',
     'keys.click_icon'        => 'Click icon',
+
+    // Command palette (F1)
+    'palette.title'          => 'Command Palette',
+    'palette.placeholder'    => 'Type to filter commands…',
+    'menu.command_palette'   => 'Command Palette',
+    'help.g_palette'         => 'Open command palette (F1)',
 ];

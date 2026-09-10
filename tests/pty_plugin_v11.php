@@ -183,7 +183,14 @@ function runOnce(array $env, array $seq, callable $readPty): array
         $raw .= $drain();
     }
     fwrite($pipes[0], "\x11");             // Ctrl+Q 干净退出
-    usleep(300000);
+    // 守卫：启动早期 pty 会吞掉首包 Ctrl+Q（原始模式建立前的字节会丢失），
+    // 若进程仍存活则周期性重发，避免 proc_close() 永久阻塞把测试挂死。
+    $guard = 0;
+    while (proc_get_status($proc)['running'] && $guard < 25) {
+        usleep(200000);
+        fwrite($pipes[0], "\x11");
+        $guard++;
+    }
     $raw .= $drain();
 
     $frames = normalizeLines(rebuildScreenLines($raw, W, H));
