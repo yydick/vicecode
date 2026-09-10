@@ -257,4 +257,10 @@ return [
     'palette.placeholder'    => 'Type to filter commands…',
     'menu.command_palette'   => 'Command Palette',
     'help.g_palette'         => 'Open command palette (F1)',
+
+    // Custom plugin panels (overlay host)
+    'menu.plugin_panels'     => 'Plugin Panels',
+    'panel.title'            => 'Plugin Panels',
+    'panel.empty'            => '(No plugin panels)',
+    'panel.close'            => 'Esc close · Tab switch',
 ];

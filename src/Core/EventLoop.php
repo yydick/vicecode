@@ -94,6 +94,15 @@ final class EventLoop
                 }
                 $ready = \Swoole\Coroutine\System::waitEvent(STDIN, SWOOLE_EVENT_READ, 0.2);
                 if ($ready === false) {
+                    // 空闲超时：冲刷解析器。EventParser 会把暂存的孤立 ESC（\x1b）定稿为
+                    // Esc 键，否则真实 pty 下「单独按 Esc」永远挂起、浮层无法关闭。
+                    foreach ($this->input->flush() as $ev) {
+                        $this->app->handle($ev, $this->display->viewportArea());
+                        if ($this->app->quit) {
+                            $this->quit();
+                            return;
+                        }
+                    }
                     continue; // 超时，继续轮询（同时检查 quitting）
                 }
                 $chunk = fread(STDIN, 8192);

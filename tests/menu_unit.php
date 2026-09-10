@@ -55,14 +55,14 @@ check(in_array('文件', $labels, true) && in_array('帮助', $labels, true), '�
 $actionCount = 0;
 $known = ['file.open','file.save','file.close','file.quit','view.theme','view.focus.editor',
     'view.focus.terminal','view.focus.explorer','view.focus.ai','view.lang','term.cancel',
-    'term.clear','help.shortcuts','help.about','plugins.open','palette.open'];
+    'term.clear','help.shortcuts','help.about','plugins.open','palette.open','panel.host.open'];
 foreach ($defs as $m) {
     foreach ($m['items'] as $it) {
         $actionCount++;
         check(in_array($it['action'], $known, true), "菜单项 {$it['label']} 的 action({$it['action']}) 是真实命令");
     }
 }
-check($actionCount === 16, "共 16 个菜单项（含命令面板，实际 " . $actionCount . "）");
+check($actionCount === 17, "共 17 个菜单项（含命令面板与插件面板浮层，实际 " . $actionCount . "）");
 
 // ─════════ 2) 菜单栏在常规视口可见、矮视口不画 ═════════
 echo "\n== 菜单栏可见性 ==\n";

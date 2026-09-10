@@ -23,6 +23,7 @@ use App\Panel\HelpPanel;
 use App\Panel\MenuBarPanel;
 use App\Panel\PluginsPanel;
 use App\Panel\CommandPalettePanel;
+use App\Panel\PluginPanelHost;
 use App\Panel\SidebarPanel;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
@@ -173,6 +174,9 @@ class App
     /** 命令面板（F1 唤出）：汇聚系统命令与插件命令，模糊过滤 + 键盘选择，走 menuAction 分发 */
     public CommandPalettePanel $palette;
 
+    /** 自定义面板浮层宿主（V1.1）：汇聚所有插件的 PluginPanel，内部 tab 切换 */
+    public PluginPanelHost $panelHost;
+
     /** 用户插件配置原始覆盖（来自 ~/.vicecode.plugins.json 的 <id> 段，供 PluginsPanel 展示有效配置） */
     public array $userPluginConfig = [];
 
@@ -212,6 +216,9 @@ class App
     /** 装载期冻结的菜单项快照（每帧只读，形状不变） */
     private array $pluginMenuSnapshot = [];
 
+    /** 装载期汇聚的插件面板（list<array{plugin:string, panel:\App\Plugin\PluginPanel}>），供浮层宿主读取 */
+    private array $pluginPanels = [];
+
     /** 事件重入保护：插件在回调里又触发事件时丢弃内层 */
     private bool $inPluginEvent = false;
 
@@ -248,6 +255,7 @@ class App
         $this->menuBar = new MenuBarPanel($this);
         $this->pluginsPanel = new PluginsPanel($this);
         $this->palette = new CommandPalettePanel($this);
+        $this->panelHost = new PluginPanelHost($this);
         $this->clip = new Clipboard();        // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function (): void {
             $this->chat->shutdown();
@@ -285,6 +293,8 @@ class App
         }
         // 命令在**装载期**注册一次即可（不重新 require 插件，重注册只会产生 duplicate 冲突）
         $this->registerPluginCommands();
+        // 面板同样在装载期汇聚一次（与命令同机制：冻结快照，之后每帧只读）
+        $this->collectPluginPanels();
         $this->emitPluginEvent('app.ready');
     }
 
@@ -411,6 +421,42 @@ class App
             'action' => $r['action'],
             'shortcut' => $r['shortcut'],
         ], $rows);
+    }
+
+    /**
+     * 装载期一次性汇聚插件面板（V1.1 自定义面板）。
+     *
+     * 容错哲学与 registerPluginCommands 一致：任一插件出错只影响它自己（跳过），
+     * 不让它带崩启动或影响别的插件。面板 id 由核心加插件 id 前缀完全限定，跨插件天然不撞。
+     * 只在构造末尾调用一次（与命令同机制，冻结快照后每帧只读）。
+     */
+    private function collectPluginPanels(): void
+    {
+        foreach ($this->plugins as $p) {
+            if (!method_exists($p, 'panels')) {
+                continue;                       // V1 老插件（如 clock）零负担
+            }
+            try {
+                $list = $p->panels();
+            } catch (Throwable $e) {
+                continue;                       // panels() 抛异常：跳过该插件，不连坐
+            }
+            if (!is_array($list)) {
+                continue;
+            }
+            foreach ($list as $pp) {
+                if (!$pp instanceof \App\Plugin\PluginPanel) {
+                    continue;                   // 类型防御：插件返回了别的东西
+                }
+                $this->pluginPanels[] = ['plugin' => $p->id(), 'panel' => $pp];
+            }
+        }
+    }
+
+    /** 已汇聚的插件面板列表（供 PluginPanelHost 读取）。@return array<int,array{plugin:string,panel:\App\Plugin\PluginPanel}> */
+    public function pluginPanels(): array
+    {
+        return $this->pluginPanels;
     }
 
     /** 该命令绑定成功的快捷键（归一化串），未绑定返回 null */
@@ -791,6 +837,9 @@ class App
         if ($this->palette->isOpen()) {
             $overlays[] = $this->palette->widget($vp->width, $vp->height);
         }
+        if ($this->panelHost->isOpen()) {
+            $overlays[] = $this->panelHost->widget($vp->width, $vp->height);
+        }
         if ($overlays === []) {
             return $base;
         }
@@ -1072,6 +1121,9 @@ class App
             case 'palette.open':
                 $this->palette->open();
                 break;
+            case 'panel.host.open':
+                $this->panelHost->toggle();
+                break;
             default:
                 // V1.1：插件命令（`plugin:<插件id>.<局部id>`）
                 if (str_starts_with($id, 'plugin:')) {
@@ -1217,6 +1269,21 @@ class App
                 return;
             }
             return; // 其余键一律吞掉：命令面板是模态的
+        }
+
+        // 自定义面板浮层打开期间**独占键盘**（与命令面板/插件浮层同机制）：
+        // Tab/方向键切 tab、Esc 关闭，若当前面板提供了输入回调则交给它处理，其余键吞掉。
+        if ($this->panelHost->isOpen()) {
+            if ($event instanceof MouseEvent) {
+                return; // 浮层模态：吞掉鼠标，避免穿透到下层面板
+            }
+            if ($event instanceof CharKeyEvent && $this->panelHost->onChar($event)) {
+                return;
+            }
+            if ($event instanceof CodedKeyEvent && $this->panelHost->onKey($event)) {
+                return;
+            }
+            return; // 其余键一律吞掉：浮层是模态的
         }
 
         // 交互式 PTY 捕获态：终端面板聚焦且已捕获时，除 F2/Esc 退出键外，

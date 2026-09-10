@@ -4,7 +4,7 @@ declare(strict_types=1);
 /**
  * 命令面板（F1 唤出）headless 单测：开/关、过滤、Backspace、选中执行、Esc 关闭、渲染冒烟。
  *
- * 脚手架：VICECODE_PLUGINS_DIR 指向 tmp 空目录，保证命令清单只有系统 16 项（无插件组），
+ * 脚手架：VICECODE_PLUGINS_DIR 指向 tmp 空目录，保证命令清单只有系统 17 项（无插件组，含插件面板浮层），
  * 断言可确定化。运行：php tests/command_palette_unit.php
  */
 
@@ -38,8 +38,8 @@ $app = new App();
 echo "== 唤起与关闭 ==\n";
 $app->handle(FunctionKeyEvent::new(1), $vp);
 check($app->palette->isOpen(), 'F1 打开命令面板');
-check($app->palette->totalCount() === 16, '命令清单为系统 16 项（无插件组，实际 ' . $app->palette->totalCount() . '）');
-check($app->palette->matchCount() === 16, '空过滤时展示全部 16 项');
+check($app->palette->totalCount() === 17, '命令清单为系统 17 项（无插件组，含插件面板浮层，实际 ' . $app->palette->totalCount() . '）');
+check($app->palette->matchCount() === 17, '空过滤时展示全部 17 项');
 
 // 再按 F1 收起
 $app->handle(FunctionKeyEvent::new(1), $vp);

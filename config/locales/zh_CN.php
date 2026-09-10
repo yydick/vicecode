@@ -249,4 +249,10 @@ return [
     'palette.placeholder'    => '输入以筛选命令…',
     'menu.command_palette'   => '命令面板',
     'help.g_palette'         => '打开命令面板（F1）',
+
+    // 自定义面板（插件浮层）
+    'menu.plugin_panels'     => '插件面板',
+    'panel.title'            => '插件面板',
+    'panel.empty'            => '（无插件面板）',
+    'panel.close'            => 'Esc 关闭 · Tab 切换',
 ];

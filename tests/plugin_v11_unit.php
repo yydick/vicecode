@@ -135,7 +135,7 @@ check($defs[4]['label'] === $app->t('menu.plugins'), '第 5 组 label 走 i18n�
 $expectActions = [
     'file.open', 'file.save', 'file.close', 'plugins.open', 'file.quit',
     'view.theme', 'view.focus.editor', 'view.focus.terminal', 'view.focus.explorer',
-    'view.focus.ai', 'palette.open', 'view.lang', 'term.cancel', 'term.clear', 'help.shortcuts', 'help.about',
+    'view.focus.ai', 'palette.open', 'panel.host.open', 'view.lang', 'term.cancel', 'term.clear', 'help.shortcuts', 'help.about',
 ];
 $gotActions = [];
 for ($i = 0; $i < 4; $i++) {
@@ -143,7 +143,7 @@ for ($i = 0; $i < 4; $i++) {
         $gotActions[] = $it['action'];
     }
 }
-check($gotActions === $expectActions, '前 4 组的 action 序列与改动前逐项一致（16 项，含命令面板）');
+check($gotActions === $expectActions, '前 4 组的 action 序列与改动前逐项一致（17 项，含命令面板与插件面板浮层）');
 $pluginActions = array_column($defs[4]['items'], 'action');
 // demo 3 + conf 3：快捷键冲突只降级快捷键，**命令本身仍会注册**（仍可从菜单触发）
 check(count($pluginActions) === 6, '插件组共 6 项（demo 3 + conf 3；冲突只降级快捷键）');

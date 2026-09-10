@@ -103,6 +103,7 @@ final class MenuBarPanel
                     ['label' => $t('menu.view_focus_explorer'),'action' => 'view.focus.explorer','shortcut' => 'Tab'],
                     ['label' => $t('menu.view_focus_ai'),     'action' => 'view.focus.ai',     'shortcut' => 'Tab'],
                     ['label' => $t('menu.command_palette'),    'action' => 'palette.open',      'shortcut' => 'F1'],
+                    ['label' => $t('menu.plugin_panels'),       'action' => 'panel.host.open',   'shortcut' => ''],
                     ['label' => $t('menu.view_lang'),     'action' => 'view.lang',     'shortcut' => ''],
                 ],
             ],

@@ -397,6 +397,43 @@ public function onEvent(\App\Plugin\PluginEvent $e): void
 
 **对插件作者意味着什么**：你只要按 §3.6 声明命令，它就**自动**同时获得「菜单项 + 可绑定快捷键 + 状态栏段点击 + 命令面板检索」四条触发路径，无需为命令面板单独适配。
 
+### 3.10 自定义面板（浮层，V1.1）
+
+插件可声明**整块 UI 面板**（而非只能往状态栏塞段），汇聚进一个**可开合浮层**统一展示。
+
+**声明**：在 `PluginInterface` 里实现 `panels()`，返回 `PluginPanel` 列表（可多个）。每个面板是一个纯数据对象：
+
+```php
+use App\Plugin\PluginPanel;
+use PhpTui\Tui\Extension\Core\Widget\ParagraphWidget;
+
+public function panels(): array
+{
+    return [
+        new PluginPanel('a', '面板 A',
+            fn(\App\App $app, int $w, int $h) => ParagraphWidget::fromString('内容 A')),
+        new PluginPanel('b', '面板 B',
+            fn(\App\App $app, int $w, int $h) => ParagraphWidget::fromString('内容 B'),
+            onChar: fn(\PhpTui\Term\Event\CharKeyEvent $e): bool => false, // 可选：消费字符键
+            onKey:  fn(\PhpTui\Term\Event\CodedKeyEvent $e): bool => false), // 可选：消费编码键
+    ];
+}
+```
+
+`PluginPanel` 字段：
+- `id`：插件内局部唯一；核心以 `<插件id>.<局部id>` 完全限定，天然免撞。
+- `title`：tab 标题（不过 i18n，由插件作者自行负责语言）。
+- `render`：内容渲染闭包，签名 `(App $app, int $width, int $height): Widget`，核心会把浮层内部可用区域的宽高传给它。
+- `onChar` / `onKey`：可选交互回调。浮层打开时，若当前 tab 的面板提供了对应回调，按键会先交给它处理（返回 `true` 即已消费），否则由宿主自己处理（见下）。
+
+**唤起与交互**：
+- 从菜单「视图 → 插件面板」进入（action `panel.host.open`），或在命令面板（F1）里检索 `panel` / `host` 选中执行。
+- 所有插件的面板收进**同一个**浮层，顶部一行 tab 列出各面板标题，选中项反白高亮。
+- `Tab` / `→` 切到下一 tab，`Shift+Tab` / `←` 切到上一 tab；`Esc` 关闭浮层。
+- 浮层是**模态**叠加层：打开期间独占键盘，鼠标点击被忽略，仅响应上述按键与当前面板的 `onChar`/`onKey` 回调。
+
+**为什么是浮层而非布局面板**：V1 的六面板布局（`App::PANELS`、焦点枚举、`Tab` 循环、鼠标命中、`build` 分支、`LayoutFactory`）是写死的。新增布局面板要改这一整条链路且牵动大量既有测试。本实现改为「可开合浮层」，直接复用 HelpPanel / 插件管理浮层 / 命令面板的 `CompositeWidget` 叠加范式——底层六面板布局完全不动，浮层浮在其上并独占键盘。因此插件无需任何布局改动即可拥有自己的整屏 UI。
+
 ## 4. 周期刷新：`tickInterval()` 与主循环
 
 `statusSegments()` 在**每次重绘**时被调用。但默认主循环只在「有键鼠事件 / 命令有输出 / AI 在流式 / 后台重绘信号」时才重绘。
@@ -517,10 +554,11 @@ php-tui 采用**差分渲染**——只在重绘时发送相对上一帧**变化
 - 命令钩子：`commands()` / `executeCommand()` 让插件从「只能显示」变成「能做事」，命令出现在菜单「插件」组，可绑定快捷键（§3.6）。
 - 状态栏段点击：`StatusSegment` 第 5 参数绑定命令局部 id，点击即触发（§3.7）。
 - 生命周期事件：`onEvent(PluginEvent)` 接收启动完成、配置重载、焦点切换、文件打开/保存/关闭、缓冲区切换、终端输出等事件（§3.8）。
+- 命令面板（F1）：扁平化全部菜单项（含插件命令）并提供模糊检索、键盘选择执行，复用 `App::menuAction()` 分发（§3.9）。注意因真实 pty 下 `Shift` 修饰不可区分，唤起键用 **F1** 而非字面的 `Ctrl+Shift+P`。
+- 自定义面板（浮层）：插件通过 `panels()` 返回 `PluginPanel` 列表，核心把它们收进一个可开合模态浮层（菜单「视图 → 插件面板」，或命令面板检索），用 `Tab` 切 tab、`Esc` 关闭（§3.10）。以浮层而非布局面板实现，避免改动写死的六面板布局与焦点链路。
 - 配置：`configDefaults()` / `configure()` 声明并接收配置，用户在 `~/.vicecode.plugins.json` 的 `<id>` 段覆盖（§3.4）。
 
 **仍未支持（设计取舍）**：
-- **自定义面板**：`App::PANELS` 与布局（六面板）是写死的，新增面板要改焦点枚举、Tab 循环、鼠标命中、build 分支与 `LayoutFactory`，成本很高且会牵动大量既有测试，V1.1 不做。
-- 命令面板（`Ctrl+Shift+P`）、插件的启用/禁用开关（`~/.vicecode.plugins.json` 的 `<id>.enabled` 约定由核心加载时读取）等留待后续版本。
+- 插件的启用/禁用开关（`~/.vicecode.plugins.json` 的 `<id>.enabled` 约定由核心加载时读取）留待后续版本。
 
 路线图以产品需求为准；任何扩展都会保持「运行时动态加载、单插件失败不影响整体」的设计原则。

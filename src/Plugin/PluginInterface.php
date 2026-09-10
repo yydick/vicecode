@@ -21,6 +21,11 @@ use App\App;
  * 核心用 method_exists 探测，未实现则跳过配置注入；不强制所有插件实现。
  * 用户配置位于插件专用文件 ~/.vicecode.plugins.json 的 <id> 段（由 ConfigStore 读写，
  * 与应用自身的 ~/.vicerc 完全分离；旧版写在 ~/.vicerc 的 plugins 段仍一次性回退兼容）。
+ *
+ * 可选面板能力（V1.1，均为可选）：
+ *  - panels(): array —— 返回本插件提供的面板列表（list<PluginPanel>）。
+ *    核心在装载期一次性收集进「插件面板」浮层（PluginPanelHost），内部用 tab 切换，
+ *    不改动六面板布局（见 docs/plugins.md §3.10）。未实现则无面板。
  */
 interface PluginInterface
 {
