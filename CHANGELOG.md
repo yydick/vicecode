@@ -8,9 +8,9 @@
 
 ---
 
-## [Unreleased]
+## [0.0.2] — 2026-09-10
 
-> 本轮主题：**边界深挖**（侧栏横滚 / 深层与超长路径 / 状态栏长值）+ **插件系统 V1.1**（命令钩子 / 状态栏段点击 / 生命周期事件）。全部改动**尚未提交**。
+> 本轮主题：**边界深挖**（侧栏横滚 / 深层与超长路径 / 状态栏长值）+ **插件系统 V1.1**（命令钩子 / 状态栏段点击 / 生命周期事件）+ **插件自定义面板** + 若干修复。已提交至 `develop`，待合并 `master` 发版。
 
 ### 修复
 
@@ -22,6 +22,7 @@
 - **终端横滚后拖拽选区复制错位**：`getTextRect()` 把选区绝对列换算成文本列时**减**了 `hScroll`（符号反了），渲染是「屏幕列 = 文本列 − hScroll」，换算该加回来。结果横滚后选中屏幕上的字符，复制出来的是**行首那几个字**（常只有 1 个）。（`BUGFIXES` B10）
 - **状态栏超长 cwd 整段消失**：120 列下 cwd 超过约 35 列就被整段丢弃。值型段（目录/文件/分支）改为按剩余空间截断保留**尾部**（`目录=…/尾部`），剩余宽度 < 12 列才整段丢。（E3）
 - **外部值夹带控制字符**：shell 上报的 cwd、文件名、分支名里的 `\n`/ESC 不显示却占 1 列宽度，导致状态栏少显内容。新增 `DisplayWidth::stripControl()` 净化。（D4）
+- **插件配置文件 `Ctrl+S` 不热加载**：热加载判断原只挂在 `App::menuAction('file.save')`，而编辑器内 `Ctrl+S` 走 `EditorPanel::onChar` → `EditorPanel::save()`，绕过 `menuAction`，导致 `reloadPluginConfig()` 永不触发。改为在 `EditorPanel::save()` 保存成功后判断 `path === ConfigStore::pluginsPath()` 并触发重载；并修 `ClockPlugin` 过时注释（原指向 `~/.vicerc` 的 `plugins.clock` 段）。新增 headless 回归测试（`tests/plugin_unit.php`）。
 
 ### 改进
 
@@ -37,6 +38,7 @@
   - **状态栏段点击**：`StatusSegment` 第 5 参数绑定命令局部 id，渲染时记录每段 `[起始列, 宽度]`，点击命中即触发其命令；被裁剪丢弃的段不可点。
   - **生命周期事件**：`onEvent(PluginEvent)` 接收 `app.ready` / `config.reloaded` / `focus.changed` / `editor.opened|saved|bufferChanged` / `terminal.output` 等事件，带防重入与单插件容错。`terminal.output` 给的是经过 pty 的**原始字节**（可能含 ANSI 与 OSC 7 的 cwd 上报），插件自行解析。
   - 配套值对象 `src/Plugin/PluginCommand.php`、`src/Plugin/PluginEvent.php`；加载支持环境变量 `VICECODE_PLUGINS_DIR` 覆盖插件根目录。
+  - **插件自定义面板**：插件经 `PluginPanelHost` 在 ViceCode 内渲染自己的面板，`PluginPanel` 值对象声明面板元信息；侧栏「扩展」tab 与「已安装插件」浮层同步扩展，可查看 / 触发插件面板。配套 `src/Panel/PluginPanelHost.php`、`src/Plugin/PluginPanel.php`；`PluginInterface` / `StatusSegment` 扩展，插件管理浮层与侧栏扩展 tab 若干交互问题修复。
 
 ### 测试
 
