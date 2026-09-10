@@ -163,7 +163,11 @@ final class SidebarPanel
                     $prefix = $node->isDir ? ($node->expanded ? '▼ ' : '▶ ') : '  ';
                     $marker = $node->path === $this->shell->selectedPath ? '» ' : '  ';
                     $suffix = $node->isDir ? '/' : '';
-                    $text = DisplayWidth::mbCutDisp($marker . $indent . $prefix . $node->name . $suffix, $innerW);
+                    // ⚠️ 这里**不能**先 mbCutDisp 到 innerW 再 mbSubDisp(hScroll)：
+                    // 文本一旦被截到 innerW 列，横滚就只能在已截断的这 innerW 列里滑动，
+                    // 超出部分永远看不到，hScroll 超过 innerW 后整行变空白（深目录/长名必踩）。
+                    // 正确做法是只对完整文本做「跳过 hScroll 列再取 innerW 列」。
+                    $text = $marker . $indent . $prefix . $node->name . $suffix;
                     $style = $node->path === $this->shell->selectedPath
                         ? Style::default()->addModifier(Modifier::REVERSED)
                         : Style::default();
@@ -645,7 +649,10 @@ final class SidebarPanel
         $innerW = max(0, $sidebar->width - 2);
         $plugins = $this->shell->plugins;
         if ($plugins === []) {
-            $lines[] = Line::fromSpans(Span::styled('(无插件)', $this->shell->theme->style('dim')));
+            $lines[] = Line::fromSpans(Span::styled(
+                $this->shell->t('plugins.no_plugins'),
+                $this->shell->theme->style('dim')
+            ));
             return;
         }
         $this->pluginSel = max(0, min($this->pluginSel, count($plugins) - 1));
@@ -745,11 +752,11 @@ final class SidebarPanel
             'headerPlusX' => $innerX + max(0, $innerW - 3),   // 标题行 '+' 在倒数第 3 列
             'headerMinusX' => $innerX + max(0, $innerW - 1),  // 标题行 '-'/'⟳' 在末列
             'firstY' => $y(self::GIT_FIRST_ROW),
-            'itemOpenX' => $innerX + 0,                      // 列表行 ▦ 在 inner 列 0（打开文件）
-            'itemPlusX' => $innerX + 2,                      // 列表行 + 在 inner 列 2（暂存）
-            'itemMinusX' => $innerX + 4,                     // 列表行 - 在 inner 列 4（取消暂存）
-            'itemDiscardX' => $innerX + 6,                   // 列表行 ✕ 在 inner 列 6（丢弃工作区改动）
-            'itemNameX' => $innerX + 8,                     // 列表行 文件名起始列（点此=开 diff）
+            'itemOpenX' => $innerX + 0,                      // ▦（打开文件）在**文本列** 0
+            'itemPlusX' => $innerX + 2,                      // +（暂存）在文本列 2
+            'itemMinusX' => $innerX + 4,                     // -（取消暂存）在文本列 4
+            'itemDiscardX' => $innerX + 6,                   // ✕（丢弃工作区改动）在文本列 6
+            'itemNameX' => $innerX + 8,                     // 文件名起始文本列（点此=开 diff）
             'menuY0' => $y(self::GIT_HEADER_ROW),           // 下拉覆盖从标题行起
             'branchRowY' => $y(0),                          // 分支行（GIT 内容行 0）：点击打开切换下拉
             'branchListY0' => $y(2),                        // 分支下拉列表起始行（标题 + 分隔之后）
@@ -843,15 +850,19 @@ final class SidebarPanel
             $git->selIdx = $idx;
             if ($git->subView === 0) {
                 // 行首图标：▦ 打开文件 / + 暂存 / - 取消暂存 / ✕ 丢弃（不可逆，弹确认）；其余=开 diff
-                $rc = $col - $r['innerX'];
-                if ($rc <= 1) {
-                    $git->openFileSelected();          // ▦ 在列 0~1
-                } elseif ($rc >= 2 && $rc <= 3) {
-                    $git->stageSelected();             // + 在列 2~3
-                } elseif ($rc >= 4 && $rc <= 5) {
-                    $git->unstageSelected();           // - 在列 4~5
-                } elseif ($rc >= 6 && $rc <= 7) {
-                    $git->requestDiscardSelected();    // ✕ 在列 6~7（弹确认）
+                // ⚠️ 列表行是按 mbSubDisp(完整文本, hScroll, innerW) 渲染的：
+                // **屏幕列 = 文本列 - hScroll**，而下面这些图标位置是「文本列」。
+                // 必须换算回文本列再判定，否则横滚后点路径文本会误触发行首图标
+                // （其中 ✕ = 丢弃工作区改动，不可逆 —— 深路径横滚后必踩）。
+                $tc = ($col - $r['innerX']) + $this->hScroll;
+                if ($tc <= 1) {
+                    $git->openFileSelected();          // ▦ 在文本列 0~1
+                } elseif ($tc >= 2 && $tc <= 3) {
+                    $git->stageSelected();             // + 在文本列 2~3
+                } elseif ($tc >= 4 && $tc <= 5) {
+                    $git->unstageSelected();           // - 在文本列 4~5
+                } elseif ($tc >= 6 && $tc <= 7) {
+                    $git->requestDiscardSelected();    // ✕ 在文本列 6~7（弹确认）
                 } else {
                     $git->openDiff();                  // 文件名 = 打开变更(diff)
                 }
@@ -922,7 +933,7 @@ final class SidebarPanel
 
         // 点行首三角（▶/▼）= 展开/折叠（VSCode 习惯）。
         // 命中区取「三角 + 其后空格」2 列：只判三角那 1 列太窄，很难点中。
-        if ($node->isDir && self::hitArrow($pos, $sb, $node->depth)) {
+        if ($node->isDir && $this->hitArrow($pos, $sb, $node->depth)) {
             $this->resetDoubleClick();
             $this->shell->selectedPath = $node->path;
             $this->shell->focus('sidebar');
@@ -971,8 +982,70 @@ final class SidebarPanel
             case KeyCode::Down:
                 $this->moveSelection(1);
                 return true;
+            // ←/→ 走 VSCode 的树导航语义：→ 展开（已展开则进子项），← 折叠（否则回父项）
+            case KeyCode::Right:
+                $this->keyRight();
+                return true;
+            case KeyCode::Left:
+                $this->keyLeft();
+                return true;
             default:
                 return false;
+        }
+    }
+
+    /**
+     * →：目录未展开 → 展开；已展开 → 选中其第一个子项（VSCode 习惯）。
+     * 文件上按 → 不做任何事（没有"下一级"可言）。
+     */
+    private function keyRight(): void
+    {
+        $visible = $this->tree->visible();
+        if ($visible === []) {
+            return;
+        }
+        $node = $visible[$this->selectedIndex($visible)] ?? null;
+        if ($node === null || !$node->isDir) {
+            return;
+        }
+        if (!$node->expanded) {
+            $node->ensureChildren();
+            $node->expanded = true;
+            return;
+        }
+        $first = $node->children[0] ?? null;   // 空目录：原地不动
+        if ($first !== null) {
+            $this->shell->selectedPath = $first->path;
+        }
+    }
+
+    /**
+     * ←：目录已展开 → 折叠；否则（已折叠的目录 / 文件）→ 选中父节点（VSCode 习惯）。
+     * 父节点不在当前可见列表里（例如祖先是折叠的）时不动，避免选中一个看不见的项。
+     */
+    private function keyLeft(): void
+    {
+        $visible = $this->tree->visible();
+        if ($visible === []) {
+            return;
+        }
+        $node = $visible[$this->selectedIndex($visible)] ?? null;
+        if ($node === null) {
+            return;
+        }
+        if ($node->isDir && $node->expanded) {
+            $node->expanded = false;
+            return;
+        }
+        $parent = dirname($node->path);
+        if ($parent === '' || $parent === $node->path) {
+            return;
+        }
+        foreach ($visible as $n) {
+            if ($n->path === $parent) {
+                $this->shell->selectedPath = $parent;
+                return;
+            }
         }
     }
 
@@ -1129,13 +1202,23 @@ final class SidebarPanel
 
     /**
      * 命中侧栏行首三角（▶/▼）？
-     * 行结构（屏幕列）：边框 | marker「» 」2 列 | 缩进 2*depth 列 | 三角 1 列 + 其后空格 1 列 | 名称。
-     * 实测（120x40，depth=0）：`│» ▶ .docs/` → 三角在 x=3。
+     * 行结构（文本列）：marker「» 」2 列 | 缩进 2*depth 列 | 三角 1 列 + 其后空格 1 列 | 名称。
+     * 实测（120x40，depth=0，hScroll=0）：`│» ▶ .docs/` → 三角在 x=3。
+     *
+     * ⚠️ 必须减 $this->hScroll：行是按 mbSubDisp(text, hScroll, innerW) 渲染的，
+     * 屏幕列 = 文本列 - hScroll。漏减会让横滚后命中区整体右偏 hScroll 列
+     * （点在三角上没反应，点在名称上却 toggle）。
      */
-    private static function hitArrow(Position $pos, Area $sb, int $depth): bool
+    private function hitArrow(Position $pos, Area $sb, int $depth): bool
     {
-        $arrowX = $sb->position->x + 1 + 2 + $depth * 2;  // inner 左界（margin 1）+ marker 2 列 + 缩进
-        return $pos->x >= $arrowX && $pos->x <= $arrowX + 1;
+        $innerLeft = $sb->position->x + 1;              // 左边框占 1 列
+        $innerRight = $sb->position->x + $sb->width - 2; // 右边框占 1 列
+        $arrowX = $innerLeft + 2 + $depth * 2 - $this->hScroll;
+        // 三角被滚出可视区（左溢出，或深到还没滚进来）→ 点不到，也别命中
+        if ($arrowX < $innerLeft || $arrowX > $innerRight) {
+            return false;
+        }
+        return $pos->x >= $arrowX && $pos->x <= min($arrowX + 1, $innerRight);
     }
 
     /**

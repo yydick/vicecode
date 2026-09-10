@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace App\Panel;
 
+use App\Core\ConfigStore;
 use App\Core\KeyInput;
 use App\App;
 use App\Editor\Buffer;
@@ -86,6 +87,7 @@ final class EditorPanel
     public function removeBuffer(string $path): void
     {
         unset($this->buffers[$path]);
+        $this->shell->emitPluginEvent('file.closed', ['path' => $path]);
     }
 
     public function hasTabs(): bool
@@ -143,9 +145,12 @@ final class EditorPanel
         //  - 否则跟随光标（显示列单位，双向），保证直接设置/移动的光标始终可见。
         // 两者都不再把字符索引 cursorCol 与显示列 scrollLeft/textW 混用（CJK 下比例不同）。
         $this->lastTextW = $textW;
+        // 横滚上界取「可见视口内最宽行」（与下方 hRight 指示符同源）：
+        // 早先按**光标所在行**算，光标停在短行时整屏都滚不动（与其他面板"按最宽行"也不一致）。
+        $maxVisW = $this->visibleMaxWidth($buf, $buf->scrollTop, $visibleRows);
         $lineCur = $buf->lines[$buf->cursorRow] ?? '';
         if ($this->scrollPinned) {
-            $buf->scrollLeft = max(0, min($buf->scrollLeft, max(0, DisplayWidth::dispWidth($lineCur) - $textW)));
+            $buf->scrollLeft = max(0, min($buf->scrollLeft, max(0, $maxVisW - $textW)));
             if ($buf->scrollLeft < 0) {
                 $buf->scrollLeft = 0;
             }
@@ -212,23 +217,29 @@ final class EditorPanel
             );
         }
 
-        // 横向滚动边界指示：取可见行的最大显示宽，判断左右是否还有隐藏内容。
-        // 用可见视口内最宽行（而非整文档），既便宜又能正确反映「当前屏」的滚动余量。
-        $maxVisW = 0;
-        for ($i = 0; $i < $visibleRows; $i++) {
-            $li = $buf->scrollTop + $i;
-            if ($li >= $total) {
-                continue;
-            }
-            $w = DisplayWidth::dispWidth($buf->lines[$li] ?? '');
-            if ($w > $maxVisW) {
-                $maxVisW = $w;
-            }
-        }
         $this->hLeft = $buf->scrollLeft > 0;
         $this->hRight = $buf->scrollLeft + $textW < $maxVisW;
 
         return ParagraphWidget::fromLines(...$lines);
+    }
+
+    /**
+     * 可见视口内最宽行的显示列宽（横滚上界与 › 指示符共用，避免两个口径打架）。
+     */
+    private function visibleMaxWidth(Buffer $buf, int $scrollTop, int $rows): int
+    {
+        $max = 0;
+        for ($i = 0; $i < $rows; $i++) {
+            $li = $scrollTop + $i;
+            if ($li >= count($buf->lines)) {
+                continue;
+            }
+            $w = DisplayWidth::dispWidth($buf->lines[$li] ?? '');
+            if ($w > $max) {
+                $max = $w;
+            }
+        }
+        return $max;
     }
 
     /**
@@ -459,6 +470,7 @@ final class EditorPanel
         }
         $this->scrollPinned = false; // 打开新文件：光标跟随（从列 0 显示）
         $this->shell->focus('editor');
+        $this->shell->emitPluginEvent('file.opened', ['path' => $path, 'virtual' => false]);
     }
 
     public function switchBuffer(string $path): void
@@ -466,6 +478,7 @@ final class EditorPanel
         if (isset($this->buffers[$path])) {
             $this->shell->buffer = $this->buffers[$path];
             $this->scrollPinned = false;
+            $this->shell->emitPluginEvent('buffer.switched', ['path' => $path]);
         }
     }
 
@@ -486,6 +499,7 @@ final class EditorPanel
         $this->shell->buffer = $this->buffers[$path];
         $this->scrollPinned = false;
         $this->shell->focus('editor');
+        $this->shell->emitPluginEvent('file.opened', ['path' => $path, 'virtual' => true]);
     }
 
     /** Ctrl+Tab：在已开文件间环形切换 */
@@ -501,6 +515,7 @@ final class EditorPanel
         }
         $next = $paths[($idx + 1) % count($paths)];
         $this->shell->buffer = $this->buffers[$next];
+        $this->shell->emitPluginEvent('buffer.switched', ['path' => $next]);
     }
 
     /** Ctrl+S 保存，结果写进状态栏消息 */
@@ -520,6 +535,14 @@ final class EditorPanel
             return;
         }
         $ok = $buf->save();
+        $this->shell->emitPluginEvent('file.saved', ['path' => $path, 'ok' => $ok]);
+        // 保存的若是插件专用配置文件，则重新注入插件配置（在 ViceCode 内改完即生效，无需重启）。
+        // 键盘 Ctrl+S 也走这里，所以热加载判断放此处而非 App::menuAction，才能覆盖全部保存路径。
+        if ($ok && $path === ConfigStore::pluginsPath()) {
+            $this->shell->reloadPluginConfig();
+            $this->shell->setMessage($this->shell->t('plugins.reloaded'));
+            return;
+        }
         $this->shell->setMessage($ok
             ? $this->shell->t('editor.saved')
             : $this->shell->t('editor.save_failed', ['msg' => (error_get_last()['message'] ?? 'unknown')]));

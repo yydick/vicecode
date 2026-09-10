@@ -2,6 +2,8 @@
 
 VSCode 风格的多面板终端工作台（TUI）。基于 **PHP 8.3 + php-tui/php-tui 0.2.1 + Swoole 6.2.1**，在终端里提供 Explorer / 编辑器 / 终端 / GIT / 搜索 / AI 对话 六面板协同的工作环境。
 
+[English](README.md)
+
 ```
 ┌───────────┬────────────────────────────┬──────────────┐
 │ Sidebar   │  Editor                    │ Terminal     │
@@ -15,7 +17,7 @@ VSCode 风格的多面板终端工作台（TUI）。基于 **PHP 8.3 + php-tui/p
 └───────────────────────────────────────────────────────────┘
 ```
 
-顶栏菜单栏用 **F10** 打开（File / View / Terminal / Help）。
+> 侧栏共四个 tab：Explorer / GIT / 搜索 / 🧩 插件；顶栏菜单栏用 **F10** 打开（File / View / Terminal / Help）。
 
 ## 界面预览
 
@@ -193,11 +195,25 @@ VICECODE_CONFIG=/tmp/my_vicecode.json php bin/vicecode.php
 
 插件文件写普通 PHP 即可；核心加载器刻意使用运行时 `require`，插件可独立放置、随时增删，无需重新构建应用。
 
+**配置插件**：菜单「文件 → 已安装插件」或侧栏 🧩「扩展」tab 选中后按 `Enter`，ViceCode 会用**自带编辑器**打开插件专用配置文件 `~/.vicecode.plugins.json`（与 ViceCode 自身配置 `~/.vicerc` 分离，互不干扰），`Ctrl+S` 保存即热重载插件配置——不重启、也不需要外部编辑器。
+
 完整插件开发文档（编写 / 加载机制 / 字段取值 / 测试）见 [docs/plugins.md](docs/plugins.md)。
+
+发版记录见 [CHANGELOG.md](CHANGELOG.md)；每个已修 BUG 的现象 / 根因 / 防回归测试见 [docs/BUGFIXES.md](docs/BUGFIXES.md)。
 
 ## 测试
 
-`tests/` 下既有 headless 单测，也有真实 pty 端到端验收（须真实终端环境，外层已加 `timeout` 兜底）：
+用自带的跑批脚本一次跑完（**按每个测试的退出码**判定通过与否，支持按文件名过滤与单测超时）：
+
+```bash
+tools/run_tests.sh          # 全量，约 220s
+tools/run_tests.sh pty      # 只跑文件名含 pty 的
+composer test               # 同上
+```
+
+> 不要 grep 输出关键字来判断结果 —— 测试名里含 "Uncaught"/"Fatal" 字样，且并非每个测试都打印 PASS 标记。一律以退出码为准。
+
+`tests/` 下既有 headless 单测，也有真实 pty 端到端验收（须真实终端环境，外层已加 `timeout` 兜底）。也可以单跑某一项：
 
 ```bash
 php tests/interactive_term_unit.php     # 交互式 PTY：仿真器 + pty 管道 headless 单测

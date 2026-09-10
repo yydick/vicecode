@@ -5,7 +5,9 @@ declare(strict_types=1);
  * 示例插件：状态栏时钟。
  * 纯普通 PHP（不在 composer autoload 内），由 PluginLoader 运行时 require 进来。
  *
- * 可配置（~/.vicerc 的 plugins.clock 段，覆盖下方 configDefaults 的默认值）：
+ * 可配置（插件专用文件 ~/.vicecode.plugins.json，覆盖下方 configDefaults 的默认值；
+ *   在 ViceCode 内「文件 → 已安装插件...」或侧栏 🧩 打开该文件，Ctrl+S 保存即热重载）：
+ *   { "clock": { "timezone": "...", "format": "..." } }
  *   timezone: PHP 时区名，如 "Asia/Shanghai"（默认，UTC+8）/ "UTC" / "America/New_York"
  *             特殊值 "local" = 跟随 PHP 当前 date.timezone（即本机 php.ini 设置）
  *   format:   date() 格式串，默认 "H:i:s"（纯 ASCII，显示宽度恒为 8，不触发 CJK 折行）
@@ -20,7 +22,7 @@ class ClockPlugin implements \App\Plugin\PluginInterface
         return 'clock';
     }
 
-    /** 插件默认配置（用户 ~/.vicerc 的 plugins.clock 段可覆盖） */
+    /** 插件默认配置（用户 ~/.vicecode.plugins.json 的 clock 段可覆盖） */
     public function configDefaults(): array
     {
         return [

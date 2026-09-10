@@ -110,6 +110,57 @@ check(in_array('locale', $r40['dropped'], true), '40 列：语言这种低价值
 $r0 = $app3->statusBar->assemble(0);
 check($r0['text'] === '', '宽度 0 → 空串，不负数不崩');
 
+// 值型段（目录/文件/分支）放不下时**截断保留尾部**，而不是整段消失：
+// 深目录里 cwd 恰是最需要看到的信息，旧行为却把它整段丢掉、一点痕迹都没有。
+echo "\n== 状态栏：长值截断 + 外部值净化 ==\n";
+$appCwd = new App();
+$appCwd->focus('terminal');
+$setCwd = static function (App $a, string $cwd): void {
+    $p = new ReflectionProperty($a->terminal, 'cwd');
+    $p->setAccessible(true);
+    $p->setValue($a->terminal, $cwd);
+};
+/** 取状态栏里「目录=」那一整段文本（段间以 ' · ' 分隔） */
+$cwdSeg = static function (string $text): ?string {
+    foreach (explode(' · ', $text) as $s) {
+        if (str_starts_with(trim($s), '目录=')) {
+            return trim($s);
+        }
+    }
+    return null;
+};
+
+$short = '/home/me/proj';
+$setCwd($appCwd, $short);
+check(str_contains($appCwd->statusBar->text(200), '目录=' . $short), '短 cwd 原样显示（含标签前缀）');
+
+$long = '/' . str_repeat('abcdefghij', 30); // 301 列，远超状态栏
+$setCwd($appCwd, $long);
+$rLong = $appCwd->statusBar->assemble(120);
+check(!in_array('cwd', $rLong['dropped'], true), '120 列：超长 cwd 不再整段消失（改为截断保留）');
+$seg = $cwdSeg($rLong['text']);
+check($seg !== null && str_contains((string) $seg, '…'), '截断后带省略号，且标签前缀 目录= 还在');
+$tail = $seg === null ? '' : substr($seg, strlen('目录=…'));
+check($tail !== '' && str_ends_with($long, $tail), '截断保留的是路径尾部（当前目录名可见）');
+check(DisplayWidth::dispWidth($rLong['text']) <= 120, '截断后状态栏仍不超宽');
+
+// 空间小到读不出信息（< MIN_TRUNC）才整段丢弃
+$rNarrow = $appCwd->statusBar->assemble(40);
+check(in_array('cwd', $rNarrow['dropped'], true), '40 列：剩余宽度读不出东西 → cwd 整段丢弃');
+check(DisplayWidth::dispWidth($rNarrow['text']) <= 40, '40 列：仍不超宽');
+
+// cwd 是 shell 经 OSC 上报的外部值，可能夹带控制字符（不显示却占 1 列宽度）
+$setCwd($appCwd, "/tmp/a\nb\x1b[31mred");
+$rCtl = $appCwd->statusBar->assemble(120);
+check(preg_match('/[\x00-\x1F\x7F]/', $rCtl['text']) !== 1, 'cwd 含 \\n / ESC 等控制字符被净化');
+check(!str_contains($rCtl['text'], "\x1b"), 'ESC 序列不进状态栏（不会污染终端渲染）');
+check(str_contains($rCtl['text'], '/tmp/ab'), '净化后可见文本连续（/tmp/ab）');
+
+// 空值段不能因为加了标签前缀就露出「目录=」
+$appCwd->focus('editor');
+check(!str_contains($appCwd->statusBar->text(200), '目录='), '非终端焦点：cwd 段不渲染（空值段不露标签）');
+$appCwd->focus('terminal');
+
 // 确认态独占整条（先让它变脏，否则 requestQuit 会直接退出而不是弹确认）
 $app3->buffer?->insertChar('X');
 check($app3->buffer?->dirty === true, '改动后置上 dirty（供下面的退出确认用）');

@@ -173,6 +173,8 @@ final class TerminalPanel
         }
         $got = $this->runner->poll(function (string $bytes, bool $isErr): void {
             $this->buf->append($bytes, $isErr);
+            // V1.1：给插件的是**原始字节**（可能含 ANSI 与 OSC 7 的 cwd 上报），且不节流
+            $this->shell->emitPluginEvent('terminal.output', ['bytes' => $bytes]);
         });
         if (!$this->runner->isRunning()) {
             // 命令结束：结算未终止的半行，并把视口拉回底部看结果
@@ -202,6 +204,7 @@ final class TerminalPanel
         if ($bytes === '') {
             return false;
         }
+        $this->shell->emitPluginEvent('terminal.output', ['bytes' => $bytes]);
         $this->emu?->write($bytes);
         // 消费 shell 经 OSC 回显的工作目录（实时 cwd 捕获）
         $cwd = $this->emu?->consumeCwd();
@@ -636,10 +639,11 @@ final class TerminalPanel
                 continue;
             }
             $text = $src['text'] ?? '';
-            // 显示文本 = mbSubDisp(text, hScroll, W)：可见文本从 inner.x 起、显示列 0..W-1。
-            // 选区绝对列 → 可见文本显示列 = absCol - inner.x - hScroll。
-            $dispA = max(0, $c0 - $inner->position->x - $this->hScroll);
-            $dispB = max(0, $c1 - $inner->position->x - $this->hScroll);
+            // 显示文本 = mbSubDisp(text, hScroll, W)：屏幕上第 d 列显示的是**文本第 d+hScroll 列**。
+            // 故选区绝对列 → 文本显示列 = (absCol - inner.x) + hScroll（**加**回偏移）。
+            // 曾写成减 hScroll（符号反了）：未横滚时无差别，一横滚抓到的就是行首那几个字。
+            $dispA = max(0, $c0 - $inner->position->x + $this->hScroll);
+            $dispB = max(0, $c1 - $inner->position->x + $this->hScroll);
             $chA = DisplayWidth::mbDispToCharIndex($text, $dispA);
             $chB = DisplayWidth::mbDispToCharIndex($text, $dispB + 1);
             $out[] = mb_substr($text, $chA, $chB - $chA);

@@ -95,21 +95,24 @@ final class InputParser
                 // 中断在「已找到 OSC 起点但无终结符」：整段都是不完整 OSC，全部保留不 advance
                 $this->oscBuf = $tail;
             } else {
-                // 从未找到 OSC 起点：尾部可能是不完整 OSC 标记前缀（如跨 feed 拆开的 `\e]5`），
-                // 仅保留该前缀，其余普通字节 advance 给 EventParser。
+                // 从未找到 OSC 起点：尾部若是不完整 OSC 标记前缀（\x1b]52; 的前缀，且至少含
+                // \x1b] 两个字节）才保留待补全；裸 \x1b 只是普通 Esc 键，必须交给 EventParser
+                // （它会暂存、待空闲超时冲刷成真正的 Esc 键）。否则「单独按 Esc」在真实 pty 下
+                // 会被这里当成未完 OSC 前缀、因 keep==tlen2 直接清空而丢弃，浮层永远关不掉。
                 $keep = 0;
                 $tlen2 = strlen($tail);
-                for ($k = $tlen2; $k > 0; $k--) {
+                for ($k = $tlen2; $k >= 2; $k--) {
                     if (str_starts_with("\x1b]52;", substr($tail, 0, $k))) {
                         $keep = $k;
                         break;
                     }
                 }
-                if ($keep > 0) {
+                if ($keep >= 2) {
+                    // 保留 OSC 前缀本身；前缀之后的非 OSC 字节仍 advance 给解析器
                     if ($keep < $tlen2) {
-                        $this->parser->advance(substr($tail, 0, $tlen2 - $keep), $more);
+                        $this->parser->advance(substr($tail, $keep), $more);
                     }
-                    $this->oscBuf = substr($tail, $tlen2 - $keep);
+                    $this->oscBuf = substr($tail, 0, $keep);
                 } else {
                     $this->parser->advance($tail, $more);
                     $this->oscBuf = '';
@@ -119,6 +122,18 @@ final class InputParser
             $this->oscBuf = '';
         }
 
+        return $this->parser->drain();
+    }
+
+    /**
+     * 空闲超时冲刷：把已缓冲的孤立 ESC（`\x1b`）等「等待更多字节」的不完整序列按结束求值，
+     * 使其被 Emit 成真正的 Esc 键。读键协程在 waitEvent 空闲超时（无新输入）时调用——
+     * 否则真实 pty 下「单独按 Esc」会一直挂起，浮层/菜单无法靠 Esc 关闭。
+     * @return Event[]
+     */
+    public function flush(): array
+    {
+        $this->parser->advance('', false);
         return $this->parser->drain();
     }
 

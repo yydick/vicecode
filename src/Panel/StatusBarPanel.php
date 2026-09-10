@@ -22,7 +22,10 @@ use PhpTui\Tui\Widget\Widget;
  * 故这里的策略：
  *  1. 每项带优先级；
  *  2. 放不下时**优先丢弃低优先级项**，保住高优先级项；
- *  3. 最后兜底硬截断（带省略号），保证绝不超过可视宽度。
+ *  3. **值型段（目录/文件/分支）例外**：它们的价值集中在尾部（当前目录名、扩展名），
+ *    整段丢弃等于「在深目录里工作时完全看不到自己在哪」，故按剩余空间截断成
+ *    `标签=…尾部`，只有剩余宽度小到读不出东西（< MIN_TRUNC）才整段丢弃；
+ *  4. 最后兜底硬截断（带省略号），保证绝不超过可视宽度。
  *
  * 优先级（高 → 低）：
  *  message(100) > 文件+dirty(90) > 编辑模式(85) > Provider/模型(80) > 分支(70)
@@ -38,6 +41,18 @@ final class StatusBarPanel
     /** 兜底截断用的省略号（1 列） */
     private const ELLIPSIS = '…';
 
+    /** 上次 assemble 的宽度（调试与断言用） */
+    private int $lastWidth = 0;
+
+    /** 上次 assemble 各段的命中矩形（V1.1 状态栏点击的唯一判据） */
+    private array $lastPlaced = [];
+
+    /**
+     * 值型段截断后保底要有的宽度（含标签前缀与省略号）。
+     * 低于这个宽度，`目录=…rc` 这种结果也读不出信息，不如整段丢弃把位置让给别人。
+     */
+    private const MIN_TRUNC = 12;
+
     public function __construct(private App $shell)
     {
     }
@@ -50,13 +65,21 @@ final class StatusBarPanel
     /**
      * 组装状态栏文本，保证显示宽度 <= $width。
      *
-     * @return array{text:string,dropped:string[]} dropped 供测试断言「丢了哪些」
+     * @return array{text:string,dropped:string[],placed:array<int,array{k:string,cmd:?string,x0:int,x1:int}>}
+     *         dropped 供测试断言「丢了哪些」；placed 是最后一段的**命中矩形**（相对状态栏左沿的列），
+     *         只有它才是点击判据 —— 与取舍同源，被丢弃的段天然不可点。
      */
     public function assemble(int $width): array
     {
-        // 确认态独占整条：用户在做"要不要丢改动"这种决定，必须完整可读
+        // 确认态独占整条：用户在做"要不要丢改动"这种决定，必须完整可读（也不可点）
         if ($this->shell->confirm !== null) {
-            return ['text' => $this->hardTruncate($this->confirmText(), max(0, $width)), 'dropped' => []];
+            $this->lastPlaced = [];
+            $this->lastWidth = $width;
+            return [
+                'text' => $this->hardTruncate($this->confirmText(), max(0, $width)),
+                'dropped' => [],
+                'placed' => [],
+            ];
         }
 
         $segs = $this->segments();
@@ -69,20 +92,79 @@ final class StatusBarPanel
             $candidate = array_merge($kept, [$seg]);
             if ($this->joinWidth($candidate) <= $width) {
                 $kept[] = $seg;
-            } else {
-                $dropped[] = $seg['k'];
+                continue;
             }
+            // 放不下：值型段（带 pfix）改按剩余空间截断保留尾部，而不是整段消失。
+            // 深目录里 cwd 恰是最需要看到的信息，旧行为却把它第一个丢掉。
+            $truncated = $this->truncateValue($seg, $kept, $width);
+            if ($truncated !== null) {
+                $kept[] = $truncated;
+                continue;
+            }
+            $dropped[] = $seg['k'];
         }
 
         // 显示顺序与优先级解耦：否则"消息优先级最高"会让它跑到最左边，很难读。
         // 丢弃看 p，摆放看 o。
         usort($kept, static fn(array $a, array $b): int => $a['o'] <=> $b['o']);
 
+        // V1.1：算出本帧各段的 x 区间（必须与 join() 逐列对齐，否则点击会错位）
+        $this->lastWidth = $width;
+        $this->lastPlaced = $this->placeWidths($kept, $width);
+
         $text = $this->join($kept);
         if (DisplayWidth::dispWidth($text) > $width) {
             $text = $this->hardTruncate($text, $width);
         }
-        return ['text' => $text, 'dropped' => $dropped];
+        return ['text' => $text, 'dropped' => $dropped, 'placed' => $this->lastPlaced];
+    }
+
+    /**
+     * 按最终 join 顺序给出每段的列区间 [x0,x1]（相对状态栏左沿，含端点）。
+     * 必须与 join() 逐列对齐：join() 结果带前导 1 空格 → 起始 x=1；
+     * 't'==='' 的段被 join() 跳过 → 不产出矩形；段间分隔符不归入任何段。
+     * @param array<int,array{k:string,p:int,o:int,t:string,pfix?:string,cmd?:?string}> $kept
+     * @return array<int,array{k:string,cmd:?string,x0:int,x1:int}>
+     */
+    private function placeWidths(array $kept, int $width): array
+    {
+        $placed = [];
+        $x = 1;                                     // join() 的前导空格占 1 列
+        $sepW = DisplayWidth::dispWidth(self::SEP);
+        foreach ($kept as $s) {
+            if (($s['t'] ?? '') === '') {
+                continue;
+            }
+            $w = DisplayWidth::dispWidth(($s['pfix'] ?? '') . $s['t']);
+            if ($w <= 0 || $x >= $width) {
+                continue;
+            }
+            $placed[] = [
+                'k' => $s['k'],
+                'cmd' => $s['cmd'] ?? null,
+                'x0' => $x,
+                'x1' => min($x + $w - 1, $width - 1),
+            ];
+            $x += $w + $sepW;
+        }
+        return $placed;
+    }
+
+    /**
+     * 命中测试：相对状态栏左沿的列 → 该段要执行的完全限定命令 id。
+     * 未命中（空列 / 分隔符 / 系统段 / 无命令的段 / 已被整条确认占用）返回 null。
+     *
+     * 取舍：只有段**文本所占列**算命中，宁可难点也不让"点错也触发"。
+     * V1.1 不给可点段加视觉标识，文档建议插件自己在文案里加标记（如 `🕐 12:00 ⟳`）。
+     */
+    public function clickSegment(int $x): ?string
+    {
+        foreach ($this->lastPlaced as $p) {
+            if ($p['cmd'] !== null && $x >= $p['x0'] && $x <= $p['x1']) {
+                return $p['cmd'];
+            }
+        }
+        return null;
     }
 
     public function text(int $width = 0): string
@@ -91,16 +173,21 @@ final class StatusBarPanel
     }
 
     /**
-     * 各信息段。k 是稳定标识（供测试断言"丢了哪一项"），p 是优先级。
+     * 各信息段。k 是稳定标识（供测试断言"丢了哪一项"），p 是优先级，o 是显示顺序。
      *
-     * @return array<int,array{k:string,p:int,t:string}>
+     * pfix 存在时表示这是「值型段」：pfix 是不参与截断的标签前缀（如「目录=」），
+     * t 是可被截断的值本身（放不下时截断保留尾部，见 truncateValue()）。
+     *
+     * @return array<int,array{k:string,p:int,o:int,t:string,pfix?:string}>
      */
     private function segments(): array
     {
         $t = fn(string $k, array $params = []): string => $this->shell->t($k, $params);
 
         $buf = $this->shell->buffer;
-        $file = $buf !== null ? basename((string) $buf->path) : '—';
+        // 文件名/分支/cwd 都属外部值（文件系统 / git / shell 上报），可能夹带控制字符：
+        // 它们不显示却占 1 列宽度，会让状态栏少显内容，故统一剔除。
+        $file = $buf !== null ? DisplayWidth::stripControl(basename((string) $buf->path)) : '—';
         $dirty = $buf !== null && $buf->dirty ? ' ' . $t('status.dirty') : '';
         // 编辑模式（R1 四项之一）：只读必须显式标出来，
         // 否则用户改半天发现保存不了，会以为是 bug。
@@ -123,10 +210,10 @@ final class StatusBarPanel
             // 侧栏当前 tab 高亮），状态栏里再写一遍是纯冗余，占掉的 28 列不如让给
             // 「文件 / 消息 / 退出提示」这些没有第二处显示的信息。
             ['k' => 'message', 'p' => 100, 'o' => 8, 't' => $this->shell->message],
-            ['k' => 'file',    'p' => 90,  'o' => 1, 't' => $t('status.file') . '=' . $file . $dirty],
+            ['k' => 'file',    'p' => 90,  'o' => 1, 'pfix' => $t('status.file') . '=', 't' => $file . $dirty],
             ['k' => 'mode',    'p' => 85,  'o' => 2, 't' => $t('status.mode') . '=' . $mode],
             ['k' => 'ai',      'p' => 80,  'o' => 4, 't' => $t('status.provider') . '=' . $ai],
-            ['k' => 'branch',  'p' => 70,  'o' => 3, 't' => $t('status.branch') . '=' . $this->shell->git->branch],
+            ['k' => 'branch',  'p' => 70,  'o' => 3, 'pfix' => $t('status.branch') . '=', 't' => DisplayWidth::stripControl($this->shell->git->branch)],
             ['k' => 'quit',    'p' => 65,  'o' => 9, 't' => $t('status.quit')],
             ['k' => 'app',     'p' => 50,  'o' => 0, 't' => $t('app.title')],
             ['k' => 'locale',  'p' => 40,  'o' => 7, 't' => $t('status.locale') . '=' . $this->shell->locale()],
@@ -136,9 +223,11 @@ final class StatusBarPanel
             ['k' => 'tab',     'p' => 75,  'o' => 6, 't' => $t('status.tab') . '=' . $this->shell->sidebar->tabLabel()],
             // 终端 cwd：仅在聚焦终端时显示（避免与其它面板争抢状态栏空间）。
             // 值来自 PROMPT_COMMAND 钩子经 OSC 实时上报的 shell 工作目录。
-            ['k' => 'cwd',     'p' => 60,  'o' => 10, 't' => $this->shell->focusPanel() === 'terminal'
-                ? $t('status.cwd') . '=' . $this->shell->terminal->cwd()
-                : ''],
+            ['k' => 'cwd',     'p' => 60,  'o' => 10,
+                'pfix' => $t('status.cwd') . '=',
+                't' => $this->shell->focusPanel() === 'terminal'
+                    ? DisplayWidth::stripControl($this->shell->terminal->cwd())
+                    : ''],
             // 拖拽尺寸段：排最右、优先级最高，拖拽时必定显示，松手即消失。
             ['k' => 'layout',  'p' => 95,  'o' => 11, 't' => $layout],
         ];
@@ -150,6 +239,38 @@ final class StatusBarPanel
         }
 
         return $segs;
+    }
+
+    /**
+     * 值型段（带 pfix）塞不下时，按剩余空间截断保留**尾部**；放不下就返回 null（整段丢弃）。
+     *
+     * @param array<int,array{k:string,p:int,o:int,t:string}> $kept 已保留的段
+     * @param array{k:string,p:int,o:int,t:string,pfix?:string} $seg
+     * @return array{k:string,p:int,o:int,t:string}|null
+     */
+    private function truncateValue(array $seg, array $kept, int $width): ?array
+    {
+        $pfix = $seg['pfix'] ?? null;
+        if ($pfix === null || $seg['t'] === '') {
+            return null;
+        }
+        $sepCost = $kept === [] ? 0 : DisplayWidth::dispWidth(self::SEP);
+        $room = $width - $this->joinWidth($kept) - $sepCost;
+        if ($room < self::MIN_TRUNC) {
+            return null;
+        }
+        $valueRoom = $room - DisplayWidth::dispWidth($pfix) - 1; // 1 列给省略号
+        if ($valueRoom <= 0) {
+            return null;
+        }
+        return [
+            'k' => $seg['k'],
+            'p' => $seg['p'],
+            'o' => $seg['o'],
+            't' => $pfix . self::ELLIPSIS . DisplayWidth::mbTailDisp($seg['t'], $valueRoom),
+            // 保真：截断只改文本，命令归属不变（插件段无 pfix 走不到这里，但别让将来踩坑）
+            'cmd' => $seg['cmd'] ?? null,
+        ];
     }
 
     private function confirmText(): string
@@ -168,9 +289,12 @@ final class StatusBarPanel
     {
         $parts = [];
         foreach ($segs as $s) {
-            if ($s['t'] !== '') {
-                $parts[] = $s['t'];
+            if ($s['t'] === '') {
+                continue; // 空值段不占位置（如非终端焦点时的 cwd）
             }
+            // pfix（标签前缀）只在段有值时才拼；被 truncateValue 处理过的段
+            // 已把 pfix 并进 t 且不带 pfix 键，不会重复。
+            $parts[] = ($s['pfix'] ?? '') . $s['t'];
         }
         return $parts === [] ? '' : ' ' . implode(self::SEP, $parts);
     }

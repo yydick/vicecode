@@ -1,0 +1,78 @@
+# 更新日志
+
+> 本文件是**发版摘要**：每个版本改了什么、该跑什么。
+> 每个 BUG 的**现象 / 根因 / 修复 / 防回归测试**都在 [docs/BUGFIXES.md](docs/BUGFIXES.md)，
+> 那里是根因的权威归处，本文件不重复细节。
+
+版本格式：`[版本号] — 日期`，未发版的改动都归在 `Unreleased`。
+
+---
+
+## [0.0.2] — 2026-09-10
+
+> 本轮主题：**边界深挖**（侧栏横滚 / 深层与超长路径 / 状态栏长值）+ **插件系统 V1.1**（命令钩子 / 状态栏段点击 / 生命周期事件）+ **插件自定义面板** + 若干修复。已提交至 `develop`，待合并 `master` 发版。
+
+### 修复
+
+- **侧栏树行「双重截断」**：先 `mbCutDisp(innerW)` 再 `mbSubDisp(hScroll)`，导致横滚看不到超出 innerW 的内容、`hScroll` 超过 innerW 后**整行空白**。改为只对完整文本切片。（`BUGFIXES` B5）
+- **侧栏三角命中列漏减 `hScroll`**：横滚后点三角没反应、点文件名却展开/折叠；目录超过约 13 层时三角落在侧栏右边界外，**鼠标根本折不了**。命中列改为减 `hScroll` 并夹在可视区内。（B6）
+- **GIT 行首图标命中列漏减 `hScroll`**：深路径横滚后点路径文本，会弹出「✕ 丢弃工作区改动」确认（不可逆操作）。判定改为先换算回文本列。（B7）
+- **AI 面板 hScroll 无上界**：消息行是先软换行再渲染的，行宽本就不超过面板宽，横滚不会露出新内容、只会把左侧切掉；没有上界时一路滚下去**整片空白**（内容像丢了）。改为按「最宽行 − 视口宽」钳制，通常上界为 0。（`BUGFIXES` B8）
+- **AI 消息续行末尾字符被吃掉**：正文按整宽折行、续行又加 4 列缩进 → 续行超出面板宽被切（实测 500 字符的消息拼回来只剩 456）。改为按「扣除缩进后的宽度」折行。（B9）
+- **终端横滚后拖拽选区复制错位**：`getTextRect()` 把选区绝对列换算成文本列时**减**了 `hScroll`（符号反了），渲染是「屏幕列 = 文本列 − hScroll」，换算该加回来。结果横滚后选中屏幕上的字符，复制出来的是**行首那几个字**（常只有 1 个）。（`BUGFIXES` B10）
+- **状态栏超长 cwd 整段消失**：120 列下 cwd 超过约 35 列就被整段丢弃。值型段（目录/文件/分支）改为按剩余空间截断保留**尾部**（`目录=…/尾部`），剩余宽度 < 12 列才整段丢。（E3）
+- **外部值夹带控制字符**：shell 上报的 cwd、文件名、分支名里的 `\n`/ESC 不显示却占 1 列宽度，导致状态栏少显内容。新增 `DisplayWidth::stripControl()` 净化。（D4）
+- **插件配置文件 `Ctrl+S` 不热加载**：热加载判断原只挂在 `App::menuAction('file.save')`，而编辑器内 `Ctrl+S` 走 `EditorPanel::onChar` → `EditorPanel::save()`，绕过 `menuAction`，导致 `reloadPluginConfig()` 永不触发。改为在 `EditorPanel::save()` 保存成功后判断 `path === ConfigStore::pluginsPath()` 并触发重载；并修 `ClockPlugin` 过时注释（原指向 `~/.vicerc` 的 `plugins.clock` 段）。新增 headless 回归测试（`tests/plugin_unit.php`）。
+
+### 改进
+
+- **侧栏 ←/→ 树导航**（VSCode 语义）：`→` 目录未展开则展开、已展开则选中第一个子项；`←` 已展开则折叠、否则（已折叠目录 / 文件）回到父节点；文件上按 `→` 无动作。帮助页与中英语言包同步新增 `help.x_nav`。
+- **编辑器横滚上界改为「当前屏可见区最宽行」**：原先按**光标所在行**算，光标停在短行时整屏都滚不动。现在与右侧 `›` 指示符同源（指示说"右边还有内容"时就一定能滚过去）。
+
+### 新增
+
+- `DisplayWidth::mbTailDisp()`：按显示列宽取**尾部**（字素边界对齐），供状态栏截断复用。
+- `DisplayWidth::stripControl()`：字节级剔除控制字符（非法 UTF-8 也不会让 preg 返回 null）。
+- **插件系统 V1.1**（详见 `docs/plugins.md` §3.6–3.8，向后兼容 V1 老插件）：
+  - **命令钩子**：插件通过 `commands()` 声明 `PluginCommand`，由菜单「插件（🔌）」组与可选快捷键（`Ctrl+字母` / `F1`–`F12`）触发，经 `executeCommand(string $id, App $app)` 执行。快捷键与系统保留键或其它插件撞键时自动降级为该命令不可用（仍可从菜单触发），并在「已安装插件」浮层给出原因。
+  - **状态栏段点击**：`StatusSegment` 第 5 参数绑定命令局部 id，渲染时记录每段 `[起始列, 宽度]`，点击命中即触发其命令；被裁剪丢弃的段不可点。
+  - **生命周期事件**：`onEvent(PluginEvent)` 接收 `app.ready` / `config.reloaded` / `focus.changed` / `editor.opened|saved|bufferChanged` / `terminal.output` 等事件，带防重入与单插件容错。`terminal.output` 给的是经过 pty 的**原始字节**（可能含 ANSI 与 OSC 7 的 cwd 上报），插件自行解析。
+  - 配套值对象 `src/Plugin/PluginCommand.php`、`src/Plugin/PluginEvent.php`；加载支持环境变量 `VICECODE_PLUGINS_DIR` 覆盖插件根目录。
+  - **插件自定义面板**：插件经 `PluginPanelHost` 在 ViceCode 内渲染自己的面板，`PluginPanel` 值对象声明面板元信息；侧栏「扩展」tab 与「已安装插件」浮层同步扩展，可查看 / 触发插件面板。配套 `src/Panel/PluginPanelHost.php`、`src/Plugin/PluginPanel.php`；`PluginInterface` / `StatusSegment` 扩展，插件管理浮层与侧栏扩展 tab 若干交互问题修复。
+
+### 测试
+
+- 新增 `tests/sidebar_hscroll.php`：侧栏横滚六个场景 —— 长名目录行文本切片 / 30 层深树三角命中 / 超长文件名（含 CJK、205 列）/ GIT 深路径与行首图标命中 / Search 长路径与长命中行（含分组折叠）/ 极小视口（40×10、20×6、12×6）三 tab 超大 hScroll 与超长分支名。
+- 新增 `tests/pty_sidebar_hscroll.php`：真实 pty 复验 —— 横滚到底长名目录尾部 `TAIL` 可见、超长文件名尾部 `zzend` 可见、点新位置能 toggle 而点旧位置不 toggle、横滚后点文件能打开进编辑器。
+- 新增 `tests/ai_hscroll.php`：AI 面板超长消息（ASCII 长串 / CJK）—— 每行不超宽、拼接回原文逐字符相等、横滚上界（预设 500 与连续 100 次横滚都不越界且画面非空）、横滚后点击仍复制整条消息、极窄视口不崩。
+- `tests/m1_smoke.php` 增加侧栏 ←/→ 导航 6 条断言（展开 / 进子项 / 回父级 / 折叠 / 文件上无动作）。
+- `tests/hscroll_unit.php` 补充五节：横滚后点击定位光标（ASCII / CJK —— 屏幕显示列必须加 `scrollLeft` 才是字符索引）、超长行 200k（上界钳到「行宽 − 视口宽」、行尾可见、渲染 60ms）、极小视口（8×3 / 5×3 / 2×2）横滚不为负不抛异常、**终端长输出**（5000 列上界与行尾可见、横滚后拖拽选区复制的内容必须跟着偏移、极小视口）、**多行文件光标在短行也能横滚**（上界为可见最长行）。编辑器相关节**没发现新 bug**（本来就正确），终端那节抓到 B10。 `tests/probe_edge_deep.php`、`tests/probe_tree_hscroll.php`（`run_tests.sh` 会跳过带 `probe` 的文件）。
+- `tests/m6_unit.php` 增加「状态栏长值截断 + 外部值净化」11 条断言。
+- 新增 `tests/plugin_v11_unit.php`（headless）：命令注册 / 菜单合并且不破坏前 4 组 action / 快捷键三级冲突（系统保留 · 占用 · 语法不支持）/ 状态栏段点击命中（逐列含 CJK、dropped 段不可点、confirm 态不可点）/ 生命周期事件序列（标准 6 点 + 防重入）。所有新断言做过回退注入校验。
+- 新增 `tests/pty_plugin_v11.php`：真实 pty 复验 Ctrl+K 快捷键、`F10`→右×4→`Enter` 菜单链路、状态栏段点击（含点空白列不触发）三条端到端路径。
+- 全量 **54/54 通过**（`tools/run_tests.sh`，约 244s）。所有新断言都做了「回退修复注入」校验，确认能失败。
+
+### 发版前要做
+
+- 把 `docs/BUGFIXES.md` 里标 `[本次]` 的条目换成实际提交 hash（`[@xxxxxxx]`）。
+- 更新 `composer.json` 的 `version` 字段，并 `composer update --lock` 同步哈希。
+- 跑 `./tools/run_tests.sh` 确认全绿；`composer test` 是同一入口。
+
+---
+
+## [v0.0.1] — 2026-09-08（tag `758a2c9`）
+
+首个定版。功能范围（里程碑 M0–M7 + R5/R7/R8）：
+
+- **六面板布局**：Sidebar（资源管理器 / GIT / 搜索 / 插件）+ 编辑器 + 终端 + AI 对话 + AI 输入 + 状态栏；键鼠焦点、拖拽分隔条。
+- **编辑器**：目录树懒展开、多 Buffer、语法高亮、行号光标、`Ctrl+S` 保存、未保存确认。
+- **终端**：真实 PTY 交互（F2 进捕获）、会话持久化、实时 cwd 捕获、单元格颜色序列化、交替屏程序（vim/less/top）干净退出。
+- **GIT**：status / log / 分支切换 / diff / 提交推送。
+- **AI**：OpenAI 与 DeepSeek 共用 Provider，curl 子进程流式输出。
+- **插件系统 V1**：运行时动态加载 `plugins/*/plugin.json`，可往状态栏加段（`clock` 为内置示例）。
+- **文本选择与剪贴板**：OSC52 写入 + 内存降级；编辑器/终端拖拽矩形选区。
+- **i18n**：zh_CN / en 双语，缺失 key 回退英文；配置持久化在 `~/.vicerc`。
+
+### 已知
+
+- 该 tag 只包含到 `5c0d2df`（9/7 封版），**不含 9/8 之后的打磨**：`composer.json` 没写 `version` 字段、英文模式下插件页仍显示中文「(无插件)」、`tools/run_tests.sh` 跑批脚本、`pty_demo` 的失败出口修复、`docs/BUGFIXES.md` 都不在 tag 内。

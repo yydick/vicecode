@@ -158,6 +158,7 @@ return [
     'help.t_cancel'        => '中断正在跑的命令',
     'help.t_interactive'   => 'F2 进入 / 退出交互终端',
     'help.x_move'          => '移动选中',
+    'help.x_nav'           => '展开（→ 进入子项）/ 折叠（← 回父级）',
     'help.x_enter'         => '展开折叠目录 或 打开文件',
     'help.x_open'          => '打开文件',
     'help.x_arrow'         => '展开 / 折叠',
@@ -207,9 +208,18 @@ return [
     'menu.help_shortcuts'    => '快捷键',
     'menu.help_about'        => '关于',
     'menu.file_plugins'      => '已安装插件...',
+    'menu.plugins' => '插件',
+    'plugins.commands' => '命令',
+    'plugins.command_failed' => '插件 {plugin} 的命令 {cmd} 执行失败',
+    'plugins.shortcut_reserved' => '快捷键 {key} 与系统快捷键冲突，已忽略（仍可从「插件」菜单触发）',
+    'plugins.shortcut_taken' => '快捷键 {key} 已被 {owner} 占用，已忽略',
+    'plugins.shortcut_unsupported' => '快捷键 {key} 不支持（仅支持 Ctrl+字母 与 F1–F12）',
+    'plugins.no_executor' => '插件声明了命令但未实现 executeCommand()，命令不可用',
+    'plugins.command_unavailable' => '命令不可用（{reason}）',
     'plugins.title'          => '已安装插件',
     'plugins.enabled'        => '已启用',
     'plugins.no_config'      => '无可配置项',
+    'plugins.no_plugins'     => '(无插件)',
     'plugins.config_path'    => '插件配置文件',
     'plugins.hint'          => '在此按 Enter，用 ViceCode 自带的编辑器打开上面文件直接改（Ctrl+S 保存即生效）',
     'plugins.close'          => 'Esc / q 关闭',
@@ -233,4 +243,16 @@ return [
     'keys.click_triangle'    => '单击行首三角',
     'keys.dblclick_dir'      => '双击目录',
     'keys.click_icon'        => '点击图标',
+
+    // 命令面板（F1）
+    'palette.title'          => '命令面板',
+    'palette.placeholder'    => '输入以筛选命令…',
+    'menu.command_palette'   => '命令面板',
+    'help.g_palette'         => '打开命令面板（F1）',
+
+    // 自定义面板（插件浮层）
+    'menu.plugin_panels'     => '插件面板',
+    'panel.title'            => '插件面板',
+    'panel.empty'            => '（无插件面板）',
+    'panel.close'            => 'Esc 关闭 · Tab 切换',
 ];

@@ -135,98 +135,30 @@ interface PluginInterface
 }
 ```
 
-此外还有两个**可选**能力（VSCode 式「插件声明默认 + 用户 `~/.vicerc` 覆盖」）：
+此外还有几个**可选**能力（VSCode 式「插件声明默认 + 用户配置覆盖」）。核心一律用 `method_exists` 探测，未实现则完全跳过，不影响插件其它功能：
 
 ```php
 // 可选：返回本插件默认配置（键 => 默认值）。不实现则无默认。
 public function configDefaults(): array;
 
-// 可选：接收「默认 ∩ 用户覆盖」后的最终配置。核心用 method_exists 探测，
-// 未实现则跳过配置注入，不影响插件其它功能。
+// 可选：接收「默认 ∩ 用户覆盖」后的最终配置。
 public function configure(array $config): void;
+
+// ── V1.1 新增（均为可选）──
+
+// 可选：声明本插件提供的命令（出现在菜单「插件」组，可绑定快捷键）。
+public function commands(): array;          // list<PluginCommand>
+
+// 可选：执行某个命令（局部 id）。命令由菜单项 / 快捷键 / 状态栏点击触发。
+public function executeCommand(string $id, App $app): void;
+
+// 可选：接收应用生命周期事件（app.ready / config.reloaded / focus.changed / ...）。
+public function onEvent(PluginEvent $event): void;
 ```
 
-用户配置写在 `~/.vicerc` 的 `plugins.<id>` 段（详见 §3.4）。`configDefaults()` 与用户配置会做 `array_merge`（用户覆盖默认），再传给 `configure()`。
+用户配置写在插件专用文件 `~/.vicecode.plugins.json` 的 `<id>` 段（详见 §3.4）。`configDefaults()` 与用户配置会做 `array_merge`（用户覆盖默认），再传给 `configure()`。
 
-### 3.4 配置插件（可选能力）
-
-VSCode 的插件都是可配置的：扩展在 `package.json` 里声明默认设置，用户在 `settings.json` 里覆盖。ViceCode 沿用同一模型：
-
-- **插件声明默认**：在插件类里实现 `configDefaults(): array`，返回 `键 => 默认值`。
-- **用户覆盖**：编辑 `~/.vicerc`，在 `plugins.<id>` 段写入要覆盖的键。
-- **合并与注入**：核心在启动时做 `array_merge($defaults, $userConfig)`，把结果传给 `configure(array $config)`。
-- 未实现 `configDefaults()` / `configure()` 的插件**完全不受影响**——配置是可选能力，核心用 `method_exists` 探测。
-
-> `~/.vicerc` 同时也是应用自身（布局/主题/语言）的持久化文件，由 `ConfigStore` 读写。
-> 应用退出时的 `saveConfig()` 采用「合并已有配置」策略，因此你手改的 `plugins` 段**不会被冲掉**。
-> 测试或沙箱环境可用环境变量 `VICECODE_CONFIG` 指定配置文件路径，避免污染真实家目录。
-
-配置写入示例（`~/.vicerc`）：
-
-```json
-{
-    "plugins": {
-        "clock": {
-            "timezone": "Asia/Shanghai",
-            "format": "H:i:s"
-        }
-    }
-}
-```
-
-插件侧读取：
-
-```php
-class ClockPlugin implements \App\Plugin\PluginInterface
-{
-    private string $tz = 'Asia/Shanghai';
-    private string $fmt = 'H:i:s';
-
-    public function configDefaults(): array
-    {
-        return ['timezone' => 'Asia/Shanghai', 'format' => 'H:i:s'];
-    }
-
-    public function configure(array $c): void
-    {
-        $tz = $c['timezone'] ?? 'Asia/Shanghai';
-        if ($tz === 'local') {
-            $tz = date_default_timezone_get();
-        }
-        $this->tz = is_string($tz) && $tz !== '' ? $tz : 'Asia/Shanghai';
-        $this->fmt = is_string($c['format'] ?? null) ? $c['format'] : 'H:i:s';
-    }
-
-    public function statusSegments(\App\App $app): array
-    {
-        $dt = new \DateTime('now', new \DateTimeZone($this->tz));
-        return [new \App\Plugin\StatusSegment('clock', $dt->format($this->fmt), 55, 12)];
-    }
-    // id() / tickInterval() 略
-}
-```
-
-### 3.4.1 配置入口（UI）
-
-配置**就在 ViceCode 自己的编辑器里改**——我们本身就是 IDE，不会甩给你外部编辑器。两个入口都能到达：
-
-- **菜单栏「文件 → 已安装插件...」**：打开一个浮层，列出所有已加载插件及其当前**有效配置**（默认 ∩ 用户覆盖）。
-- **侧栏「扩展」tab（🧩 图标）**：同样列出已加载插件，选中后 `↑/↓` 移动、`Enter` 或点击行打开配置。
-
-在浮层里按 **`Enter`**（或在侧栏扩展 tab 里 `Enter`/点击）即会**用 ViceCode 自带的编辑器打开插件专用配置文件 `~/.vicecode.plugins.json`**——这就是 VSCode「打开设置(JSON)」的同款体验。`~/.vicecode.plugins.json` 与 ViceCode 自身配置 `~/.vicerc`（存布局/主题/语言）**完全分离**，互不干扰。文件内容即「插件 id => 配置」映射，例如：
-
-```json
-{
-    "clock": { "timezone": "Asia/Shanghai", "format": "H:i:s" }
-}
-```
-
-直接改对应插件的段，`Ctrl+S` 保存**立即重新加载配置生效**，无需退出进程（相当于 VSCode 的「重载窗口」，但更顺滑）。
-
-> 浮层是模态的：打开期间 `Esc` / `q` 关闭，方向键 / 翻页滚动，`Enter` 在 ViceCode 编辑器内打开**插件专用**配置文件。
-> 测试或沙箱可用环境变量 `VICECODE_PLUGINS_CONFIG` 指定插件配置文件路径，避免污染真实家目录。
-> 兼容说明：旧版写在 `~/.vicerc` 的 `plugins` 段仍会被读取（一次性回退），用户首次在 ViceCode 内编辑后会写入专用文件。
-
+> **向后兼容**：V1 已有的插件（如 `clock`）不实现 `commands` / `executeCommand` / `onEvent` 也能继续工作——这些能力是「有就启用、没有就忽略」的可选扩展，不是 `PluginInterface` 的必选方法。
 
 ### 3.1 `statusSegments(App $app)`
 
@@ -289,7 +221,218 @@ final class StatusSegment
 - 想让段「靠左显示」→ order 取较小值（如 0–5）；「靠右」→ order 取较大值（如 11–15）。
 - 不要与系统段抢最高优先级（message/file 等），它们没有第二处显示位置，丢了用户会困惑。
 
----
+### 3.4 配置插件（可选能力）
+
+VSCode 的插件都是可配置的：扩展在 `package.json` 里声明默认设置，用户在 `settings.json` 里覆盖。ViceCode 沿用同一模型：
+
+- **插件声明默认**：在插件类里实现 `configDefaults(): array`，返回 `键 => 默认值`。
+- **用户覆盖**：编辑**插件专用配置文件** `~/.vicecode.plugins.json`，在 `<id>` 段写入要覆盖的键（推荐直接在 ViceCode 内打开编辑，见 §3.5）。
+- **合并与注入**：核心在启动时做 `array_merge($defaults, $userConfig)`，把结果传给 `configure(array $config)`。
+- 未实现 `configDefaults()` / `configure()` 的插件**完全不受影响**——配置是可选能力，核心用 `method_exists` 探测。
+
+> **插件配置与 ViceCode 自身配置是两个文件**：插件专用 `~/.vicecode.plugins.json`（整份即「插件 id => 配置」映射，**无 `plugins` 包裹层**），
+> 应用自身（布局/主题/语言）用 `~/.vicerc`，由 `ConfigStore` 分别读写、互不干扰。
+> 测试或沙箱环境可用环境变量 `VICECODE_PLUGINS_CONFIG` 指定插件配置文件路径，避免污染真实家目录。
+
+配置写入示例（`~/.vicecode.plugins.json`）：
+
+```json
+{
+    "clock": {
+        "timezone": "Asia/Shanghai",
+        "format": "H:i:s"
+    }
+}
+```
+
+插件侧读取：
+
+```php
+class ClockPlugin implements \App\Plugin\PluginInterface
+{
+    private string $tz = 'Asia/Shanghai';
+    private string $fmt = 'H:i:s';
+
+    public function configDefaults(): array
+    {
+        return ['timezone' => 'Asia/Shanghai', 'format' => 'H:i:s'];
+    }
+
+    public function configure(array $c): void
+    {
+        $tz = $c['timezone'] ?? 'Asia/Shanghai';
+        if ($tz === 'local') {
+            $tz = date_default_timezone_get();
+        }
+        $this->tz = is_string($tz) && $tz !== '' ? $tz : 'Asia/Shanghai';
+        $this->fmt = is_string($c['format'] ?? null) ? $c['format'] : 'H:i:s';
+    }
+
+    public function statusSegments(\App\App $app): array
+    {
+        $dt = new \DateTime('now', new \DateTimeZone($this->tz));
+        return [new \App\Plugin\StatusSegment('clock', $dt->format($this->fmt), 55, 12)];
+    }
+    // id() / tickInterval() 略
+}
+```
+
+### 3.5 配置入口（UI）
+
+配置**就在 ViceCode 自己的编辑器里改**——我们本身就是 IDE，不会甩给你外部编辑器。两个入口都能到达：
+
+- **菜单栏「文件 → 已安装插件...」**：打开一个浮层，列出所有已加载插件及其当前**有效配置**（默认 ∩ 用户覆盖）。
+- **侧栏「扩展」tab（🧩 图标）**：同样列出已加载插件，选中后 `↑/↓` 移动、`Enter` 或点击行打开配置。
+
+在浮层里按 **`Enter`**（或在侧栏扩展 tab 里 `Enter`/点击）即会**用 ViceCode 自带的编辑器打开插件专用配置文件 `~/.vicecode.plugins.json`**——这就是 VSCode「打开设置(JSON)」的同款体验。`~/.vicecode.plugins.json` 与 ViceCode 自身配置 `~/.vicerc`（存布局/主题/语言）**完全分离**，互不干扰。文件内容即「插件 id => 配置」映射，例如：
+
+```json
+{
+    "clock": { "timezone": "Asia/Shanghai", "format": "H:i:s" }
+}
+```
+
+直接改对应插件的段，`Ctrl+S` 保存**立即重新加载配置生效**，无需退出进程（相当于 VSCode 的「重载窗口」，但更顺滑）。
+
+> 浮层是模态的：打开期间 `Esc` / `q` 关闭，方向键 / 翻页滚动，`Enter` 在 ViceCode 编辑器内打开**插件专用**配置文件。
+> 测试或沙箱可用环境变量 `VICECODE_PLUGINS_CONFIG` 指定插件配置文件路径，避免污染真实家目录。
+> 兼容说明：旧版写在 `~/.vicerc` 的 `plugins` 段仍会被读取（一次性回退），用户首次在 ViceCode 内编辑后会写入专用文件。
+
+### 3.6 命令钩子（V1.1）
+
+让插件从「只能显示」变成「能做事」：声明命令，由**菜单项**或**快捷键**触发。
+
+```php
+use App\Plugin\PluginCommand;
+
+public function commands(): array
+{
+    return [
+        // id, 标题, 可选快捷键（'Ctrl+K' / 'F3'），可选优先级（同组内的显示顺序）
+        new PluginCommand('sync', '同步到远端', 'Ctrl+K', 10),
+        new PluginCommand('lint', '运行 Linter'),
+    ];
+}
+
+public function executeCommand(string $id, \App\App $app): void
+{
+    // $id 是局部命令 id（如 'sync' / 'lint'），不是完全限定 id
+    match ($id) {
+        'sync' => $app->setMessage('已同步'),
+        'lint' => $app->setMessage('lint 完成'),
+    };
+}
+```
+
+- **菜单入口**：所有插件的命令汇总到菜单栏「插件（🔌）」组，每组一项；进入该组即可用键盘选择执行。
+- **快捷键**：`PluginCommand` 第三个参数为 `Ctrl+字母` 或 `F1`–`F12`；声明了才绑定，否则只能从菜单触发。
+- **快捷键冲突**：与系统保留键（`Ctrl+S/W/P/N/L/C`、功能键 `F2/F10`）或其它插件撞键时，**该命令的快捷键自动降级为不可用**，命令仍可从菜单触发，并在「已安装插件」浮层给出原因（`taken`=被占用、`reserved`=系统保留、`unsupported`=语法不支持）。先到先得：装载顺序按插件目录名字典序。
+- 命令 id 在内部自动加插件 id 前缀（`v11.k` 形式），跨插件天然不撞。
+
+### 3.7 状态栏段点击（V1.1）
+
+让状态栏段**可点击**：点击即触发该段绑定的命令。
+
+```php
+public function statusSegments(\App\App $app): array
+{
+    return [
+        // 第 5 个参数 = 该段绑定的命令局部 id；省略或绑不到时该段不可点击
+        new \App\Plugin\StatusSegment('last', 'M:' . self::$last, 95, 200, 'sync'),
+    ];
+}
+```
+
+- 只有**确实注册成功**的命令才会让段可点（声明了但快捷键被冲突降级、或命令未实现 `executeCommand` 的段不可点）。
+- 状态栏宽度不足被裁剪丢弃的段**不可点**（点击会落空）。点击命中的原理：渲染时记录每个段的 `[起始列, 宽度]`，点击的 x 落在某段区间内即触发其命令。
+
+### 3.8 生命周期事件（V1.1）
+
+插件可接收应用运行期事件，用于做 linter、git 提示、埋点等。`onEvent(PluginEvent $e)` 的 `$e->name` 为事件名，`$e->payload` 为关联数组。
+
+应用派发的全部事件（名称与 payload 以核心实现为准，照抄以免拼写不匹配）：
+
+- `app.ready`：启动完成（无 payload）。
+- `config.reloaded`：插件配置被保存并重载（无 payload）。
+- `focus.changed`：焦点切换，`payload['from']` / `payload['to']` 为面板 id。
+- `file.opened`：打开文件，`payload['path']` 为路径，`payload['virtual']` 为是否虚拟文件。
+- `file.saved`：保存文件，`payload['path']` 为路径，`payload['ok']` 为是否成功。
+- `file.closed`：关闭文件（缓冲区移除），`payload['path']` 为路径。
+- `buffer.switched`：当前编辑缓冲区切换，`payload['path']` 为路径。
+- `terminal.output`：终端收到原始字节，`payload['bytes']` 为原始字节（含 ANSI 与 OSC 7 的 cwd 上报）。
+
+```php
+public function onEvent(\App\Plugin\PluginEvent $e): void
+{
+    match ($e->name) {
+        'app.ready'       => /* 启动完成 */,
+        'config.reloaded' => /* 插件配置被保存重载 */,
+        'focus.changed'   => /* 焦点切到 $e->payload['to'] */,
+        'file.opened'     => /* 打开 $e->payload['path'] */,
+        'file.saved'      => /* 保存了 $e->payload['path'] */,
+        'file.closed'     => /* 关闭 $e->payload['path'] */,
+        'buffer.switched' => /* 当前 buffer 切到 $e->payload['path'] */,
+        'terminal.output' => /* 终端收到原始字节 $e->payload['bytes']（含 ANSI）*/,
+        default => null,
+    };
+}
+```
+
+> 事件在**真实原始形态**下派发给插件：例如 `terminal.output` 给的是未经净化的原始字节（可能含 ANSI 转义与 OSC 7 的 cwd 上报），插件需自行解析。事件派发做了**防重入**（插件内再触发事件不会无限递归）与**单插件容错**（某个插件抛异常不影响其它插件)。
+
+### 3.9 命令面板（F1，V1.1）
+
+命令面板（Command Palette）让用户**用键盘快速检索并执行任意命令**，无需在菜单里逐层翻找。
+
+**唤起键：F1。** 你可能在别处见过 `Ctrl+Shift+P`（VSCode 的默认键），但 ViceCode 跑在**真实伪终端**上，而真实 pty 下 `Shift` 这类修饰键**无法被区分**（`Ctrl+Shift+P` 会被终端「吃掉」修饰，退化成裸 `Ctrl+P`，而 `Ctrl+P` 已被 AI 面板用作切换 Provider）。因此本项目统一用 **F1** 唤出命令面板。也可从菜单「视图 → 命令面板 (F1)」进入。
+
+**命令来源（自动汇聚）**：面板在打开时扁平化 `MenuBarPanel::definitions()` 的全部菜单项——既包含系统命令（如「视图 → 聚焦终端」「文件 → 保存」），也包含 §3.6 插件命令（已进入「插件」菜单组）。每条命令携带 `id`（即菜单项的 `action`，如 `view.focus.terminal`、`plugin:<fq>`）、`title`（菜单项 `label`，已是 `Name: Title` 形式）、以及原菜单里登记的 `shortcut`。**插件无需做任何额外工作**，声明了 `commands()` 的命令自动出现在面板里。
+
+**交互**：
+
+- 顶部是过滤框 `> `（占位提示 `输入以筛选命令…`），在此打字即**对标题 + action id 做不区分大小写的子串模糊过滤**；按 `Backspace` 删字，`Esc` 直接关闭面板。
+- `↑ / ↓` 在过滤后的结果里移动高亮项（选中行反白显示），`Enter` 执行当前项。
+- 选中执行时复用既有 `App::menuAction($id)` 分发——**与从菜单点击触发的是同一条执行路径**，所以命令面板不是「又一套命令系统」，只是菜单项的统一检索入口。执行后面板自动关闭。
+- 面板是模态浮层：打开期间独占键盘，鼠标点击被忽略，仅响应上述按键。
+
+**对插件作者意味着什么**：你只要按 §3.6 声明命令，它就**自动**同时获得「菜单项 + 可绑定快捷键 + 状态栏段点击 + 命令面板检索」四条触发路径，无需为命令面板单独适配。
+
+### 3.10 自定义面板（浮层，V1.1）
+
+插件可声明**整块 UI 面板**（而非只能往状态栏塞段），汇聚进一个**可开合浮层**统一展示。
+
+**声明**：在 `PluginInterface` 里实现 `panels()`，返回 `PluginPanel` 列表（可多个）。每个面板是一个纯数据对象：
+
+```php
+use App\Plugin\PluginPanel;
+use PhpTui\Tui\Extension\Core\Widget\ParagraphWidget;
+
+public function panels(): array
+{
+    return [
+        new PluginPanel('a', '面板 A',
+            fn(\App\App $app, int $w, int $h) => ParagraphWidget::fromString('内容 A')),
+        new PluginPanel('b', '面板 B',
+            fn(\App\App $app, int $w, int $h) => ParagraphWidget::fromString('内容 B'),
+            onChar: fn(\PhpTui\Term\Event\CharKeyEvent $e): bool => false, // 可选：消费字符键
+            onKey:  fn(\PhpTui\Term\Event\CodedKeyEvent $e): bool => false), // 可选：消费编码键
+    ];
+}
+```
+
+`PluginPanel` 字段：
+- `id`：插件内局部唯一；核心以 `<插件id>.<局部id>` 完全限定，天然免撞。
+- `title`：tab 标题（不过 i18n，由插件作者自行负责语言）。
+- `render`：内容渲染闭包，签名 `(App $app, int $width, int $height): Widget`，核心会把浮层内部可用区域的宽高传给它。
+- `onChar` / `onKey`：可选交互回调。浮层打开时，若当前 tab 的面板提供了对应回调，按键会先交给它处理（返回 `true` 即已消费），否则由宿主自己处理（见下）。
+
+**唤起与交互**：
+- 从菜单「视图 → 插件面板」进入（action `panel.host.open`），或在命令面板（F1）里检索 `panel` / `host` 选中执行。
+- 所有插件的面板收进**同一个**浮层，顶部一行 tab 列出各面板标题，选中项反白高亮。
+- `Tab` / `→` 切到下一 tab，`Shift+Tab` / `←` 切到上一 tab；`Esc` 关闭浮层。
+- 浮层是**模态**叠加层：打开期间独占键盘，鼠标点击被忽略，仅响应上述按键与当前面板的 `onChar`/`onKey` 回调。
+
+**为什么是浮层而非布局面板**：V1 的六面板布局（`App::PANELS`、焦点枚举、`Tab` 循环、鼠标命中、`build` 分支、`LayoutFactory`）是写死的。新增布局面板要改这一整条链路且牵动大量既有测试。本实现改为「可开合浮层」，直接复用 HelpPanel / 插件管理浮层 / 命令面板的 `CompositeWidget` 叠加范式——底层六面板布局完全不动，浮层浮在其上并独占键盘。因此插件无需任何布局改动即可拥有自己的整屏 UI。
 
 ## 4. 周期刷新：`tickInterval()` 与主循环
 
@@ -318,7 +461,7 @@ public function tickInterval(): ?int
 `plugins/clock/` 是最小「动态内容」示范，同时展示**插件配置**能力（见 §3.4）。
 
 要点：
-- 用 `DateTime` + **显式时区**，独立于 php.ini 的 `date.timezone`——这样无论本机 php.ini 怎么设，时钟都按配置的时区显示。**这直接修复了「php.ini 设成 UTC 时时钟慢 8 小时」这类问题**：默认 `Asia/Shanghai`（UTC+8），想改成 UTC 或纽约时间，改 `~/.vicerc` 即可，无需动 php.ini。
+- 用 `DateTime` + **显式时区**，独立于 php.ini 的 `date.timezone`——这样无论本机 php.ini 怎么设，时钟都按配置的时区显示。**这直接修复了「php.ini 设成 UTC 时时钟慢 8 小时」这类问题**：默认 `Asia/Shanghai`（UTC+8），想改成 UTC 或纽约时间，改 `~/.vicecode.plugins.json`（见 §3.5 的编辑器入口）即可，无需动 php.ini。
 - `tickInterval()=1` 让主循环每秒重绘一次，时钟持续走动。
 - 文本用纯 ASCII `HH:MM:SS`，显示宽度固定 8 列，避免在窄状态栏里被意外折行。
 
@@ -347,7 +490,7 @@ public function statusSegments(\App\App $app): array
 }
 ```
 
-> 若只想要「跟随本机 php.ini 时区」的原始行为，把 `~/.vicerc` 里 clock 的 `timezone` 设为 `"local"` 即可。
+> 若只想要「跟随本机 php.ini 时区」的原始行为，把 `~/.vicecode.plugins.json` 里 clock 的 `timezone` 设为 `"local"` 即可。
 
 ---
 
@@ -405,14 +548,17 @@ php-tui 采用**差分渲染**——只在重绘时发送相对上一帧**变化
 
 ## 9. 局限与后续
 
-**V1 局限**：插件只能扩展**状态栏段**。`statusSegments()` 是唯一扩展点；不能新增面板、修改菜单、拦截按键或命令。
+**V1 局限（已突破）**：早期版本插件只能扩展**状态栏段**，`statusSegments()` 是唯一扩展点；不能触发动作、修改菜单或接收事件。
 
-**V1 已支持**：每个插件可通过 `configDefaults()` / `configure()` 声明并接收配置，用户在 `~/.vicerc` 的 `plugins.<id>` 段覆盖（见 §3.4）。
+**V1.1 已支持**：
+- 命令钩子：`commands()` / `executeCommand()` 让插件从「只能显示」变成「能做事」，命令出现在菜单「插件」组，可绑定快捷键（§3.6）。
+- 状态栏段点击：`StatusSegment` 第 5 参数绑定命令局部 id，点击即触发（§3.7）。
+- 生命周期事件：`onEvent(PluginEvent)` 接收启动完成、配置重载、焦点切换、文件打开/保存/关闭、缓冲区切换、终端输出等事件（§3.8）。
+- 命令面板（F1）：扁平化全部菜单项（含插件命令）并提供模糊检索、键盘选择执行，复用 `App::menuAction()` 分发（§3.9）。注意因真实 pty 下 `Shift` 修饰不可区分，唤起键用 **F1** 而非字面的 `Ctrl+Shift+P`。
+- 自定义面板（浮层）：插件通过 `panels()` 返回 `PluginPanel` 列表，核心把它们收进一个可开合模态浮层（菜单「视图 → 插件面板」，或命令面板检索），用 `Tab` 切 tab、`Esc` 关闭（§3.10）。以浮层而非布局面板实现，避免改动写死的六面板布局与焦点链路。
+- 配置：`configDefaults()` / `configure()` 声明并接收配置，用户在 `~/.vicecode.plugins.json` 的 `<id>` 段覆盖（§3.4）。
 
-**后续可扩展方向（待定）**：
-- 命令 / 快捷键钩子（`onKey` / `onCommand`）
-- 自定义面板（如 TODO 列表、数据库浏览器）
-- 事件订阅（文件保存、git 提交、AI 回复完成等生命周期事件）
-- 插件的启用 / 禁用开关（在 `~/.vicerc` 增加 `plugins.<id>.enabled` 约定，由核心加载时读取）
+**仍未支持（设计取舍）**：
+- 插件的启用/禁用开关（`~/.vicecode.plugins.json` 的 `<id>.enabled` 约定由核心加载时读取）留待后续版本。
 
 路线图以产品需求为准；任何扩展都会保持「运行时动态加载、单插件失败不影响整体」的设计原则。

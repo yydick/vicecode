@@ -166,6 +166,7 @@ return [
     'help.t_cancel'        => 'Interrupt running command',
     'help.t_interactive'   => 'F2 enter / exit interactive terminal',
     'help.x_move'          => 'Move selection',
+    'help.x_nav'           => 'Expand (→ into child) / collapse (← to parent)',
     'help.x_enter'         => 'Expand/collapse dir or open file',
     'help.x_open'          => 'Open file',
     'help.x_arrow'         => 'Expand / collapse',
@@ -215,9 +216,18 @@ return [
     'menu.help_shortcuts'    => 'Shortcuts',
     'menu.help_about'        => 'About',
     'menu.file_plugins'      => 'Installed Plugins...',
+    'menu.plugins' => 'Plugins',
+    'plugins.commands' => 'Commands',
+    'plugins.command_failed' => 'Plugin {plugin} command {cmd} failed',
+    'plugins.shortcut_reserved' => 'Shortcut {key} conflicts with a system keybinding; ignored (still available from the Plugins menu)',
+    'plugins.shortcut_taken' => 'Shortcut {key} already taken by {owner}; ignored',
+    'plugins.shortcut_unsupported' => 'Shortcut {key} unsupported (only Ctrl+letter and F1–F12)',
+    'plugins.no_executor' => 'Plugin declares commands but has no executeCommand(); commands disabled',
+    'plugins.command_unavailable' => 'Command unavailable ({reason})',
     'plugins.title'          => 'Installed Plugins',
     'plugins.enabled'        => 'enabled',
     'plugins.no_config'      => 'no configurable options',
+    'plugins.no_plugins'     => '(no plugins)',
     'plugins.config_path'    => 'Plugin config file',
     'plugins.hint'           => "Press Enter to edit that file in ViceCode's own editor (Ctrl+S applies live)",
     'plugins.close'          => 'Esc / q to close',
@@ -241,4 +251,16 @@ return [
     'keys.click_triangle'    => 'Click row triangle',
     'keys.dblclick_dir'      => 'Double-click dir',
     'keys.click_icon'        => 'Click icon',
+
+    // Command palette (F1)
+    'palette.title'          => 'Command Palette',
+    'palette.placeholder'    => 'Type to filter commands…',
+    'menu.command_palette'   => 'Command Palette',
+    'help.g_palette'         => 'Open command palette (F1)',
+
+    // Custom plugin panels (overlay host)
+    'menu.plugin_panels'     => 'Plugin Panels',
+    'panel.title'            => 'Plugin Panels',
+    'panel.empty'            => '(No plugin panels)',
+    'panel.close'            => 'Esc close · Tab switch',
 ];

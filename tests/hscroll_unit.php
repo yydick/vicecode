@@ -28,6 +28,7 @@ use PhpTui\Term\MouseButton;
 use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\KeyCode;
 use PhpTui\Tui\Position\Position;
+use PhpTui\Tui\Widget\Margin;
 
 $failed = false;
 function check(bool $cond, string $msg): void
@@ -282,6 +283,179 @@ $appS->editor->onScrollH(0);
 $appS->editor->content(Area::fromDimensions(22, 5), false);
 check($appS->editor->hLeft === false && $appS->editor->hRight === false, '短行不溢出：左右指示均不显示');
 unlink($ts);
+
+// ─────────────── 9) 横滚后点击定位光标（屏幕显示列 → 字符索引要加 scrollLeft）───────────────
+echo "== 横滚后点击定位光标 ==\n";
+// 100 字符单行，textW=18 → 上界 82，scrollLeft=10 不会被 content() 钳回
+$lineClick = str_repeat('abcdefghij', 10);
+$t9 = tempnam(sys_get_temp_dir(), 'vc_click');
+file_put_contents($t9, $lineClick);
+$app9 = new App();
+$app9->openFile($t9);
+$area9 = Area::fromDimensions(22, 5);            // inner 20 → gutter 2 → textW 18
+$inner9 = $area9->inner(new Margin(1, 1));
+$gutter9 = min($inner9->width, $app9->buffer->maxLineNoWidth + 1);
+$x9 = static fn (int $disp): int => $inner9->position->x + $gutter9 + $disp;
+$y9 = $inner9->position->y;                      // 单文件无 tab 栏 → 可视行 0
+
+$app9->editor->onScrollH(0);
+$app9->editor->onClick(Position::at($x9(3), $y9), ['editor' => $area9]);
+check($app9->buffer->cursorCol === 3, '未横滚：点显示列 3 → 字符索引 3');
+
+$app9->editor->onScrollH(10);
+$app9->editor->content($area9, false);           // 渲染一帧让钳制生效
+check($app9->buffer->scrollLeft === 10, '前置条件：scrollLeft=10（100 字符行，上界 82）');
+$app9->editor->onClick(Position::at($x9(0), $y9), ['editor' => $area9]);
+check($app9->buffer->cursorCol === 10, '横滚 10 列后点显示列 0 → 字符索引 10（定位必须加 scrollLeft）');
+$app9->editor->onClick(Position::at($x9(3), $y9), ['editor' => $area9]);
+check($app9->buffer->cursorCol === 13, '横滚 10 列后点显示列 3 → 字符索引 13');
+unlink($t9);
+
+// CJK：横滚后点汉字列同样要按「显示列 + scrollLeft」换算字符索引
+$lineCJK9 = str_repeat('中', 30) . 'END';         // 63 列
+$t9c = tempnam(sys_get_temp_dir(), 'vc_click_cjk');
+file_put_contents($t9c, $lineCJK9);
+$app9c = new App();
+$app9c->openFile($t9c);
+$inner9c = $area9->inner(new Margin(1, 1));
+$gutter9c = min($inner9c->width, $app9c->buffer->maxLineNoWidth + 1);
+$app9c->editor->onScrollH(20);                    // 显示列 20 = 第 11 个「中」的起点
+$app9c->editor->content($area9, false);
+$app9c->editor->onClick(Position::at($inner9c->position->x + $gutter9c + 0, $inner9c->position->y), ['editor' => $area9]);
+check($app9c->buffer->cursorCol === 10, 'CJK 横滚 20 列后点显示列 0 → 字符索引 10（不是 0，也不是 20）');
+unlink($t9c);
+
+// ─────────────── 10) 超长行（200k）横滚 ───────────────
+echo "== 超长行（200k 字符）横滚 ==\n";
+$tBig = tempnam(sys_get_temp_dir(), 'vc_big');
+file_put_contents($tBig, str_repeat('x', 200000) . 'TAIL');
+$appBig = new App();
+$appBig->openFile($tBig);
+$areaBig = Area::fromDimensions(60, 10);
+$innerBig = $areaBig->inner(new Margin(1, 1));
+$textWBig = max(0, $innerBig->width - ($appBig->buffer->maxLineNoWidth + 1));
+
+$t0 = microtime(true);
+$appBig->editor->onScrollH(300000);              // 远超上界
+$appBig->editor->content($areaBig, false);
+$ms = (microtime(true) - $t0) * 1000;
+check(
+    $appBig->buffer->scrollLeft === 200004 - $textWBig,
+    '超长行：scrollLeft 钳到「行宽 − 视口宽」（' . $appBig->buffer->scrollLeft . ' = 200004−' . $textWBig . '）'
+);
+$bBig = TuiBuffer::empty($areaBig);
+$renderer->render($renderer, $appBig->editor->content($areaBig, false), $bBig, $bBig->area());
+check(str_contains(implode("\n", $bBig->toLines()), 'TAIL'), '超长行：滚到最右后行尾 TAIL 可见（不是空白）');
+check($ms < 1000, sprintf('超长行渲染一帧 %.0fms（阈值 1000ms，防性能回归）', $ms));
+unlink($tBig);
+
+// ─────────────── 11) 极小视口 + 横滚 ───────────────
+echo "== 极小视口下横滚 ==\n";
+foreach ([[8, 3], [5, 3], [2, 2]] as [$vw, $vh]) {
+    $tf = tempnam(sys_get_temp_dir(), 'vc_tiny');
+    file_put_contents($tf, str_repeat('x', 300));
+    try {
+        $aT = new App();
+        $aT->openFile($tf);
+        $small = Area::fromDimensions($vw, $vh);
+        $aT->editor->onScrollH(1000);
+        $bT = TuiBuffer::empty($small);
+        $renderer->render($renderer, $aT->editor->content($small, false), $bT, $bT->area());
+        check(
+            $aT->buffer->scrollLeft >= 0,
+            "极小视口 {$vw}x{$vh}：横滚后 scrollLeft={$aT->buffer->scrollLeft} 不为负、渲染不抛异常"
+        );
+    } catch (Throwable $e) {
+        check(false, "极小视口 {$vw}x{$vh}：抛异常 " . $e->getMessage());
+    }
+    unlink($tf);
+}
+
+// ─────────────── 12) 终端长输出：横滚后选区抓取 + 超长行 + 极小视口 ───────────────
+echo "== 终端长输出横滚 ==\n";
+
+/**
+ * 造一个 runner 模式终端：注入若干行输出，返回 [app, 终端Area, inner]。
+ * 渲染一帧让 content() 完成 hScroll 钳制。
+ */
+$mkTerm = static function (string $out, int $hScroll = 0) use ($vp): array {
+    $app = new App();
+    $app->focus('terminal');
+    $app->terminal->buffer()->append($out, false);
+    $area = $app->areas($vp)['terminal'];
+    $app->terminal->content($area, true);          // 先渲染：算出上界
+    if ($hScroll > 0) {
+        $app->terminal->hScroll = $hScroll;
+    }
+    $app->terminal->content($area, true);          // 再渲染：钳制生效
+    return [$app, $area, $area->inner(new Margin(1, 1))];
+};
+
+// 12.1 超长输出行（5000 列）→ 上界钳制 + 滚到最右行尾可见
+[$apT, $areaT, $innerT] = $mkTerm(str_repeat('z', 5000) . 'TAIL' . "\n", 99999);
+$wT = max(0, $innerT->width);
+check(
+    $apT->terminal->hScroll === 5004 - $wT,
+    '终端超长行：hScroll 钳到「行宽 − 视口宽」（' . $apT->terminal->hScroll . ' = 5004−' . $wT . '）'
+);
+$bT = TuiBuffer::empty($areaT);
+$renderer->render($renderer, $apT->terminal->content($areaT, true), $bT, $bT->area());
+check(str_contains(implode("\n", $bT->toLines()), 'TAIL'), '终端超长行：滚到最右后行尾 TAIL 可见（不是空白）');
+
+// 12.2 横滚后拖拽选区：抓到的必须是「屏幕列 + hScroll」对应的字符
+// 循环 5 次共 180 列，远超终端视口宽 → 横滚才有效（短行上界为 0，会被 content() 钳回）
+$lineT = str_repeat('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', 5);
+$downE = static fn (int $c, int $r): MouseEvent => MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $c, $r, 0);
+$dragE = static fn (int $c, int $r): MouseEvent => MouseEvent::new(MouseEventKind::Drag, MouseButton::Left, $c, $r, 0);
+$upE = static fn (int $c, int $r): MouseEvent => MouseEvent::new(MouseEventKind::Up, MouseButton::Left, $c, $r, 0);
+
+$selAt = static function (int $hScroll, int $c0, int $c1) use ($vp, $mkTerm, $lineT, $downE, $dragE, $upE): string {
+    [$app, $area, $inner] = $mkTerm($lineT . "\n", $hScroll);
+    $row = $inner->position->y;                    // runner 模式：首行输出在 inner.y
+    $app->handle($downE($inner->position->x + $c0, $row), $vp);
+    $app->handle($dragE($inner->position->x + $c1, $row), $vp);
+    $app->handle($upE($inner->position->x + $c1, $row), $vp);
+    return (string) $app->clipboardPeek();
+};
+
+check($selAt(0, 0, 4) === 'ABCDE', '终端未横滚：拖选列 0..4 → 复制 ABCDE');
+check($selAt(10, 0, 4) === 'KLMNO', '终端横滚 10 列：拖选列 0..4 → 复制 KLMNO（抓取必须加回 hScroll）');
+check($selAt(26, 0, 3) === '0123', '终端横滚 26 列：拖选列 0..3 → 复制 0123');
+
+// 12.3 极小视口 + 横滚：不崩、hScroll 不为负
+foreach ([[8, 3], [5, 3], [2, 2]] as [$vw, $vh]) {
+    try {
+        [$aS, $areaS] = $mkTerm(str_repeat('q', 300) . "\n", 1000);
+        $small = Area::fromDimensions($vw, $vh);
+        $bS = TuiBuffer::empty($small);
+        $renderer->render($renderer, $aS->terminal->content($small, true), $bS, $bS->area());
+        check($aS->terminal->hScroll >= 0, "终端极小视口 {$vw}x{$vh}：横滚后 hScroll={$aS->terminal->hScroll} 不为负、渲染不抛异常");
+    } catch (Throwable $e) {
+        check(false, "终端极小视口 {$vw}x{$vh}：抛异常 " . $e->getMessage());
+    }
+}
+
+// 12.4 横滚上界按「可见区最宽行」而不是光标所在行：
+// 光标停在短行时，同一屏里的长行也必须能滚过去（旧实现上界按光标行，短行上根本滚不动）
+$tMix = tempnam(sys_get_temp_dir(), 'vc_mix');
+file_put_contents($tMix, "short\n" . str_repeat('L', 200) . "\n");
+$appMix = new App();
+$appMix->openFile($tMix);
+$areaMix = Area::fromDimensions(22, 5);     // textW = 18
+$appMix->buffer->cursorRow = 0;             // 光标停在第 1 行（3 列短行）
+$appMix->editor->onScrollH(50);
+$appMix->editor->content($areaMix, false);
+check(
+    $appMix->buffer->scrollLeft === 50,
+    '多行文件：光标在短行也能横滚到可见最长行的范围（scrollLeft=' . $appMix->buffer->scrollLeft . '，旧实现会被钳到 0）'
+);
+$appMix->editor->onScrollH(1000);
+$appMix->editor->content($areaMix, false);
+check(
+    $appMix->buffer->scrollLeft === 200 - 18,
+    '多行文件：上界 = 可见最长行宽 − 视口宽（' . $appMix->buffer->scrollLeft . ' = 200−18）'
+);
+unlink($tMix);
 
 // ─────────────── 结果 ───────────────
 echo "\n";

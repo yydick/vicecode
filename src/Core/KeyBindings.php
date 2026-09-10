@@ -42,6 +42,7 @@ final class KeyBindings
                 [self::HELP_KEY, 'help.g_help'],
                 ['Ctrl+T', 'help.g_theme'],
                 ['F10', 'help.g_menu'],
+                ['F1', 'help.g_palette'],
                 ['keys.wheel', 'help.g_wheel'],
                 ['keys.hwheel', 'help.g_wheel_h'],
                 ['keys.click', 'help.g_click'],
@@ -73,6 +74,7 @@ final class KeyBindings
             ]),
             self::group('help.group_explorer', [
                 ['↑ / ↓', 'help.x_move'],
+                ['← / →', 'help.x_nav'],
                 ['Enter', 'help.x_enter'],
                 ['keys.click_file', 'help.x_open'],
                 ['keys.click_triangle', 'help.x_arrow'],
