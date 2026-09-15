@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace App\Ai;
 
 use App\App;
+use App\Core\ConfigStore;
 use App\Terminal\CommandRunner;
 
 /**
@@ -36,6 +37,16 @@ final class ChatModel
 
     private ?SseParser $parser = null;
 
+    /** 末条 assistant 的 finish_reason（'stop' / 'tool_calls' / …） */
+    private ?string $finishReason = null;
+
+    /**
+     * 本轮流式累积中的工具调用（V2 Agent loop）。
+     * key = delta 的 index；arguments 是多片拼起来的原始 JSON 串（流结束后统一 decode）。
+     * @var array<int,array{id:?string,name:?string,arguments:string}>
+     */
+    private array $toolAcc = [];
+
     private bool $streaming = false;
 
     /** 累积的 stderr（curl 的网络错误等），非空说明请求没成功 */
@@ -48,14 +59,46 @@ final class ChatModel
 
     private ?string $model = null;
 
-    /** 构造函数里可注入 registry，单测用假配置指向本地 mock 端点 */
+    // ── V2 Agent loop 状态 ─────────────────────────────
+
+    /** 本轮 send 起已完成的工具执行步数（每轮工具调用 +1） */
+    private int $steps = 0;
+
+    /** 逐次确认模式下待用户裁决的 tool_calls；null=无（autoRun 模式恒为 null） */
+    private ?array $pendingApproval = null;
+
+    /** 工具自动执行（vicerc ai.toolAutoRun，默认 true；M7 命令可切） */
+    private bool $toolAutoRun;
+
+    /** 工具调用步数上限（vicerc ai.maxSteps，默认 8） */
+    private int $maxSteps;
+
+    /** 只读工具实现（list_files/read_file），root=项目根 */
+    private AiTools $tools;
+
+    // ── V2 上下文压缩状态 ─────────────────────────────
+
+    /** 压缩摘要请求进行中（期间 finish() 走压缩分支） */
+    private bool $compacting = false;
+
+    /** 压缩前的完整历史（摘要失败降级恢复用） */
+    private array $preCompact = [];
+
+    /** send 路径压缩时摘出去的新 user 消息（摘要完成后回队续发真实请求）；null=手动 compactNow */
+    private ?array $deferredUser = null;
+
+    /** 构造函数里可注入 registry/tools，单测用假配置指向本地 mock 端点 */
     public function __construct(
         private App $shell,
         private ?ProviderRegistry $registry = null,
+        ?AiTools $tools = null,
     ) {
         $this->runner = new CommandRunner();
         $this->provider = new OpenAiCompatProvider();
         $this->registry ??= new ProviderRegistry();
+        $this->tools = $tools ?? new AiTools();
+        $this->toolAutoRun = ConfigStore::aiToolAutoRun();
+        $this->maxSteps = ConfigStore::aiMaxSteps();
     }
 
     // ── 状态读取 ──────────────────────────────────────
@@ -117,6 +160,7 @@ final class ChatModel
         if (!$this->registry->has($id)) {
             return;
         }
+        $this->pendingApproval = null; // 换 provider 连带取消未裁决的确认态（上一家的调用不带到这一家）
         $this->providerId = $id;
         $this->model = $model; // 换 provider 时清掉 model，否则会拿上一家的模型名去打这一家
         $spec = $this->spec();
@@ -163,39 +207,146 @@ final class ChatModel
             $this->shell->setMessage($this->shell->t('ai.busy'));
             return;
         }
+        $this->pendingApproval = null; // 新提问覆盖未裁决的确认态
+        $this->steps = 0;
 
         // 用户消息**先入列再校验**：打错字或没配 key 时，用户也该看到自己刚才打了什么
         // （否则输入框一清空，内容就像凭空消失了）。只有"生成中"这种没真发出去的情况才不入列。
         $this->error = null;
         $this->messages[] = ['role' => 'user', 'content' => $text];
 
+        if ($this->shouldCompact()) {
+            // 上下文压缩：先发摘要请求，摘要回来替换旧历史后再发真实请求（D4）
+            $this->deferredUser = array_pop($this->messages); // 新 user 摘出来，摘要请求不带它
+            $this->beginCompact();
+            return;
+        }
+
+        if (!$this->startRequest()) {
+            // startRequest 已设置 error 并提示；失败时末条 assistant 是空的，移除保持历史干净
+            $this->finalizeContent();
+        }
+    }
+
+    /** 手动触发压缩（菜单 ai.compact_now）：不续发真实请求，压缩完就停。 */
+    public function compactNow(): void
+    {
+        if ($this->streaming || $this->compacting) {
+            $this->shell->setMessage($this->shell->t('ai.busy'));
+            return;
+        }
+        if (count($this->messages) < 2) {
+            // 没什么可压的：如实报个不变
+            $n = (string) count($this->messages);
+            $this->shell->setMessage($this->shell->t('ai.compact_done', ['before' => $n, 'after' => $n]));
+            return;
+        }
+        $this->beginCompact();
+    }
+
+    /** 估算上下文 token（CJK 偏保守按 3 字符/token） */
+    private function estimateTokens(array $messages): int
+    {
+        $n = 0;
+        foreach ($messages as $m) {
+            if (is_array($m)) {
+                $n += (int) ceil(mb_strlen((string) ($m['content'] ?? '')) / 3);
+            }
+        }
+        return $n;
+    }
+
+    /** 是否该压缩：估算超阈值 且 消息数足够多（留够 keepRecent 的原料） */
+    private function shouldCompact(): bool
+    {
+        return $this->estimateTokens($this->messages) > ConfigStore::aiCompactThreshold()
+            && count($this->messages) > ConfigStore::aiCompactKeepRecent();
+    }
+
+    /**
+     * 起摘要请求：当前历史换成「摘要指令」单条消息走同一条 curl 管线。
+     * 原历史暂存 preCompact（失败降级恢复）；deferredUser 为 null 表示手动压缩。
+     */
+    private function beginCompact(): void
+    {
+        $this->preCompact = $this->messages;
+        $this->messages = [];
+        $this->compacting = true;
+        $this->shell->setMessage($this->shell->t('ai.compact_started'));
+        if (!$this->startRequest()) {
+            // 起请求失败（缺 key 之类）：降级=不压缩，恢复原样
+            $this->abortCompact();
+        }
+    }
+
+    /** 压缩失败/中止：恢复 preCompact（send 路径还要把摘出去的 user 消息放回去） */
+    private function abortCompact(): void
+    {
+        $this->messages = $this->preCompact;
+        $this->preCompact = [];
+        if ($this->deferredUser !== null) {
+            $this->messages[] = $this->deferredUser;
+            $this->deferredUser = null;
+        }
+        $this->compacting = false;
+    }
+
+    /**
+     * 从旧历史里取「保留区」：最近 keepRecent 条；起点若落在 role:tool 消息上，
+     * 回退到它的 assistant（带 tool_calls）——**唯一硬约束是保留区不能以 tool 开头**
+     * （否则摘要区里留 assistant、保留区里留它的 tool 结果，拆散对会被端点 400）。
+     * assistant 开头是合法的，不必强行回退到 user（那会把保留区越拖越大）。
+     * @return array<int,array<string,mixed>>
+     */
+    private function keptRecent(array $old, int $keep): array
+    {
+        $start = max(0, count($old) - $keep);
+        while ($start > 0 && ($old[$start]['role'] ?? '') === 'tool') {
+            $start--;
+        }
+        return array_slice($old, $start);
+    }
+
+    /**
+     * 起一次流式请求（send() 与 Agent loop 续跑共用）。
+     * 校验 spec/key → 复位解析状态 → 组命令（Agent 模式带 tools）→ start runner。
+     * 返回 false 时已设置 error 并提示（不抛）。
+     *
+     * ⚠️ 空的 assistant 气泡在这里入列（不在 send()）：Agent 续跑的每一轮都要有
+     * 自己的 assistant 占位，否则流式 delta 会因为「末条不是 assistant」被丢弃。
+     */
+    private function startRequest(): bool
+    {
         $spec = $this->spec();
         if ($spec === null) {
             $this->error = $this->shell->t('ai.no_provider');
             $this->shell->setMessage($this->error);
-            return;
+            return false;
         }
         if (!$spec->hasKey()) {
             $this->error = $this->shell->t('ai.no_key', ['env' => $spec->keyEnv ?? $spec->id]);
             $this->shell->setMessage($this->error);
-            return;
+            return false;
         }
 
         $this->error = null;
         $this->stderr = '';
         $this->parser = new SseParser();
+        $this->toolAcc = [];
+        $this->finishReason = null;
         $this->messages[] = ['role' => 'assistant', 'content' => ''];
 
-        // 历史 + 本次（本次已入列），整段发出去就是多轮上下文
-        $cmd = $this->provider->buildCommand($spec, $this->messages);
+        // 历史 + 本次，整段发出去就是多轮上下文；Agent 模式带只读工具定义
+        $cmd = $this->provider->buildCommand($spec, $this->messages, OpenAiCompatProvider::DEFAULT_TIMEOUT, AiTools::toolDefs());
         if (!$this->runner->start($cmd, null)) {
             $this->streaming = false;
             $this->error = $this->shell->t('ai.error', ['msg' => 'spawn failed']);
             $this->shell->setMessage($this->error);
             $this->provider->cleanup();
-            return;
+            return false;
         }
         $this->streaming = true;
+        return true;
     }
 
     /**
@@ -216,8 +367,8 @@ final class ChatModel
             if ($this->parser === null) {
                 return;
             }
-            foreach ($this->parser->push($bytes) as $delta) {
-                $this->appendDelta($delta);
+            foreach ($this->parser->push($bytes) as $ev) {
+                $this->handleEvent($ev);
             }
         });
 
@@ -237,6 +388,10 @@ final class ChatModel
         $this->runner->cancel();
         // 不等 poll()：立刻把状态落到「已停止」，用户按键后界面马上有反馈
         $this->streaming = false;
+        $this->pendingApproval = null; // 中断连带取消未裁决的确认态（不能让它卡死在等 y/n）
+        if ($this->compacting) {
+            $this->abortCompact(); // 压缩被打断 → 恢复原历史（send 场景含摘出去的 user 消息）
+        }
         $this->finalizeContent();
         $this->shell->setMessage($this->shell->t('ai.cancelled'));
         $this->provider->cleanup();
@@ -248,6 +403,12 @@ final class ChatModel
         $this->cancel();
         $this->messages = [];
         $this->error = null;
+        $this->pendingApproval = null;
+        $this->steps = 0;
+        $this->compacting = false;
+        $this->preCompact = [];
+        $this->deferredUser = null;
+        ChatStore::clear(); // Ctrl+L 清空同步清档（用户预期：清空后重启不会有「幽灵对话」）
     }
 
     /** 应用退出时调用：请求还在跑就杀掉，并清掉临时文件。 */
@@ -255,10 +416,78 @@ final class ChatModel
     {
         $this->runner->shutdown();
         $this->streaming = false;
+        $this->pendingApproval = null;
+        $this->finalizeContent(); // 流被打断时别把空气泡存进档
+        $this->saveNow();
         $this->provider->cleanup();
     }
 
+    // ── V2 对话持久化 ─────────────────────────────────
+
+    /** 启动时恢复上次对话（ai.persist 开才生效；失败静默=不恢复）。App 构造后调用。 */
+    public function restore(): void
+    {
+        if (!ConfigStore::aiPersist()) {
+            return;
+        }
+        $snap = ChatStore::load();
+        if ($snap === null || $snap['messages'] === []) {
+            return;
+        }
+        $this->messages = $snap['messages'];
+        if ($snap['provider'] !== null && $this->registry->has($snap['provider'])) {
+            $this->providerId = $snap['provider'];
+            $this->model = $snap['model']; // 换 provider 清 model 的规则在这里反着来：存档里 model 是配对存下来的
+        }
+    }
+
+    /** 落盘当前对话（ai.persist 开才生效；失败静默）。finish 收尾 / clear / shutdown 调用。 */
+    public function saveNow(): void
+    {
+        if (!ConfigStore::aiPersist()) {
+            return;
+        }
+        $spec = $this->spec();
+        ChatStore::save($this->messages, [
+            'provider' => $this->providerId,
+            'model'    => $spec?->model,
+        ]);
+    }
+
     // ── 内部 ──────────────────────────────────────────
+
+    /**
+     * 处理一条 SseParser 结构化事件：正文增量追加到末条 assistant；
+     * 工具增量按 index 累积到 toolAcc；finish 记录 finish_reason。
+     * @param array<string,mixed> $ev
+     */
+    private function handleEvent(array $ev): void
+    {
+        switch ($ev['type'] ?? null) {
+            case 'delta':
+                if (is_string($ev['text'] ?? null)) {
+                    $this->appendDelta($ev['text']);
+                }
+                return;
+            case 'tool_delta':
+                $idx = is_int($ev['index'] ?? null) ? $ev['index'] : 0;
+                $slot = $this->toolAcc[$idx] ?? ['id' => null, 'name' => null, 'arguments' => ''];
+                if (!$slot['id'] && is_string($ev['id'] ?? null)) {
+                    $slot['id'] = $ev['id'];
+                }
+                if (!$slot['name'] && is_string($ev['name'] ?? null)) {
+                    $slot['name'] = $ev['name'];
+                }
+                if (is_string($ev['args_delta'] ?? null)) {
+                    $slot['arguments'] .= $ev['args_delta'];
+                }
+                $this->toolAcc[$idx] = $slot;
+                return;
+            case 'finish':
+                $this->finishReason = is_string($ev['reason'] ?? null) ? $ev['reason'] : null;
+                return;
+        }
+    }
 
     private function appendDelta(string $delta): void
     {
@@ -269,14 +498,14 @@ final class ChatModel
         $this->messages[$i]['content'] .= $delta;
     }
 
-    /** 进程结束后的收尾：把残留半行解析掉、判定成功/失败、清理临时文件。 */
+    /** 进程结束后的收尾：把残留半行解析掉、判定成功/失败、清理临时文件、Agent loop 续跑判定。 */
     private function finish(): void
     {
         $this->streaming = false;
 
         if ($this->parser !== null) {
-            foreach ($this->parser->flush() as $delta) {
-                $this->appendDelta($delta);
+            foreach ($this->parser->flush() as $ev) {
+                $this->handleEvent($ev);
             }
         }
 
@@ -299,16 +528,244 @@ final class ChatModel
             }
         }
 
+        // V2：压缩摘要请求收尾（必须在工具分支之前——摘要请求期间不可能有 tool_calls）
+        if ($this->compacting) {
+            $this->finishCompact();
+            return;
+        }
+
+        // V2：模型发起了工具调用 → 先落到末条 assistant 消息上（wire 必需，也防止被当空气泡移除）
+        $hasToolCalls = $this->toolAcc !== [];
+        if ($this->error === null && $hasToolCalls) {
+            $this->attachToolCallsToLast();
+        }
+
         if ($this->error !== null) {
             $this->shell->setMessage($this->error);
-        } elseif ($this->lastAssistantText() === '') {
+        } elseif ($this->lastAssistantText() === '' && !$hasToolCalls) {
             // 没报错但也没内容：别让界面上留一个空气泡，用户会以为卡了
+            // （带 tool_calls 的 assistant content 为空是正常形态，不算空）
             $this->shell->setMessage($this->shell->t('ai.empty'));
         }
 
         $this->finalizeContent();
         $this->provider->cleanup();
         $this->parser = null;
+        $this->saveNow(); // 每轮收尾落盘（含工具消息；续跑场景下轮收尾再覆盖）
+
+        // ── Agent loop 续跑判定 ──
+        if ($this->error !== null || !$hasToolCalls) {
+            $this->toolAcc = [];
+            return;
+        }
+        $calls = $this->collectedToolCalls();
+        $this->toolAcc = [];
+        if ($this->steps >= $this->maxSteps) {
+            // 达上限：补上「未执行」的 tool 结果，保持 tool_call/tool 消息成对（否则下次请求会被端点 400）
+            foreach ($calls as $c) {
+                $this->messages[] = [
+                    'role' => 'tool',
+                    'tool_call_id' => $c['id'] ?? '',
+                    'content' => '[未执行：已达工具调用步数上限]',
+                ];
+            }
+            $this->shell->setMessage($this->shell->t('ai.max_steps', ['steps' => (string) $this->maxSteps]));
+            return;
+        }
+        if ($this->toolAutoRun) {
+            $this->runToolCalls($calls); // 只读本地 IO，微秒级，同步执行完立刻续跑
+            return;
+        }
+        // 逐次确认：挂起等用户 y/n（M3 接 UI；期间流式已停，poll() 直接返回 false）
+        $this->pendingApproval = $calls;
+        $this->shell->setMessage($this->shell->t('ai.await_approval'));
+    }
+
+    // ── V2 Agent loop ─────────────────────────────────
+
+    /** 压缩摘要请求收尾：成功 → 替换历史（+回队续发真实请求）；失败 → 降级不压缩。 */
+    private function finishCompact(): void
+    {
+        $old = $this->preCompact;
+        $deferred = $this->deferredUser;
+        $this->deferredUser = null;
+        $this->compacting = false;
+
+        // 摘要 = 本次回复的 assistant 文本（messages 此刻 = [摘要指令, summary assistant]）
+        $summary = $this->lastAssistantText();
+        $failed = $this->error !== null || $summary === '';
+
+        if ($failed) {
+            // 降级：不压缩，原样恢复（历史一条不丢）；send 路径继续把真实请求发出去
+            $this->error = null;
+            $this->messages = $old;
+            $this->preCompact = [];
+            if ($deferred !== null) {
+                $this->messages[] = $deferred;
+                if (!$this->startRequest()) {
+                    $this->finalizeContent();
+                }
+            } else {
+                $this->shell->setMessage($this->shell->t('ai.compact_failed'));
+            }
+            return;
+        }
+
+        $summaryMsg = ['role' => 'user', 'content' => '[历史摘要] ' . $summary, 'meta' => ['kind' => 'summary']];
+        $kept = $this->keptRecent($old, ConfigStore::aiCompactKeepRecent());
+        $this->preCompact = [];
+
+        if ($deferred !== null) {
+            $this->messages = [$summaryMsg, ...$kept, $deferred];
+            // 续发真实请求（此时估算远低于阈值，不会再触发压缩）
+            if (!$this->startRequest()) {
+                $this->finalizeContent();
+            }
+            return;
+        }
+
+        // 手动 compactNow：压缩完即停
+        $this->messages = [$summaryMsg, ...$kept];
+        $this->shell->setMessage($this->shell->t('ai.compact_done', [
+            'before' => (string) count($old),
+            'after'  => (string) count($this->messages),
+        ]));
+        $this->saveNow();
+    }
+
+    /** @return list<array{id:?string,name:?string,arguments:string}> 按 index 升序的已累积工具调用 */
+    private function collectedToolCalls(): array
+    {
+        ksort($this->toolAcc);
+        $out = [];
+        foreach ($this->toolAcc as $slot) {
+            $out[] = ['id' => $slot['id'], 'name' => $slot['name'], 'arguments' => $slot['arguments']];
+        }
+        return $out;
+    }
+
+    /** 把 toolAcc 转成 OpenAI wire 形状并落到末条 assistant 消息的 tool_calls 键上 */
+    private function attachToolCallsToLast(): void
+    {
+        $i = count($this->messages) - 1;
+        if ($i < 0 || ($this->messages[$i]['role'] ?? null) !== 'assistant') {
+            return;
+        }
+        ksort($this->toolAcc);
+        $wire = [];
+        foreach ($this->toolAcc as $slot) {
+            $wire[] = [
+                'id' => $slot['id'] ?? ('call_' . $i . '_' . count($wire)),
+                'type' => 'function',
+                'function' => ['name' => (string) $slot['name'], 'arguments' => $slot['arguments']],
+            ];
+        }
+        $this->messages[$i]['tool_calls'] = $wire;
+    }
+
+    /**
+     * 执行一批工具调用并续跑下一轮请求（autoRun / approve() 共用）。
+     * 工具结果是**本地只读 IO**，同步执行；结果以 role:tool 消息入列后立刻 startRequest()。
+     * @param list<array{id:?string,name:?string,arguments:string}> $calls
+     */
+    private function runToolCalls(array $calls): void
+    {
+        $this->steps++;
+        $this->pendingApproval = null;
+        foreach ($calls as $c) {
+            $result = $this->tools->execute((string) $c['name'], (string) $c['arguments']);
+            $this->messages[] = [
+                'role'         => 'tool',
+                'tool_call_id' => $c['id'] ?? '',
+                'content'      => $result['text'],
+                // 私有键：渲染摘要（M3）/复制语义用，发送前由 Provider stripMeta 剥掉
+                'meta'         => [
+                    'kind'    => 'tool_result',
+                    'display' => self::toolDisplay((string) $c['name'], (string) $c['arguments'], $result['ok']),
+                ],
+            ];
+        }
+        if (!$this->startRequest()) {
+            $this->finalizeContent();
+        }
+    }
+
+    /** 工具调用的单行摘要（渲染/复制用）：read_file(src/Foo.php) ✓/✗ */
+    public static function toolDisplay(string $name, string $argumentsJson, bool $ok): string
+    {
+        $args = json_decode($argumentsJson, true);
+        $path = is_array($args) && is_string($args['path'] ?? null) ? $args['path'] : '?';
+        return $name . '(' . $path . ') ' . ($ok ? '✓' : '✗');
+    }
+
+    /** 逐次确认模式：放行当前挂起的工具调用并续跑。无挂起时是 no-op。 */
+    public function approve(): void
+    {
+        if ($this->pendingApproval === null || $this->streaming) {
+            return;
+        }
+        $calls = $this->pendingApproval;
+        $this->runToolCalls($calls);
+    }
+
+    /** 逐次确认模式：拒绝当前挂起的工具调用——以「用户拒绝」结果入列并续跑（模型可改口）。 */
+    public function deny(): void
+    {
+        if ($this->pendingApproval === null || $this->streaming) {
+            return;
+        }
+        $calls = $this->pendingApproval;
+        $this->pendingApproval = null;
+        $this->steps++;
+        foreach ($calls as $c) {
+            $this->messages[] = [
+                'role'         => 'tool',
+                'tool_call_id' => $c['id'] ?? '',
+                'content'      => '[用户拒绝执行该工具调用]',
+                'meta'         => [
+                    'kind'    => 'tool_result',
+                    'display' => self::toolDisplay((string) $c['name'], (string) $c['arguments'], false),
+                ],
+            ];
+        }
+        if (!$this->startRequest()) {
+            $this->finalizeContent();
+        }
+    }
+
+    /** 逐次确认模式下是否有挂起待裁决的工具调用 */
+    public function hasPendingApproval(): bool
+    {
+        return $this->pendingApproval !== null;
+    }
+
+    /** 取消确认态（Esc）：既不执行也不拒绝，Agent loop 就地停止（工具请求悬空不影响展示） */
+    public function dismissApproval(): void
+    {
+        $this->pendingApproval = null;
+        $this->shell->setMessage($this->shell->t('ai.cancelled'));
+    }
+
+    /** 工具自动执行开关（M7 命令切换；构造时取 vicerc 默认） */
+    public function setToolAutoRun(bool $on): void
+    {
+        $this->toolAutoRun = $on;
+    }
+
+    public function toolAutoRun(): bool
+    {
+        return $this->toolAutoRun;
+    }
+
+    public function steps(): int
+    {
+        return $this->steps;
+    }
+
+    /** 测试注入工具根目录用（正常路径 root=构造时的 getcwd()） */
+    public function setToolsRoot(string $root): void
+    {
+        $this->tools = new AiTools($root);
     }
 
     /**
@@ -318,7 +775,11 @@ final class ChatModel
     private function finalizeContent(): void
     {
         $i = count($this->messages) - 1;
-        if ($i >= 0 && $this->messages[$i]['role'] === 'assistant' && $this->messages[$i]['content'] === '') {
+        if ($i >= 0 && $this->messages[$i]['role'] === 'assistant'
+            && $this->messages[$i]['content'] === ''
+            && !isset($this->messages[$i]['tool_calls'])) {
+            // ⚠️ 带 tool_calls 的 assistant 即使 content 为空也**不能移除**：
+            // 后面的 role:tool 结果要靠它的 tool_calls 成对引用，移除会被端点 400
             array_splice($this->messages, $i, 1);
         }
     }

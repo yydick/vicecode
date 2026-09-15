@@ -251,6 +251,7 @@ class App
         $this->git = new GitModel($this);
         $this->search = new SearchModel($this);
         $this->chat = new ChatModel($this);
+        $this->chat->restore(); // V2：恢复上次对话（ai.persist 开才生效，失败静默）
         $this->help = new HelpPanel($this);
         $this->menuBar = new MenuBarPanel($this);
         $this->pluginsPanel = new PluginsPanel($this);
@@ -797,6 +798,7 @@ class App
      */
     public function areas(Area $vp): array
     {
+        $this->lastVp = $vp; // attach 动作（按键/菜单路径）没有 vp 参数，记下最近视口
         $key = sprintf(
             '%d:%d:%d:%d',
             $vp->position->x,
@@ -1112,6 +1114,30 @@ class App
             case 'help.about':
                 $this->help->openAbout();
                 break;
+            case 'ai.explain':
+            case 'ai.comment':
+            case 'ai.refactor':
+            case 'ai.unittest':
+                $this->aiQuickAction(substr($id, 3)); // 去掉 'ai.' 前缀
+                break;
+            case 'ai.tool_mode':
+                $this->chat->setToolAutoRun(!$this->chat->toolAutoRun());
+                $this->setMessage($this->t($this->chat->toolAutoRun() ? 'ai.tool_mode_auto' : 'ai.tool_mode_confirm'));
+                break;
+            case 'ai.clear':
+                $this->chat->clear();
+                $this->ai->resetScrollState();
+                $this->setMessage($this->t('ai.cleared'));
+                break;
+            case 'ai.compact_now':
+                $this->chat->compactNow();
+                break;
+            case 'ai.attach_selection':
+                $this->aiAttachSelection();
+                break;
+            case 'ai.attach_file':
+                $this->aiAttachCurrentFile();
+                break;
             case 'plugins.open':
                 $this->pluginsPanel->open();
                 break;
@@ -1346,6 +1372,13 @@ class App
             // 必须在面板拿到字符之前处理，否则会把字符打进文档。
             if (($event->modifiers & KeyModifiers::CONTROL) && strtolower($event->char) === 'v') {
                 $this->requestPaste();
+                return;
+            }
+            // Ctrl+E：解释代码（AI 快捷动作）。**仅编辑器焦点**——终端里 Ctrl+E 是
+            // 行尾键必须交回 pty，AI 输入框有自己的按键语义，两边都不抢。
+            if (($event->modifiers & KeyModifiers::CONTROL) && strtolower($event->char) === 'e'
+                && $this->focusPanel() === 'editor') {
+                $this->aiQuickAction('explain');
                 return;
             }
             // AI 输入/消息流：键入进输入框；Ctrl+P 切 Provider、Ctrl+N 切模型、
@@ -1670,6 +1703,121 @@ class App
             max($s['aRow'], $s['bRow']),
             max($s['aCol'], $s['bCol']),
         ];
+    }
+
+    // ── AI 代码上下文附加（V2）──────────────────────────
+
+    /** 最近一次 areas() 的视口（attach 动作在按键/菜单路径里没有 vp 参数，用上一帧的） */
+    private ?Area $lastVp = null;
+
+    /** 编辑器选区 → AI 输入框（先拖选，再触发） */
+    public function aiAttachSelection(): void
+    {
+        if ($this->select === null || ($this->select['panel'] ?? '') !== 'editor') {
+            $this->setMessage($this->t('ai.attach_no_selection'));
+            return;
+        }
+        [$r0, $c0, $r1, $c1] = $this->normalizeRect($this->select);
+        $vp = $this->lastVp ?? Area::fromDimensions(120, 40);
+        $text = $this->editor->getTextRect($this->areas($vp)['editor'], $r0, $c0, $r1, $c1);
+        // 选区属于当前 buffer：带上它的路径（langFor 按扩展名取语言；无路径降级 '(selection)'）
+        $this->aiAttachCode($text, $this->buffer?->path ?? '(selection)');
+    }
+
+    /** 当前文件全文 → AI 输入框 */
+    public function aiAttachCurrentFile(): void
+    {
+        $buf = $this->buffer;
+        if ($buf === null) {
+            $this->setMessage($this->t('ai.attach_no_file'));
+            return;
+        }
+        $this->aiAttachCode(implode("\n", $buf->lines), $buf->path ?? '(buffer)');
+    }
+
+    /**
+     * 代码文本 → 围栏代码块字符串（选区/当前文件/@引用共用格式，M6 D3）。
+     * 超过 ai.attachMaxBytes 截断并标注。
+     */
+    private function codeBlockFor(string $code, ?string $path): string
+    {
+        $code = rtrim($code, "\n");
+        if (trim($code) === '') {
+            return '';
+        }
+        $note = '';
+        $max = ConfigStore::aiAttachMaxBytes();
+        if (strlen($code) > $max) {
+            $code = substr($code, 0, $max);
+            while ($code !== '' && !mb_check_encoding($code, 'UTF-8')) {
+                $code = substr($code, 0, -1);
+            }
+            $note = "\n（已截断到 {$max} 字节）";
+        }
+        // 相对路径展示（消息里不用绝对路径，且 langFor 按扩展名取语言）
+        $rel = $path ?? '';
+        $cwd = (string) getcwd();
+        if ($rel !== '' && str_starts_with($rel, $cwd . '/')) {
+            $rel = substr($rel, strlen($cwd) + 1);
+        }
+        $lang = $rel !== '' && $rel !== '(selection)' ? (\App\Editor\Highlighter::langFor($rel) ?? '') : '';
+        $head = ($rel !== '' && $rel !== '(selection)' ? "（文件 {$rel}：）\n" : '');
+        return $head . "```{$lang}\n{$code}\n```{$note}\n";
+    }
+
+    /**
+     * 代码文本 → 围栏代码块 → 注入 AI 输入框（V2）。
+     * 附加后焦点切到 ai_input 让用户接着提问。
+     */
+    private function aiAttachCode(string $code, ?string $path): void
+    {
+        $block = $this->codeBlockFor($code, $path);
+        if ($block === '') {
+            $this->setMessage($this->t('ai.attach_empty'));
+            return;
+        }
+        $cur = $this->ai->input();
+        if ($cur !== '' && !str_ends_with($cur, "\n")) {
+            $this->ai->insertText("\n");
+        }
+        $this->ai->insertText($block);
+        $this->focusIndex = array_search('ai_input', self::PANELS, true);
+        $this->setMessage($this->t('ai.attached', ['n' => (string) strlen($block)]));
+    }
+
+    /**
+     * AI 快捷动作（V2 M7）：解释/注释/重构/单测。
+     * 上下文取编辑器选区（拖选高亮仍保留时），无选区用当前文件，两者皆无就只发指令。
+     * 直接发送（不等用户再按回车）——「快捷动作」的语义就是一步出结果。
+     */
+    private function aiQuickAction(string $kind): void
+    {
+        $labels = ['explain' => 'ai.act.explain', 'comment' => 'ai.act.comment', 'refactor' => 'ai.act.refactor', 'unittest' => 'ai.act.unittest'];
+        if (!isset($labels[$kind])) {
+            return;
+        }
+        $instruction = $this->t($labels[$kind]);
+        $prompt = $instruction;
+
+        $code = null;
+        $path = null;
+        if ($this->select !== null && ($this->select['panel'] ?? '') === 'editor') {
+            [$r0, $c0, $r1, $c1] = $this->normalizeRect($this->select);
+            $vp = $this->lastVp ?? Area::fromDimensions(120, 40);
+            $code = $this->editor->getTextRect($this->areas($vp)['editor'], $r0, $c0, $r1, $c1);
+            $path = $this->buffer?->path;
+        } elseif ($this->buffer !== null) {
+            $code = implode("\n", $this->buffer->lines);
+            $path = $this->buffer->path;
+        }
+        $block = $this->codeBlockFor((string) $code, $path);
+        if ($block !== '') {
+            $prompt .= "\n\n" . $block;
+        }
+        $this->chat->clear(); // 快捷动作起全新对话：上一轮问答跟本次代码无关，混着反而误导模型
+        $this->ai->resetForPrompt();
+        $this->ai->sendPrompt($prompt);
+        $this->focusIndex = array_search('ai_stream', self::PANELS, true);
     }
 
     /** 取内存剪贴板内容（非 tty 降级路径；主要给单测断言用） */

@@ -48,18 +48,30 @@ function frame(?string $content, ?string $role = null, ?string $finish = null): 
     return 'data: ' . json_encode(['choices' => [$choice]], JSON_UNESCAPED_UNICODE) . "\n\n";
 }
 
+/** V2：从结构化事件里抽正文文本（等价 M5 时代的 push() 返回值） */
+function texts(array $events): array
+{
+    $out = [];
+    foreach ($events as $ev) {
+        if (($ev['type'] ?? null) === 'delta' && is_string($ev['text'] ?? null)) {
+            $out[] = $ev['text'];
+        }
+    }
+    return $out;
+}
+
 // ─────────────── 1) SseParser ───────────────
 echo "== SseParser 增量解析 ==\n";
 
 $p = new SseParser();
-check($p->push(frame('hello')) === ['hello'], '单个完整事件 → 解析出一个 delta');
+check(texts($p->push(frame('hello'))) === ['hello'], '单个完整事件 → 解析出一个 delta');
 check(!$p->isDone(), '未收到 [DONE] 时 isDone=false');
 
 $p = new SseParser();
-check($p->push(frame('a') . frame('b') . frame('c')) === ['a', 'b', 'c'], '一个 chunk 含三个事件 → 按序产出三个 delta');
+check(texts($p->push(frame('a') . frame('b') . frame('c'))) === ['a', 'b', 'c'], '一个 chunk 含三个事件 → 按序产出三个 delta');
 
 $p = new SseParser();
-check($p->push(frame('a') . frame('b')) === ['a', 'b'], '两个事件一次到达');
+check(texts($p->push(frame('a') . frame('b'))) === ['a', 'b'], '两个事件一次到达');
 
 // ── 核心：chunk 边界与事件边界不对齐 ──
 $full = frame('你') . frame('好') . frame('世界');
@@ -67,7 +79,7 @@ $p = new SseParser();
 $got = [];
 foreach (str_split($full, 1) as $byte) {
     // 逐字节喂：最恶劣的切法，JSON 和 UTF-8 都会被劈得粉碎
-    foreach ($p->push($byte) as $t) {
+    foreach (texts($p->push($byte)) as $t) {
         $got[] = $t;
     }
 }
@@ -79,7 +91,7 @@ $one = frame('你好世界');
 $p = new SseParser();
 $cut = (int) (strlen($one) / 2);
 check($p->push(substr($one, 0, $cut)) === [], '半个事件到达时不产出（攒在缓冲区）');
-check($p->push(substr($one, $cut)) === ['你好世界'], '补齐后半段一次性产出全部');
+check(texts($p->push(substr($one, $cut))) === ['你好世界'], '补齐后半段一次性产出全部');
 
 // ── [DONE] ──
 $p = new SseParser();
@@ -91,7 +103,7 @@ check($p->push(frame('b')) === [], '[DONE] 之后的字节被忽略（keep-alive
 // ── flush：没有尾换行的残留行 ──
 $p = new SseParser();
 check($p->push('data: ' . json_encode(['choices' => [['delta' => ['content' => '尾巴']]]], JSON_UNESCAPED_UNICODE)) === [], '无尾换行的完整 data 行仍攒着（等换行）');
-check($p->flush() === ['尾巴'], 'flush() 把无换行结尾的残留行解析出来');
+check(texts($p->flush()) === ['尾巴'], 'flush() 把无换行结尾的残留行解析出来');
 check($p->flush() === [], 'flush() 幂等，第二次返回空');
 
 // ── 各类可忽略的行 ──
@@ -99,17 +111,20 @@ $p = new SseParser();
 check($p->push(": ping\n\n") === [], '心跳注释行被忽略');
 check($p->push("\n\n") === [], '空行（事件分隔）不产出');
 check($p->push("event: ping\n\n") === [], '非 data 行被忽略');
-check($p->push('data:' . json_encode(['choices' => [['delta' => ['content' => 'x']]]]) . "\n\n") === ['x'], 'data: 后无空格也能解析（规范允许）');
+check(texts($p->push('data:' . json_encode(['choices' => [['delta' => ['content' => 'x']]]]) . "\n\n")) === ['x'], 'data: 后无空格也能解析（规范允许）');
 
 // role-only 首帧：delta 里只有 role，content 为 null
 $p = new SseParser();
 check($p->push(frame(null, 'assistant')) === [], 'role-only 首帧（content=null）不产出空串');
-check($p->push(frame('hi')) === ['hi'], 'role-only 帧之后正常帧照常产出');
+check(texts($p->push(frame('hi'))) === ['hi'], 'role-only 帧之后正常帧照常产出');
 
-// finish_reason 帧：delta 为空对象
+// finish_reason 帧：delta 为空 → V2 起产出结构化 finish 事件
 $p = new SseParser();
 $finishFrame = 'data: ' . json_encode(['choices' => [['delta' => [], 'index' => 0, 'finish_reason' => 'stop']]]) . "\n\n";
-check($p->push($finishFrame) === [], 'finish_reason 帧（delta 为空）不产出内容');
+$finEv = $p->push($finishFrame);
+check(count($finEv) === 1 && ($finEv[0]['type'] ?? null) === 'finish' && ($finEv[0]['reason'] ?? null) === 'stop',
+    'finish_reason 帧产出 finish 事件（reason=stop，实际：' . json_encode($finEv) . '）');
+check(texts($finEv) === [], 'finish 帧不产出正文');
 
 // ── 坏数据：记录而非抛异常 ──
 $p = new SseParser();
@@ -132,9 +147,43 @@ $stream = frame(null, 'assistant')
     . $finishFrame
     . "data: [DONE]\n\n";
 $got = $p->push($stream);
-check(implode('', $got) === '你好，世界', '完整流拼接结果正确（实际：' . implode('', $got) . '）');
+check(implode('', texts($got)) === '你好，世界', '完整流拼接结果正确（实际：' . implode('', texts($got)) . '）');
 check($p->isDone(), '完整流结束后 isDone=true');
 check($p->error() === null, '正常流无 error');
+$finEvs = array_values(array_filter($got, static fn($e) => ($e['type'] ?? null) === 'finish'));
+check(count($finEvs) === 1 && $finEvs[0]['reason'] === 'stop', '完整流的 finish 事件恰好一个且 reason=stop');
+
+// ── V2：tool_calls 分片解析（arguments 被 chunk 劈开、多工具靠 index 归并）──
+$p = new SseParser();
+$toolFrame1 = 'data: ' . json_encode(['choices' => [['delta' => ['tool_calls' => [
+    ['index' => 0, 'id' => 'call_1', 'type' => 'function',
+     'function' => ['name' => 'read_file', 'arguments' => '{"pa']],
+]]]], JSON_UNESCAPED_UNICODE]) . "\n\n";
+$toolFrame2 = 'data: ' . json_encode(['choices' => [['delta' => ['tool_calls' => [
+    ['index' => 0, 'function' => ['arguments' => 'th":"src/Foo.php"}']],
+]]]], JSON_UNESCAPED_UNICODE]) . "\n\n";
+$toolFrame3 = 'data: ' . json_encode(['choices' => [['delta' => ['tool_calls' => [
+    ['index' => 1, 'id' => 'call_2', 'type' => 'function',
+     'function' => ['name' => 'list_files', 'arguments' => '{"path":"src"}']],
+]]]], JSON_UNESCAPED_UNICODE]) . "\n\n";
+$tevs = $p->push($toolFrame1 . $toolFrame2 . $toolFrame3);
+check(count($tevs) === 3 && texts($tevs) === [], 'tool_calls 帧产出 3 个 tool_delta、无正文');
+check(($tevs[0]['id'] ?? null) === 'call_1' && ($tevs[0]['name'] ?? null) === 'read_file', '首片带 id+name');
+check(($tevs[1]['id'] ?? null) === null && ($tevs[1]['name'] ?? null) === null, '续片 id/name 为 null（由累积方按 index 归并）');
+check(($tevs[1]['index'] ?? null) === 0 && ($tevs[1]['args_delta'] ?? null) === 'th":"src/Foo.php"}', '续片 index=0、arguments 增量正确');
+check(($tevs[2]['index'] ?? null) === 1 && ($tevs[2]['id'] ?? null) === 'call_2', '第二个工具 index=1（并发靠 index 区分）');
+// 按累积方（ChatModel::handleEvent）的方式归并验证
+$acc = [];
+foreach ($tevs as $e) {
+    $i = $e['index'];
+    $acc[$i] = ($acc[$i] ?? ['id' => null, 'name' => null, 'args' => '']);
+    $acc[$i]['id'] = $acc[$i]['id'] ?? $e['id'];
+    $acc[$i]['name'] = $acc[$i]['name'] ?? $e['name'];
+    $acc[$i]['args'] .= $e['args_delta'];
+}
+check(($acc[0]['args'] ?? '') === '{"path":"src/Foo.php"}', 'index=0 分片拼回完整 JSON（实际：' . var_export($acc[0]['args'] ?? null, true) . '）');
+check(json_decode($acc[0]['args'] ?? '', true) === ['path' => 'src/Foo.php'], '拼回的 arguments 是合法 JSON');
+check(($acc[1]['args'] ?? '') === '{"path":"src"}', 'index=1 arguments 完整');
 
 // ─────────────── 2) Provider 配置解析 ───────────────
 echo "\n== ProviderRegistry 配置解析 ==\n";
@@ -241,6 +290,30 @@ $dec2 = json_decode((string) @file_get_contents(substr($m2[1] ?? '', 1)), true);
 check(count($dec2['messages'] ?? []) === 4, '多轮：4 条历史全部带上');
 check(($dec2['messages'][0]['role'] ?? null) === 'system', '多轮：system 消息在首位');
 check(($dec2['messages'][3]['content'] ?? null) === '第二轮', '多轮：最新一轮在末尾');
+
+// V2：tools 定义注入 body；meta 私有键被剥掉
+$withMeta = [
+    ['role' => 'user', 'content' => '看下这个文件', 'meta' => ['kind' => 'summary', 'display' => '不应发出去']],
+    ['role' => 'assistant', 'content' => '', 'tool_calls' => [
+        ['id' => 'call_x', 'type' => 'function', 'function' => ['name' => 'read_file', 'arguments' => '{"path":"a"}']],
+    ]],
+    ['role' => 'tool', 'tool_call_id' => 'call_x', 'content' => '内容', 'meta' => ['display' => 'display-only']],
+];
+$provT = new OpenAiCompatProvider();
+$tools = [['type' => 'function', 'function' => ['name' => 'read_file', 'parameters' => ['type' => 'object']]]];
+$cmdT = $provT->buildCommand($spec, $withMeta, OpenAiCompatProvider::DEFAULT_TIMEOUT, $tools);
+preg_match("/--data-binary '(@[^']+)'/", $cmdT, $mt);
+$decT = json_decode((string) @file_get_contents(substr($mt[1] ?? '', 1)), true);
+check(($decT['tools'] ?? null) === $tools, 'buildCommand 带 tools 时 body 含 tools 定义');
+check(!isset($decT['messages'][0]['meta']) && !isset($decT['messages'][2]['meta']), '私有 meta 键在发送前被剥掉（wire 干净）');
+check(($decT['messages'][1]['tool_calls'][0]['id'] ?? null) === 'call_x', 'tool_calls 原样透传');
+check(($decT['messages'][2]['tool_call_id'] ?? null) === 'call_x' && ($decT['messages'][2]['content'] ?? null) === '内容', 'tool 结果消息原样透传');
+// 不带 tools 时 body 里不能有 tools 键
+$provT2 = new OpenAiCompatProvider();
+$cmdT2 = $provT2->buildCommand($spec, [['role' => 'user', 'content' => 'x']]);
+preg_match("/--data-binary '(@[^']+)'/", $cmdT2, $mt2);
+$decT2 = json_decode((string) @file_get_contents(substr($mt2[1] ?? '', 1)), true);
+check(!array_key_exists('tools', $decT2), '不带 tools 时 body 无 tools 键（普通对话不受影响）');
 
 // 头部文件内容正确（key 在文件里，不在 argv）
 preg_match("/-H '(@[^']+)'/", $cmd2, $m3);

@@ -57,6 +57,7 @@ final class KeyBindings
                 ['Ctrl+W', 'help.e_close'],
                 ['Ctrl+Tab', 'help.e_switch'],
                 ['Ctrl+V', 'help.e_paste'],
+                ['Ctrl+E', 'help.e_ai_explain'],
                 ['keys.printable', 'help.e_type'],
             ]),
             self::group('help.group_terminal', [

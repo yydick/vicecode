@@ -208,6 +208,55 @@ final class DisplayWidth
     }
 
     /**
+     * span 感知的按显示列宽软换行（V2 AI Markdown 渲染）。
+     *
+     * 输入是逻辑行内的 span 列表（[文本, 样式]，样式原样透传——本类不关心具体类型），
+     * 输出是若干「物理行」，每行仍是 span 列表。约定：
+     *  - 输入 span 文本里**不含** `\n`（调用方先按显式换行拆成多条逻辑行）；
+     *  - 一个 span 跨行被切时，续行首 span 沿用原样式（粗体/代码色跨行不丢）；
+     *  - **拼接不变量**：所有输出行的 span 文件拼接 == 所有输入 span 文本拼接。
+     *    这条与 mbWrapDisp 的验收纪律同源（B9 的教训：折行宽度错位靠拼回原文才能抓出）。
+     *
+     * @param list<array{0:string,1:mixed}> $spans
+     * @return list<list<array{0:string,1:mixed}>>
+     */
+    public static function spanWrapDisp(array $spans, int $width): array
+    {
+        if ($width <= 0) {
+            return [[]];
+        }
+        $lines = [];
+        $cur = [];   // list<array{0:string,1:mixed}>
+        $curText = '';
+        $w = 0;
+        foreach ($spans as [$text, $style]) {
+            if ($text === '') {
+                continue;
+            }
+            foreach (mb_str_split($text) as $g) {
+                $cw = self::dispWidth($g);
+                if ($curText !== '' && $w + $cw > $width) {
+                    $lines[] = $cur;
+                    $cur = [];
+                    $curText = '';
+                    $w = 0;
+                }
+                // 相邻同样式合进同一个 span，避免渲染层拿到碎片化 span 列表
+                $last = count($cur) - 1;
+                if ($last >= 0 && $cur[$last][1] === $style) {
+                    $cur[$last][0] .= $g;
+                } else {
+                    $cur[] = [$g, $style];
+                }
+                $curText .= $g;
+                $w += $cw;
+            }
+        }
+        $lines[] = $cur;
+        return $lines;
+    }
+
+    /**
      * 显示列宽 → 字符索引（反向切片，供鼠标点击定位）。
      * 给定绝对显示列 $dispCol，返回落在该显示列上的字素（grapheme）起始字符索引；
      * 落在某宽字素中间时，光标停在该字素起点（不劈开 CJK）。

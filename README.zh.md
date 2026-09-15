@@ -162,9 +162,22 @@ TUI_USE_SWOOLE=0 php bin/vicecode.php   # 强制回退到纯 php-tui/term 阻塞
 - 只恢复**启动**工作目录；在 shell 内 `cd` 过的目录不恢复。
 - PTY 进程本身无法序列化；恢复的是一个灌入了快照文本的新 shell，其新提示符接在快照之后。
 
+## AI 助手（V2）
+
+右侧 AI 面板已接入工作台：OpenAI 与 DeepSeek 兼容端点（配置在 `config/providers.php`，key 走环境变量），经 `curl` 子进程流式输出，UI 全程不阻塞。
+
+- **代码上下文**：输入框里用 `@项目内路径` 引用文件——发送前自动展开成带语法高亮的围栏代码块（路径经项目根校验：`../`、绝对路径、出根 symlink、二进制一律拒绝；单文件上限 `ai.attachMaxBytes` 默认 64KB，超限截断并标注）；菜单「AI → 附加编辑器选区 / 附加当前文件」同样注入上下文。
+- **只读工具（Agent loop）**：模型可在项目内调用 `list_files` / `read_file`。调用在本地同步执行，循环持续到模型作答或达到 `ai.maxSteps`（默认 8）轮。消息流里可见调用行（`→ name(args)`）与单行结果摘要（`⚙ name(path) ✓`）——文件内容**不会**倾倒进对话。点击复制 tool 行得到的是摘要。设 `ai.toolAutoRun: false` 改为逐次确认（`y` 放行 / `n` 拒绝，`Esc` 取消）。
+- **上下文压缩**：估算 token 超过 `ai.compactThreshold`（默认 24000）时自动把旧历史压缩成摘要（保留最近 `ai.compactKeepRecent` 默认 6 条）再发真实请求；压缩绝不拆散 tool_call/结果对，失败则降级为不压缩、历史一条不丢。菜单「AI → 立即压缩对话历史」手动触发。
+- **对话持久化**（默认开启）：每轮收尾落盘到 `~/.vicecode_ai`（`0600`），重启自动恢复对话与 provider/model；`Ctrl+L` 清空对话并同步清档。`ai.persist: false` 关闭。
+- **Markdown 渲染**：定稿消息渲染标题、列表、引用、行内代码/链接/粗斜体与围栏代码块（scrivo 高亮）；流式中的消息先按纯文本显示，定稿后切换。**单换行保留为独立行**。
+- **AI 快捷动作**：菜单「AI → 解释这段代码 / 加注释 / 重构建议 / 编写单元测试」（也在 `F1` 命令面板里）；编辑器内 `Ctrl+E` 把当前文件（或选区）发给 AI 解释，起全新对话直接发送。
+
+全部按键与行为见应用内 `?` 帮助页。
+
 ## 配置与语言
 
-- 配置落盘到 `~/.vicerc`（JSON：布局 / 主题 / 语言，以及你设置的 `persistSession`），退出时自动保存。保存时 ViceCode 会**合并**已有配置，手改的 key（如 `persistSession`）不会被覆盖丢失。
+- 配置落盘到 `~/.vicerc`（JSON：布局 / 主题 / 语言、`persistSession`，以及 `ai` 段——`persist` / `toolAutoRun` / `maxSteps` / `compactThreshold` / `compactKeepRecent` / `attachMaxBytes`），退出时自动保存。保存时 ViceCode 会**合并**已有配置，手改的 key（如 `persistSession`）不会被覆盖丢失。
 - 用环境变量 `VICECODE_CONFIG` 可覆盖配置文件路径（测试隔离用，避免污染家目录）。
 - 界面语言通过 `APP_LOCALE` 切换，默认 `zh_CN`，可选 `en`；缺失的 key 回退英文。
 

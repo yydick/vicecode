@@ -8,6 +8,32 @@
 
 ---
 
+## [Unreleased]
+
+> 本轮主题：**AI V2** —— 把 AI 从「孤岛聊天框」接进工作台：代码上下文、只读工具 Agent loop、上下文压缩、对话持久化与 Markdown 渲染。
+
+### 新增（AI V2）
+
+- **代码上下文**：AI 输入框支持 `@文件` 引用（发送前展开为围栏代码块，路径经 realpath + 项目根前缀校验，`../` / 绝对路径 / symlink 出根 / 二进制一律拒绝；单文件上限 `ai.attachMaxBytes` 默认 64KB，超限截断标注）；菜单「AI → 附加编辑器选区 / 附加当前文件」；引用缺失时状态栏提示且不阻断发送。
+- **只读工具调用（Agent loop）**：模型可调用 `list_files` / `read_file`（OpenAI tools 协议，`SseParser` 升级为结构化事件解析 `tool_calls` 分片与 `finish_reason`），本地同步执行后以 `role:tool` 消息续跑，最多 `ai.maxSteps`（默认 8）轮；达到上限时补写「未执行」结果保持 wire 成对。工具过程在消息流内展示（调用行 `→ name(args)`、结果行 `⚙ name(path) ✓`，只渲染摘要不倾倒文件内容）；点击复制的语义：tool 行复制摘要、tool_calls 行复制调用清单。逐次确认模式（`ai.toolAutoRun=false`）下挂起等 `y`/`n`，`Esc` 取消确认。
+- **上下文压缩**：估算 token（CJK 按 3 字符/token）超过 `ai.compactThreshold`（默认 24000）且消息数足够时，发送前先经同一条 curl 管线请求摘要，用 `[历史摘要]` 消息替换旧历史并保留最近 `ai.compactKeepRecent`（默认 6）条；保留区起点若落在 `role:tool` 消息上自动回退到其 assistant（不拆散 tool_call/tool 对）；压缩失败降级为不压缩、历史一条不丢。菜单「AI → 立即压缩对话历史」可手动触发。
+- **对话持久化**：默认开启（`ai.persist=false` 关闭）。每次收尾/清空/退出落盘到 `~/.vicecode_ai`（`0600`），重启自动恢复对话与 provider/model；`Ctrl+L` 清空同步清档。
+- **Markdown 渲染**：定稿消息（user/assistant）按 league/commonmark 解析为 AST 后自渲染 TUI span——标题 `#` 前缀、有序/无序列表（含嵌套缩进与编号）、引用 `│` 前缀、围栏代码块复用 scrivo 语法高亮、行内代码/链接/粗斜体各有主题色（`mdHeading/mdCode/mdQuote/mdLink`，dark 与 midnight 两主题同步）；**单换行保留为独立行**（终端聊天的排版根基）；流式中的消息走纯文本路径（每 token 全量解析会卡帧），定稿后按 `theme:md5(content)` 缓存逻辑行。新增 `DisplayWidth::spanWrapDisp()`（span 感知软换行，拼接不变量：所有物理行拼接 == 原拼接）。
+- **AI 快捷动作**：菜单「AI」组（解释代码 / 加注释 / 重构建议 / 编写单元测试），进命令面板可搜；编辑器内 `Ctrl+E` 一键「解释代码」（自动附当前文件或选区、起全新对话直接发送）。
+- **配置**：`.vicerc` 新增 `ai` 段：`persist` / `toolAutoRun` / `maxSteps` / `compactThreshold` / `compactKeepRecent` / `attachMaxBytes`。
+
+### 依赖
+
+- 新增 `league/commonmark ^2.10`（Markdown 解析，只走 AST 遍历，不用其 HTML 渲染器）。
+
+### 测试
+
+- 新增 headless：`tests/ai_tools_unit.php`（路径安全 / Agent loop 端到端 / maxSteps / approve-deny / 流内渲染）、`tests/ai_md_unit.php`（Markdown 元素 / spanWrapDisp 拼接不变量 / 缓存命中）、`tests/ai_store_unit.php`（存取往返 / 0600 / Ctrl+L 清档 / persist=false）、`tests/ai_attach_unit.php`（@展开与拒绝 / 选区与当前文件附加 / 快捷动作与菜单）、`tests/ai_compact_unit.php`（自动触发 / 失败降级 / tool 对不拆散 / 手动压缩）。
+- 新增 pty：`tests/pty_ai_v2.php`（三轮真实会话：@展开与两轮工具 / 重启恢复 / y 确认放行）。
+- `tests/ai_unit.php` 的 SseParser 断言升级为结构化事件形状（V2 唯一破坏性 API 变更）；`tests/plugin_v11_unit.php` 菜单组索引断言随 AI 组插入顺延。
+
+---
+
 ## [0.0.2] — 2026-09-10
 
 > 本轮主题：**边界深挖**（侧栏横滚 / 深层与超长路径 / 状态栏长值）+ **插件系统 V1.1**（命令钩子 / 状态栏段点击 / 生命周期事件）+ **插件自定义面板** + 若干修复。已提交至 `develop`，待合并 `master` 发版。

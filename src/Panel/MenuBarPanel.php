@@ -121,6 +121,23 @@ final class MenuBarPanel
                     ['label' => $t('menu.help_about'),     'action' => 'help.about',     'shortcut' => ''],
                 ],
             ],
+            // V2：AI 组放在 Help 之后、插件组之前——前 4 组的下标与项序保持不变
+            //（plugin_v11_unit 有索引稳定性硬断言），插件组仍在**最后一个系统组之后**。
+            [
+                'label' => $t('menu.ai'),
+                'items' => [
+                    ['label' => $t('ai.act.explain'),   'action' => 'ai.explain',        'shortcut' => 'Ctrl+E'],
+                    ['label' => $t('ai.act.comment'),   'action' => 'ai.comment',        'shortcut' => ''],
+                    ['label' => $t('ai.act.refactor'),  'action' => 'ai.refactor',       'shortcut' => ''],
+                    ['label' => $t('ai.act.unittest'),  'action' => 'ai.unittest',       'shortcut' => ''],
+                    ['label' => $t('ai.attach_selection_label'), 'action' => 'ai.attach_selection', 'shortcut' => ''],
+                    ['label' => $t('ai.attach_file_label'),      'action' => 'ai.attach_file',      'shortcut' => ''],
+                    ['label' => $this->shell->chat->toolAutoRun() ? $t('ai.tool_mode_confirm') : $t('ai.tool_mode_auto'),
+                                                              'action' => 'ai.tool_mode',      'shortcut' => ''],
+                    ['label' => $t('ai.compact_now_label'),      'action' => 'ai.compact_now',    'shortcut' => ''],
+                    ['label' => $t('ai.cleared_menu'),           'action' => 'ai.clear',          'shortcut' => ''],
+                ],
+            ],
         ];
         // V1.1：插件命令组**只追加在末尾** —— 系统 4 组的下标与项序一概不变，
         // 下面那些按 $this->active/$this->sel 取数组的地方才不会错位。

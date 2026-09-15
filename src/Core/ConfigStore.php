@@ -86,6 +86,57 @@ final class ConfigStore
         return $v === true || $v === 1 || $v === '1';
     }
 
+    // ── AI V2 配置（.vicerc 的 "ai" 段；缺失/类型不对一律走默认值）──────
+
+    /** 读 ai 段（顶层键 "ai"），非数组返回空 */
+    private static function aiSection(): array
+    {
+        $v = self::load()['ai'] ?? [];
+        return is_array($v) ? $v : [];
+    }
+
+    /** AI 对话自动存盘（默认开；Ctrl+L 清空时同步清档） */
+    public static function aiPersist(): bool
+    {
+        $v = self::aiSection()['persist'] ?? true;
+        return $v !== false && $v !== 0 && $v !== '0';
+    }
+
+    /** Agent 工具（只读 list_files/read_file）自动执行；false=逐次弹确认（默认自动） */
+    public static function aiToolAutoRun(): bool
+    {
+        $v = self::aiSection()['toolAutoRun'] ?? true;
+        return $v !== false && $v !== 0 && $v !== '0';
+    }
+
+    /** Agent loop 步数上限（一轮 send 起最多执行几轮工具调用，默认 8） */
+    public static function aiMaxSteps(): int
+    {
+        $v = self::aiSection()['maxSteps'] ?? 8;
+        return is_int($v) ? max(1, $v) : (is_numeric($v) ? max(1, (int) $v) : 8);
+    }
+
+    /** 上下文压缩触发阈值：估算 token 超过它才压缩（默认 24000，最小 10 便于测试/小模型） */
+    public static function aiCompactThreshold(): int
+    {
+        $v = self::aiSection()['compactThreshold'] ?? 24000;
+        return is_int($v) ? max(10, $v) : (is_numeric($v) ? max(10, (int) $v) : 24000);
+    }
+
+    /** 压缩后保留的最近消息条数（默认 6） */
+    public static function aiCompactKeepRecent(): int
+    {
+        $v = self::aiSection()['compactKeepRecent'] ?? 6;
+        return is_int($v) ? max(2, $v) : (is_numeric($v) ? max(2, (int) $v) : 6);
+    }
+
+    /** @文件/选区/当前文件 单次注入上限字节数（默认 64KB，超限截断并标注） */
+    public static function aiAttachMaxBytes(): int
+    {
+        $v = self::aiSection()['attachMaxBytes'] ?? 65536;
+        return is_int($v) ? max(1024, $v) : (is_numeric($v) ? max(1024, (int) $v) : 65536);
+    }
+
     /**
      * 读取插件专用配置：整份文件即「插件 id => 配置」映射，无 plugins 包裹层。
      * 文件不存在时回退到旧版写在 .vicerc 的 plugins 段（一次性兼容，用户首次编辑后

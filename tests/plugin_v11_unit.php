@@ -130,8 +130,10 @@ check(($noexecConf['noexec.*']['reason'] ?? '') === 'no_executor', 'noexec 记�
 // ── 2) 菜单形状（索引稳定性硬断言）─────────────────────
 echo "== 菜单合并与索引稳定性 ==\n";
 $defs = $app->menuBar->definitions();
-check(count($defs) === 5, '有插件命令时菜单追加到第 5 组（实际 ' . count($defs) . ' 组）');
-check($defs[4]['label'] === $app->t('menu.plugins'), '第 5 组 label 走 i18n（插件）');
+// V2：AI 组插在 Help 之后（第 5 组），插件组顺延到第 6 组
+check(count($defs) === 6, '有插件命令时菜单共 6 组（AI 第 5 组 + 插件第 6 组，实际 ' . count($defs) . ' 组）');
+check($defs[4]['label'] === $app->t('menu.ai'), '第 5 组是 AI 组（label 走 i18n）');
+check($defs[5]['label'] === $app->t('menu.plugins'), '第 6 组 label 走 i18n（插件）');
 $expectActions = [
     'file.open', 'file.save', 'file.close', 'plugins.open', 'file.quit',
     'view.theme', 'view.focus.editor', 'view.focus.terminal', 'view.focus.explorer',
@@ -144,7 +146,7 @@ for ($i = 0; $i < 4; $i++) {
     }
 }
 check($gotActions === $expectActions, '前 4 组的 action 序列与改动前逐项一致（17 项，含命令面板与插件面板浮层）');
-$pluginActions = array_column($defs[4]['items'], 'action');
+$pluginActions = array_column($defs[5]['items'], 'action');
 // demo 3 + conf 3：快捷键冲突只降级快捷键，**命令本身仍会注册**（仍可从菜单触发）
 check(count($pluginActions) === 6, '插件组共 6 项（demo 3 + conf 3；冲突只降级快捷键）');
 foreach ($pluginActions as $a) {
@@ -153,7 +155,7 @@ foreach ($pluginActions as $a) {
     }
 }
 check(true, '所有插件项 action 均以 plugin: 开头');
-$shortcutsIn = array_column($defs[4]['items'], 'shortcut');
+$shortcutsIn = array_column($defs[5]['items'], 'shortcut');
 check(in_array('Ctrl+K', $shortcutsIn, true) && in_array('F3', $shortcutsIn, true), '绑定成功的快捷键出现在菜单里');
 check(count(array_filter($shortcutsIn, static fn (string $s): bool => $s !== '')) === 2, '只有 2 项带快捷键（其余为空串，不承诺无效键）');
 

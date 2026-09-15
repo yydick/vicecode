@@ -245,8 +245,8 @@ if ($mcol === false) {
 }
 
 echo "== 真实 pty：菜单链路（F10 → 走到插件组 → Enter）==\n";
-[$frame5, $raw5, $code5] = runOnce($env, ["\x1b[21~", "\x1b[C", "\x1b[C", "\x1b[C", "\x1b[C", "\r"], $readPty);
-check(str_contains($frame5, 'MCMDk'), 'F10 + 右×4 + Enter → 执行插件组首项（菜单链路通）');
+[$frame5, $raw5, $code5] = runOnce($env, ["\x1b[21~", "\x1b[C", "\x1b[C", "\x1b[C", "\x1b[C", "\x1b[C", "\r"], $readPty);
+check(str_contains($frame5, 'MCMDk'), 'F10 + 右×5 + Enter → 执行插件组首项（V2 起 AI 组插在插件组之前，菜单链路通）');
 check($code5 === 0, 'Ctrl+Q 退出码为 0（实际 ' . $code5 . '）');
 check(!str_contains($raw5, 'Fatal') && !str_contains($raw5, 'Warning'), '整轮输出无 Fatal / PHP Warning');
 

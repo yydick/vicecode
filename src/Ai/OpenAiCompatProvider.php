@@ -37,17 +37,22 @@ final class OpenAiCompatProvider
     /**
      * 构造可直接交给 `CommandRunner::start()` 的 shell 命令。
      *
-     * @param array<int,array{role:string,content:string}> $messages
+     * @param array<int,array<string,mixed>> $messages wire 形状（可含本项目私有 `meta` 键，发送前剥掉）
+     * @param array<int,array<string,mixed>>|null $tools OpenAI tools 定义（Agent 模式），null=不带
      */
-    public function buildCommand(ProviderSpec $spec, array $messages, int $timeout = self::DEFAULT_TIMEOUT): string
+    public function buildCommand(ProviderSpec $spec, array $messages, int $timeout = self::DEFAULT_TIMEOUT, ?array $tools = null): string
     {
         $this->cleanup(); // 上一次请求若没清干净，先清掉，避免临时文件泄漏
 
-        $body = json_encode([
+        $payload = [
             'model'    => $spec->model,
-            'messages' => $messages,
+            'messages' => self::stripMeta($messages),
             'stream'   => true,
-        ], JSON_UNESCAPED_UNICODE);
+        ];
+        if ($tools !== null && $tools !== []) {
+            $payload['tools'] = $tools;
+        }
+        $body = json_encode($payload, JSON_UNESCAPED_UNICODE);
         if ($body === false) {
             $body = '{"model":"","messages":[],"stream":true}';
         }
@@ -124,5 +129,24 @@ final class OpenAiCompatProvider
         file_put_contents($path, $contents);
         $this->tmpFiles[$role] = $path;
         return $path;
+    }
+
+    /**
+     * 剥掉消息里的本项目私有键（`meta`），保证 wire 上只有协议字段。
+     * meta 是给渲染/复制用的（工具摘要、summary 标记），发出去既浪费带宽也可能被端点拒收。
+     * @param array<int,array<string,mixed>> $messages
+     * @return array<int,array<string,mixed>>
+     */
+    public static function stripMeta(array $messages): array
+    {
+        $out = [];
+        foreach ($messages as $m) {
+            if (!is_array($m)) {
+                continue;
+            }
+            unset($m['meta']);
+            $out[] = $m;
+        }
+        return $out;
     }
 }

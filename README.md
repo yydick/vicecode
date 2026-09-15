@@ -154,9 +154,22 @@ By default the interactive shell dies when you quit ViceCode (the PTY is an OS p
 - Only the **startup** working directory is restored; a `cd` performed inside the shell is *not* restored.
 - The PTY process itself cannot be serialized; what is restored is a brand-new shell with the snapshot text injected above its fresh prompt.
 
+## AI assistant (V2)
+
+The right-hand AI panel is wired into the workspace: OpenAI- and DeepSeek-compatible endpoints (config in `config/providers.php`, keys via environment variables), streamed through a `curl` subprocess so the UI never blocks.
+
+- **Code context**: mention files with `@path/in/project` in the input — each reference is expanded into a syntax-highlighted fenced block before sending (paths are validated against the project root: `../`, absolute paths, root-escaping symlinks and binaries are rejected; per-file cap `ai.attachMaxBytes`, default 64 KB, truncated with a note). The menu *AI → Attach editor selection / Attach current file* injects context too.
+- **Read-only tools (Agent loop)**: the model may call `list_files` / `read_file` inside the project. Calls run locally and the loop continues until the model answers or `ai.maxSteps` (default 8) is reached. In-stream you see the call line (`→ name(args)`) and a one-line result summary (`⚙ name(path) ✓`) — file contents are never dumped into the chat. Tool results are summarized on click-copy. Set `ai.toolAutoRun: false` to approve each call with `y` / `n` (`Esc` cancels).
+- **Context compaction**: when the estimated token count exceeds `ai.compactThreshold` (default 24000), the oldest history is summarized automatically (keeping the most recent `ai.compactKeepRecent`, default 6 messages) before the real request; compaction never splits a tool_call/result pair and falls back to "no compaction" on failure. Trigger manually via *AI → Compact conversation now*.
+- **Conversation persistence** (on by default): every finished exchange is saved to `~/.vicecode_ai` (`0600`) and restored on the next launch; `Ctrl+L` clears the chat and the archive together. Disable with `ai.persist: false`.
+- **Markdown rendering**: finished messages render headings, lists, quotes, inline code/links/bold/italic and fenced code blocks (highlighted via scrivo). Streaming messages render as plain text until finished. Single line breaks are preserved.
+- **Quick actions**: menu *AI → Explain this code / Add comments / Suggest refactoring / Write unit tests* (also in the `F1` command palette). In the editor, `Ctrl+E` sends the current file (or your selection) to the AI for an explanation in a fresh conversation.
+
+All keys and behaviors are documented in the in-app `?` help page.
+
 ## Configuration & Language
 
-- Config is persisted to `~/.vicerc` (JSON: layout / theme / language, and `persistSession` if you set it) and auto-saved on exit. On save, ViceCode **merges** with the existing file so hand-edited keys (like `persistSession`) are preserved.
+- Config is persisted to `~/.vicerc` (JSON: layout / theme / language, `persistSession`, and the `ai` section — `persist` / `toolAutoRun` / `maxSteps` / `compactThreshold` / `compactKeepRecent` / `attachMaxBytes`) and auto-saved on exit. On save, ViceCode **merges** with the existing file so hand-edited keys (like `persistSession`) are preserved.
 - Override the config path with the `VICECODE_CONFIG` env var (used for test isolation to avoid polluting the home directory).
 - UI language is switched via `APP_LOCALE`, default `zh_CN`, `en` also available; missing keys fall back to English.
 

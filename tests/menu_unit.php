@@ -45,24 +45,26 @@ foreach ($ext->widgetRenderers() as $r) {
 }
 $rr = new AggregateWidgetRenderer($rs);
 
-// ─════════ 1) 菜单定义：4 个菜单、每项都有真实 action ═════════
+// ─════════ 1) 菜单定义：5 个菜单（V2 起 AI 组在帮助之后）、每项都有真实 action ═════════
 echo "\n== 菜单定义 ==\n";
 $app = new App();
 $defs = $app->menuBar->definitions();
-check(count($defs) === 4, '共 4 个菜单（文件/视图/终端/帮助）');
+check(count($defs) === 5, '共 5 个菜单（文件/视图/终端/帮助/AI）');
 $labels = array_map(static fn($m) => $m['label'], $defs);
 check(in_array('文件', $labels, true) && in_array('帮助', $labels, true), '含文件与帮助菜单');
 $actionCount = 0;
 $known = ['file.open','file.save','file.close','file.quit','view.theme','view.focus.editor',
     'view.focus.terminal','view.focus.explorer','view.focus.ai','view.lang','term.cancel',
-    'term.clear','help.shortcuts','help.about','plugins.open','palette.open','panel.host.open'];
+    'term.clear','help.shortcuts','help.about','plugins.open','palette.open','panel.host.open',
+    'ai.explain','ai.comment','ai.refactor','ai.unittest','ai.attach_selection','ai.attach_file',
+    'ai.tool_mode','ai.compact_now','ai.clear'];
 foreach ($defs as $m) {
     foreach ($m['items'] as $it) {
         $actionCount++;
         check(in_array($it['action'], $known, true), "菜单项 {$it['label']} 的 action({$it['action']}) 是真实命令");
     }
 }
-check($actionCount === 17, "共 17 个菜单项（含命令面板与插件面板浮层，实际 " . $actionCount . "）");
+check($actionCount === 26, "共 26 个菜单项（含 AI 组 9 项与命令面板/插件面板浮层，实际 " . $actionCount . "）");
 
 // ─════════ 2) 菜单栏在常规视口可见、矮视口不画 ═════════
 echo "\n== 菜单栏可见性 ==\n";
