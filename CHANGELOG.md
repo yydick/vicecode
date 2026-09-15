@@ -47,12 +47,45 @@
 - **每开一次交互终端，`/tmp` 里就永久多一个 `vicetui_rc_*`**：bash 的 `--rcfile` 集成脚本用临时文件承载，而 `TerminalPanel::pollPty()` 在 shell 退出（Ctrl+D / `exit`）时直接 `$this->pty = null` 丢掉实例、不调 `shutdown()`；`PtyProcess::shutdown()` 开头的「进程句柄已回收就 `return`」也**提前跳过**了文件清理。两条路径叠加 → 一次 shell 会话漏一个文件，应用退出也不会回收（本机实测攒了 33 个）。新增 `TerminalPanel::dropPty()`（先 `shutdown()` 再置空）并在四处丢弃点统一调用；`PtyProcess` 把 rc 文件清理抽成 `cleanupRcFile()`，早退分支也调用。（`BUGFIXES` D6）
 - **交互 shell 还活着时异常退出 → 留下活着的孤儿 shell**：子进程回收原先只挂在 `Lifecycle::quit()` 的关闭闭包上，而只有正常退出会经过它；未捕获异常等路径走到 `bin/vicecode.php` 的 `start()` finally，那里只做了 `saveConfig + restoreTerminal`。实测每次异常退出漏 **1 个活着的 bash**（被 reparent 到 init、一直占着 pty，且**忽略 SIGTERM**、只有 SIGKILL 能收）外加一个 rc 文件。新增 `App::shutdownResources()`（幂等）并在 finally 里兜底，与 Lifecycle 路径重复调用无害。（`BUGFIXES` D7）
 
+### 新增（用户级模型配置：免改仓库接入任意端点）
+
+- **`~/.vicecode.providers.php`**（env `VICECODE_PROVIDERS_CONFIG` 可覆盖）：用户级 provider 配置，格式与内置 `config/providers.php` **完全一致**（`label` / `key_env` / `url_env` / `base_url` / `models` / `capabilities`），可直接从内置文件拷一段改。
+- **合并语义**：内置先读，用户文件**按 id 逐字段覆盖**，新 id **追加在后面**（所以默认 provider 恒为内置第一条）；**`models` 是整表覆盖**，不与内置取并集——语义是「看到什么就是什么」。于是「只想把 `openai` 指向自建网关」只需写一个 id + 要改的字段，内置的 `deepseek` 自动保留。
+- **应用内编辑 + 保存即热重载**（与插件配置同一条纪律）：菜单「AI → 编辑模型配置…」（命令面板也可搜到）在**内置编辑器**里打开该文件；文件不存在时先落一份**带注释的模板**（`return [];`，行为与没有该文件一致——**不写当前生效配置**，否则会冻结内置版本、把以后的内置更新盖掉）。`Ctrl+S` 与菜单保存走同一条路径（EditorPanel 保存钩子）→ 重读配置并重建注册表，**无需重启**；重载会**保住当前 provider/model**（仍存在就不动，被删掉才退回默认）。
+- **出错不致命**：用户文件语法错/返回非数组时保留上一份可用配置，并在状态栏明确提示「模型配置未生效（syntax），已沿用原配置」——不写反馈的话，用户在自己改的 PHP 里存错了会以为"改了没生效"。实现说明：实测 PHP 8.3 下 `require` 遇到解析错会抛**可捕获的 `ParseError`**（且不往 stdout/stderr 喷东西），因此不需要额外的语法预检层。
+- 新增文案 `ai.providers_label` / `ai.providers_reloaded` / `ai.providers_bad`（中英两包同步）。
+
+### 新增（模型策略：多档位互相切换）
+
+- **`@strategies` 段**（写在同一份用户级模型配置里）：把「这次要干什么」映射到一个具体模型，例如 `plan` → `deepseek-reasoner`、`grind` → `deepseek-chat`。
+- **切换入口**：AI 面板 `Ctrl+R` 循环切换；菜单/命令面板的 AI 组里**每条策略一项**（直接选，不用循环）。帮助页登记 `Ctrl+R`（`KeyBindings` 漂移检测覆盖）。
+- **可见性**：状态栏新增策略段（`策略=<展示名>`，优先级高于 AI 段——窄屏上宁可先丢 provider/model 也要保住"我在哪一档"）；切换时状态栏给出「已切到策略 X → provider/model」回执。
+- **记住选择**：当前策略随对话存档落盘，重启后**仅在仍指向同一 provider+model 时**才恢复名字（策略被删/改过、或用户手选过别的模型，就不显示那个名字）。
+- **校验：四类拒绝，绝不静默降级**（这是本功能最要紧的一条）——① 策略不存在；② 目标 provider 未配置；③ 目标 model 未声明（⚠️ `spec()` 对未登记模型会**静默退回该 provider 的默认模型**，所以必须自己比对才算校验过）；④ 策略声明的 `requires` 能力目标模型不具备（典型：`requires: ['tools']` 撞上没声明 `tools` 的便宜模型 —— Agent 工具会**静默失效**、不报错）。四类都给出具体原因的提示。
+- **不说谎**：手动 `Ctrl+P` 切 provider / `Ctrl+N` 切模型会自动清空当前策略名——状态栏挂着「策略=优质档」而实际跑着便宜模型，比不显示更糟。
+- `@` 前缀的键为保留段，**不会**被当成 provider id（`ids()` 里不会混进 `@strategies`）。新增文案 `ai.strategy_*` / `status.strategy` / `help.a_strategy`（中英两包同步）。
+- `examples/sse_server.php` 新增 `MOCK_ECHO_MODEL=1`（把请求体里的 model 回显成 `[model=xxx]`），用于端到端断言"换档真的换了模型"。
+
+### 新增（按任务类型自动选档）
+
+- **策略可声明 `kinds`**（任务类型），请求带上这些类型时**自动**用该档。于是「任务类型 → 用哪一档」写在策略自己身上，不必另开映射表。例：`'grind' => [..., 'kinds' => ['comment', 'explain']]`、`'plan' => [..., 'kinds' => ['plan']]`。
+- **任务类型只有两个来源，都不靠猜**（猜错会静默降级，代价不对称）：
+  1. **快捷动作**（explain / comment / refactor / unittest）——`App::aiQuickAction($kind)` 本来就有 kind，本轮把它一路透传到 `ChatModel`；
+  2. **输入框指令前缀**，如 `/plan 帮我把这块重构一下`——前缀**不发给模型**；写了**未知类型会拒绝发送**并列出已知类型（在输入框打斜杠显然是想下指令，把它当普通消息发出去还带着斜杠是更差的结果）；想发字面量斜杠写两个（`//plan` → `/plan`）。
+- **人工优先**：手动选档（`Ctrl+R`、菜单里的某条策略、手切 provider/model）会**钉住**，自动选档暂停；`Ctrl+R` 的循环里加了「**自动**」这一档（`@strategies` 里的策略名 `auto` 因此是保留名），状态栏与菜单都能切回。手动钉住时收到带类型的请求会**明说**「自动选档未生效」——不许静默失效。
+- **状态栏说清"现在听谁的"**：`策略=自动`（配了策略即开启）／`策略=计划·自动`（自动路由选中的档）／`策略=计划`（人工钉住）。窄屏上该段优先级仍高于 AI 段。
+- **可见性**：菜单/命令面板的 AI 组里多出「自动选档（按任务类型）」一项（在每条策略之前）。新增文案 `ai.strategy_auto_item` / `ai.strategy_auto_on` / `ai.strategy_applied_pinned` / `ai.kind_unknown` / `ai.kind_ignored_pinned` / `status.strategy_auto`（中英两包同步）。
+- `examples/sse_server.php` 新增 `MOCK_LOG_FILE`（把每次请求的 model 追加成一行）——用于断言**调用序列**（"哪条消息被路由到了哪个模型"），比在 pty 画面上找回显可靠得多。
+
 ### 依赖
 
 - 新增 `league/commonmark ^2.10`（Markdown 解析，只走 AST 遍历，不用其 HTML 渲染器）。
 
 ### 测试
 
+- 新增 `tests/provider_user_unit.php`（用户级配置：合并四种情形 / 文件缺失 / 语法错 / 返回非数组 / 脏条目跳过 / env 覆盖路径 / `openProvidersConfig()` 生成的模板可用 / 菜单与命令面板入口 / 热重载保住 provider 与 model / 坏配置的状态栏提示）与 `tests/pty_providers.php`（真实 pty：启动即加载用户配置并显示在状态栏；在该文件上按 `Ctrl+S` 出现热重载回执；干净退出仍还原终端）。
+- 新增 `tests/lib/pty_screen.php`：**多字节感知**的屏幕重建助手（重放 CSI 定位/擦除得到最终帧，行内归一化后匹配）。差分渲染只重发变化格、同一行会被拆成多次「定位+写入」，直接对累积流做子串匹配会踩坑——本轮实测状态栏 `Model config reloaded` 在流里成了 `modelconfig` + `eloaded`。旧 pty 测试里那几份**逐字节**内联重建器只对 ASCII 成立（中文断言会静默失效），未迁移，但已在文件头注明「新测试用这份」。
+- 用户级配置纳入测试隔离：`vc_isolate_config()` 现在同时覆盖 `VICECODE_CONFIG` / `VICECODE_PLUGINS_CONFIG` / `VICECODE_PROVIDERS_CONFIG`（否则 `ProviderRegistry` 会读开发机真实的 `~/.vicecode.providers.php`）；7 个显式设 env、未走 helper 的老测试逐一手工补上。
 - 新增 headless：`tests/ai_tools_unit.php`（路径安全 / Agent loop 端到端 / maxSteps / approve-deny / 流内渲染）、`tests/ai_md_unit.php`（Markdown 元素 / spanWrapDisp 拼接不变量 / 缓存命中）、`tests/ai_store_unit.php`（存取往返 / 0600 / Ctrl+L 清档 / persist=false）、`tests/ai_attach_unit.php`（@展开与拒绝 / 选区与当前文件附加 / 快捷动作与菜单）、`tests/ai_compact_unit.php`（自动触发 / 失败降级 / tool 对不拆散 / 手动压缩）。
 - 新增 pty：`tests/pty_ai_v2.php`（三轮真实会话：@展开与两轮工具 / 重启恢复 / y 确认放行）。
 - `tests/ai_unit.php` 的 SseParser 断言升级为结构化事件形状（V2 唯一破坏性 API 变更）；`tests/plugin_v11_unit.php` 菜单组索引断言随 AI 组插入顺延。
@@ -62,9 +95,13 @@
 - 新增 `tests/provider_caps_unit.php`（headless：能力解析全形状含旧写法兼容 / 端到端断言「只有声明 tools 的模型请求才带 tools」/ 状态栏标记与面板能力行的正反对照）与 `tests/pty_provider_caps.php`（真实 pty：临时替换 `config/providers.php` 后断言状态栏「无工具」标记出现，换回原配置后必须消失）。两者都做过强制失败注入验证。`examples/sse_server.php` 新增 `MOCK_ECHO_TOOLS=1`（回复 `[tools=1|0]` 回报请求体是否携带 tools）。
 - **测试隔离修复（两轮，共 51 个测试 + 1 个新 helper）**：
   1. **配置目录不再落在 `/tmp` 根**：`tempnam()` / `sys_get_temp_dir().'/x.json'` 当 `VICECODE_CONFIG` 时，存档路径 `dirname(VICECODE_CONFIG)/.vicecode_ai` 会退化成 `/tmp/.vicecode_ai`——全体测试共用一份对话存档，`aiPersist` 默认开启，`App` 构造末尾的 `ChatModel::restore()` 会把**上一个测试的对话**恢复进来（「空态不是空的」、断言行号整体平移，随跑批顺序偶发）。**25 个测试**改用 `vc_isolate_config('tag')`。
-  2. **配置不再依赖开发机家目录**：25 个建了 `App` 却完全没设 `VICECODE_CONFIG` 的测试会读真实 `~/.vicerc`（布局/主题/语言）与 `~/.vicecode.plugins.json`。实测把 `~/.vicerc` 换成非默认布局 + 其它主题语言、`~/.vicecode_ai` 放一份对话后，**6 个测试挂**（`m6_unit` 主题环、`menu_dropdown` 菜单标签、`pty_git` GIT tab、`ai_hscroll` 折行宽、`sidebar_hscroll` 折叠命中列、`m1_edge` 翻页边界）——即"只在我这台机器上绿"。全部改为 `vc_isolate_config()`（同时隔离 `VICECODE_CONFIG` 与 `VICECODE_PLUGINS_CONFIG`）。
+  2. **配置不再依赖开发机家目录**：25 个建了 `App` 却完全没设 `VICECODE_CONFIG` 的测试会读真实 `~/.vicerc`（布局/主题/语言）与 `~/.vicecode.plugins.json`。实测把 `~/.vicerc` 换成非默认布局 + 其它主题语言、`~/.vicecode_ai` 放一份对话后，**6 个测试挂**（`m6_unit` 主题环、`menu_dropdown` 菜单标签、`pty_git` GIT tab、`ai_hscroll` 折行宽、`sidebar_hscroll` 折叠命中列、`m1_edge` 翻页边界）——即"只在我这台机器上绿"。全部改为 `vc_isolate_config()`（同时隔离 `VICECODE_CONFIG` / `VICECODE_PLUGINS_CONFIG` / `VICECODE_PROVIDERS_CONFIG` 三份用户级配置）。
   3. 新增 `tests/lib/isolation.php` 统一承载：`vc_isolate_config()`（独占目录 + 自动清理，pty 用例把返回路径塞进子进程 env，父子同源）、`vc_tmp_file()` / `vc_tmp_dir()`（替代裸 `tempnam()`，退出时自动删）。**41 处 `tempnam` 全部改走 helper**，`/tmp` 不再堆垃圾（含 `command_palette_unit` 与 `pty_ai_v2` 两处**从不清理**的目录——后者原来只 `rmdir` 空 `src/`，目录非空时静默失败）。
   4. 新增断言：`pty_interactive` / `pty_session` / `pty_alt_screen` 断言"运行前后 `/tmp/vicetui_rc_*` 数量不增加"（`BUGFIXES` D6 的防回归）；`pty_crash` 新增**场景 B**（交互 shell 活着时崩溃）断言 rc 文件与 `bash --rcfile` 孤儿进程都不增加（D7 的防回归），并补了"shell 真的起来了"的正向锚点。**注入验证**：把 `dropPty()` 改回 `= null` 后前三个用例全部 FAIL（0→2 / 0→2 / 0→5）；摘掉 `bin` finally 里的 `shutdownResources()` 后场景 B 的两条断言都 FAIL（rc 0→1、孤儿 +1）。恢复后全绿。完整根因与取证见 `BUGFIXES` T2 / D6 / D7。
+- **强制失败注入**（用户级模型配置这两条，均实测能让对应断言 FAIL）：`mergeUser()` 直接 `return $base`（合并失效 → 单测 8 条红）；摘掉 EditorPanel 的 `providersPath()` 分支（pty 精确红在「热重载回执」那条，其余断言仍绿）。
+- **自动选档的测试**：`tests/kind_route_unit.php`（kinds 解析 / 保留名 `auto` 被丢 / knownKinds / 快捷动作路由且不钉住 / 钉住后不抢 / 切回自动 / **前缀不发给模型** / 未知类型拒绝并列出已知 / `//` 转义 / 状态栏三种形态）与 `tests/pty_strategy.php` 扩展（钉住时 `/plan` 被忽略要明说；**用 mock 的服务端日志断言调用序列** `smart → smart → fast → fast`）。**强制失败注入**：`routeByKind` 无视 `pinned`（→ 单测两条红 + pty 序列变 `smart → fast → fast → fast`）/ kind 匹配恒假（→ 单测四条红 + pty 序列四条全 `smart`）/ 前缀不剥离（→ 单测两条红）。
+- **模型策略的测试**：`tests/strategy_unit.php`（解析 / `@` 保留段不进 provider / 四类拒绝 / 手动切档清空策略名 / 循环 / 持久化与一致性恢复 / 菜单+命令面板入口）与 `tests/pty_strategy.php`（真实 pty：`Ctrl+R` 切换 → 状态栏出现档位；**发消息后 mock 回显的请求 model 确实换了** `zz-model-fast` → `zz-model-smart`）。**强制失败注入**（均实测能让对应断言 FAIL）：摘掉「模型未声明」校验（→ 单测两条红，且消息暴露出静默回退到别的模型）/ 菜单不发策略条目（→ 菜单与命令面板两条红）/ `applyStrategy` 忽略目标 model（→ pty 精确红在「换档真的换了模型」那条）。
+- **修 `tests/pty_search.php` 的三处断言缺陷**（`BUGFIXES` T3）：①「键入进搜索框」3s 窗口在负载下假阴性（复现于全量批；同一次里搜索其实是成功的）→ 改 8s + 断言最终帧；②「不显示无匹配结果」查英文串，而该用例界面是默认 `zh_CN` → **恒真的僵尸断言**（注入"恒定无匹配结果"后照样 PASS）；③「结果出现」查 `zzuniquemarker`，可输入框里就有这个词 → **假阳性**（注入"结果列表不渲染"后照样 PASS）。三条都改为对**重建后的最终帧**断言，命中锚点换成只可能来自结果列表的命中行内容；切换 tab 后加 `waitQuiet()` 再键入。三组注入（中间帧污染 / 最终状态错 / 列表不渲染）分别验证了"必须用最终帧"与两条新断言各自的牙齿。
 
 ---
 

@@ -91,6 +91,7 @@ $env = array_merge(getenv(), [
     'LINES'             => '50',
     'APP_LOCALE'        => 'zh_CN',
     'VICECODE_CONFIG'   => $tmpDir . '/.vicerc',
+    'VICECODE_PROVIDERS_CONFIG' => $tmpDir . '/.vicecode.providers.php',   // 别读开发机的模型配置
     'OPENAI_BASE_URL'   => 'http://127.0.0.1:' . $port . '/v1',
     'OPENAI_API_KEY'    => 'test-key-local-mock',
     'DEEPSEEK_BASE_URL' => 'http://127.0.0.1:' . $port . '/v1',

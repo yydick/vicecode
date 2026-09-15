@@ -59,14 +59,14 @@ $known = ['file.open','file.save','file.close','file.quit','view.theme','view.fo
     'view.focus.terminal','view.focus.explorer','view.focus.ai','view.lang','term.cancel',
     'term.clear','help.shortcuts','help.about','plugins.open','palette.open','panel.host.open',
     'ai.explain','ai.comment','ai.refactor','ai.unittest','ai.attach_selection','ai.attach_file',
-    'ai.tool_mode','ai.compact_now','ai.clear'];
+    'ai.tool_mode','ai.compact_now','ai.providers_config','ai.clear'];
 foreach ($defs as $m) {
     foreach ($m['items'] as $it) {
         $actionCount++;
         check(in_array($it['action'], $known, true), "菜单项 {$it['label']} 的 action({$it['action']}) 是真实命令");
     }
 }
-check($actionCount === 26, "共 26 个菜单项（含 AI 组 9 项与命令面板/插件面板浮层，实际 " . $actionCount . "）");
+check($actionCount === 27, "共 27 个菜单项（含 AI 组 10 项与命令面板/插件面板浮层，实际 " . $actionCount . "）");
 
 // ─════════ 2) 菜单栏在常规视口可见、矮视口不画 ═════════
 echo "\n== 菜单栏可见性 ==\n";

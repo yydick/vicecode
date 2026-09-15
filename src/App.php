@@ -404,6 +404,38 @@ class App
     }
 
     /**
+     * 在 ViceCode 自己的编辑器里打开**用户级模型（provider）配置文件**
+     * （`~/.vicecode.providers.php`，与内置 `config/providers.php` 分离）。
+     *
+     * 文件不存在时先写一份**带注释的空白模板**（`return [];`，行为与没有该文件一致），
+     * 避免用户面对一个空文件不知从何写起；里面写的是教怎么覆盖/追加，而不是把当前生效配置
+     * 抄进去——那会变成"冻结当前版本"、把以后的内置更新盖掉。
+     */
+    public function openProvidersConfig(): void
+    {
+        $path = ConfigStore::providersPath();
+        if (!is_file($path)) {
+            ConfigStore::saveProviders(ConfigStore::providersTemplate());
+        }
+        $this->editor->openFile($path);
+    }
+
+    /**
+     * 重载 provider 配置（用户文件改完保存即生效，无需重启）。
+     *
+     * 与插件那边同一条纪律：`Ctrl+S` 与菜单保存都落在 EditorPanel 的保存钩子里，
+     * 那里判「存的是不是这份配置文件」→ 调本方法，所以两条保存路径行为一致。
+     */
+    public function reloadProviders(): void
+    {
+        $this->chat->reloadProviders();
+        $err = $this->chat->providersUserError();
+        $this->setMessage($err === null
+            ? $this->t('ai.providers_reloaded')
+            : $this->t('ai.providers_bad', ['kind' => $err]));
+    }
+
+    /**
      * 重新加载插件配置（VSCode「重载窗口」的平替，但无需退出进程）。
      * 重读专用插件配置文件（与 ~/.vicerc 分离），按「默认 ∩ 用户覆盖」重新注入每个插件，
      * 并重算启用集与注册表——所以用户直接在配置文件里改 `"enabled": false` 再 Ctrl+S，
@@ -1204,6 +1236,16 @@ class App
     /** 执行菜单项 action（见 MenuBarPanel::definitions 的 action 字段）。 */
     public function menuAction(string $id): void
     {
+        // 模型策略的动作带后缀（`ai.strategy:<name>`，策略是用户配置出来的、数量不定），
+        // 所以用前缀分派，不能写成 case。
+        if (str_starts_with($id, 'ai.strategy:')) {
+            $this->chat->applyStrategy(substr($id, strlen('ai.strategy:')));
+            return;
+        }
+        if ($id === 'ai.strategy_auto') {
+            $this->chat->useAutoStrategy();
+            return;
+        }
         switch ($id) {
             case 'file.open':
                 $this->focus('sidebar');
@@ -1269,7 +1311,9 @@ class App
             case 'ai.compact_now':
                 $this->chat->compactNow();
                 break;
-            case 'ai.attach_selection':
+            case 'ai.providers_config':
+                $this->openProvidersConfig();
+                break;            case 'ai.attach_selection':
                 $this->aiAttachSelection();
                 break;
             case 'ai.attach_file':
@@ -1961,7 +2005,8 @@ class App
         }
         $this->chat->clear(); // 快捷动作起全新对话：上一轮问答跟本次代码无关，混着反而误导模型
         $this->ai->resetForPrompt();
-        $this->ai->sendPrompt($prompt);
+        // 带上 kind：策略可以按任务类型自动选档（如 unittest → 优质档）
+        $this->ai->sendPrompt($prompt, $kind);
         $this->focusIndex = array_search('ai_stream', self::PANELS, true);
     }
 

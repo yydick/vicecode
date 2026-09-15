@@ -18,6 +18,7 @@ declare(strict_types=1);
 chdir(__DIR__ . '/..');
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/pty_screen.php';
 
 function normalize(string $raw): string
 {
@@ -72,7 +73,17 @@ if ($proc === false) {
 stream_set_blocking($pipes[0], false);
 stream_set_blocking($pipes[1], false);
 usleep(400000);
-$readPty($pipes[1], 16384); // 吃掉首帧
+// 全程累积**原始**字节：差分流只重发变化格，不能当"屏上现在有什么"用；
+// 需要判断可见性的断言一律用 vc_rebuild_screen() 重放成最终帧再匹配。
+$rawAll = '';
+$readRaw = static function (int $len = 65536) use ($pipes, $readPty, &$rawAll) {
+    $c = $readPty($pipes[1], $len);
+    if (is_string($c) && $c !== '') {
+        $rawAll .= $c;
+    }
+    return $c;
+};
+$readRaw(16384); // 吃掉首帧（同时入累积流）
 
 // ── 帮助页 ────────────────────────────────────────
 echo "== 帮助页（? 唤出）==\n";
@@ -80,7 +91,7 @@ fwrite($pipes[0], '?');
 usleep(500000);
 $help = '';
 for ($i = 0; $i < 4; $i++) {
-    $help .= normalize($readPty($pipes[1], 65536));
+    $help .= normalize((string) $readRaw());
     usleep(150000);
 }
 check(str_contains($help, '快捷键'), '真实终端里 ? 唤出帮助页（标题「快捷键」可见）');
@@ -99,11 +110,15 @@ fwrite($pipes[0], "\x1b[F"); // End
 usleep(400000);
 $scrolled = '';
 for ($i = 0; $i < 4; $i++) {
-    $scrolled .= normalize($readPty($pipes[1], 65536));
+    $scrolled .= normalize((string) $readRaw());
     usleep(150000);
 }
-check(str_contains($scrolled, 'ctrlp') && str_contains($scrolled, 'ctrln'),
-    '滚到底后 AI 分组的 Ctrl+P / Ctrl+N 进入视口（滚动真的露出更多内容）');
+// 用**重建后的最终帧**判断"屏上有什么"：差分流里 `ctrlp` 可能不出现（那些格没被重发），
+// 曾因此假失败（本轮给帮助页加了 Ctrl+R 一行就暴露了这条脆弱性）。
+$frameScrolled = vc_rebuild_screen($rawAll, 120, 40);
+check(str_contains($frameScrolled, 'ctrlp') && str_contains($frameScrolled, 'ctrln'),
+    '滚到底后 AI 分组的 Ctrl+P / Ctrl+N 进入视口（按重建帧判定）');
+check(str_contains($frameScrolled, 'ctrlr'), '滚到底也能看到新增的 Ctrl+R（切换模型策略）');
 check(str_contains($scrolled, 'ctrll') || str_contains($scrolled, '清空对话'),
     '滚到底能看到 AI 组的 Ctrl+L 条目');
 
@@ -112,7 +127,7 @@ fwrite($pipes[0], "\x1b");
 usleep(500000);
 $closed = '';
 for ($i = 0; $i < 4; $i++) {
-    $closed .= normalize($readPty($pipes[1], 65536));
+    $closed .= normalize((string) $readRaw());
     usleep(150000);
 }
 check(!str_contains($closed, 'ctrlt') || !str_contains($closed, '切换配色主题'),
@@ -126,7 +141,7 @@ fwrite($pipes[0], "\x14"); // Ctrl+T = 0x14
 usleep(600000);
 $themed = '';
 for ($i = 0; $i < 4; $i++) {
-    $themed .= normalize($readPty($pipes[1], 65536));
+    $themed .= normalize((string) $readRaw());
     usleep(150000);
 }
 check(str_contains($themed, '午夜蓝'), 'Ctrl+T 切到午夜蓝（状态栏显示主题名）');
@@ -136,7 +151,7 @@ fwrite($pipes[0], "\x14"); // 再切一次，回到深色
 usleep(500000);
 $back = '';
 for ($i = 0; $i < 4; $i++) {
-    $back .= normalize($readPty($pipes[1], 65536));
+    $back .= normalize((string) $readRaw());
     usleep(150000);
 }
 check(str_contains($back, '深色'), '再按 Ctrl+T 回到深色（环形）');
@@ -153,7 +168,7 @@ while ($status['running'] && microtime(true) < $deadline) {
 }
 $code = $status['running'] ? -1 : (int) $status['exitcode'];
 // 退出前把剩下的输出读掉（含还原序列）
-$tail = (string) $readPty($pipes[1], 65536);
+$tail = (string) $readRaw();
 proc_close($proc);
 check($code === 0, sprintf('干净退出 exit=0（实际 %d）', $code));
 check(str_contains($tail, "\x1b[?1049l"), '退出时发出还原序列 ESC[?1049l');

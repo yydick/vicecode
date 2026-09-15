@@ -543,6 +543,11 @@ final class EditorPanel
             $this->shell->setMessage($this->shell->t('plugins.reloaded'));
             return;
         }
+        // 同上：保存的是用户级模型（provider）配置文件 → 重读并重建注册表（提示由 reloadProviders 给）
+        if ($ok && $path === ConfigStore::providersPath()) {
+            $this->shell->reloadProviders();
+            return;
+        }
         $this->shell->setMessage($ok
             ? $this->shell->t('editor.saved')
             : $this->shell->t('editor.save_failed', ['msg' => (error_get_last()['message'] ?? 'unknown')]));

@@ -90,6 +90,14 @@ if ($uri === '/v1/chat/completions' && $method === 'POST') {
     header('X-Accel-Buffering: no');
     disableBuffering();
 
+    // MOCK_LOG_FILE=/path：把每次请求用的 model 追加成一行。
+    // 用于断言**请求序列**（"哪条消息被路由到了哪个模型"）——比在 pty 画面上找回显硬得多：
+    // 消息流会滚动、差分渲染只重发变化格，而服务端日志是纯粹的调用记录。
+    $logFile = getenv('MOCK_LOG_FILE');
+    if (is_string($logFile) && $logFile !== '') {
+        @file_put_contents($logFile, (is_string($req['model'] ?? null) ? $req['model'] : '(none)') . "\n", FILE_APPEND);
+    }
+
     // ── V2 场景开关（query 加不上——客户端 URL 是 base_url 拼的，故全走 env / 请求体判断）──
     $wantSummary = getenv('MOCK_SUMMARY') === '1';
 
@@ -99,6 +107,17 @@ if ($uri === '/v1/chat/completions' && $method === 'POST') {
     if (getenv('MOCK_ECHO_TOOLS') === '1') {
         $hasTools = isset($req['tools']) && is_array($req['tools']) && $req['tools'] !== [];
         sseFrame(['delta' => ['content' => '[tools=' . ($hasTools ? '1' : '0') . ']'], 'index' => 0]);
+        usleep($delayMs * 1000);
+        sseFrame(['delta' => [], 'index' => 0, 'finish_reason' => 'stop']);
+        echo "data: [DONE]\n\n";
+        flush();
+        return;
+    }
+    // MOCK_ECHO_MODEL=1：只回一行 `[model=<请求体里的 model>]`。用于端到端断言
+    // 「模型策略切换后，请求真的打到了那个模型」——只看状态栏不算数，得看发出去的请求体。
+    if (getenv('MOCK_ECHO_MODEL') === '1') {
+        $m = is_string($req['model'] ?? null) ? $req['model'] : '(none)';
+        sseFrame(['delta' => ['content' => '[model=' . $m . ']'], 'index' => 0]);
         usleep($delayMs * 1000);
         sseFrame(['delta' => [], 'index' => 0, 'finish_reason' => 'stop']);
         echo "data: [DONE]\n\n";

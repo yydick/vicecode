@@ -28,6 +28,11 @@ use App\Terminal\CommandRunner;
  */
 final class ChatModel
 {
+    /**
+     * 快捷动作的 kind（与 `App::aiQuickAction()` 的四个动作一致）：它们天然携带任务类型，
+     * 因此是自动选档的两个来源之一（另一个是输入框里的 `/前缀`）。
+     */
+    public const QUICK_ACTION_KINDS = ['explain', 'comment', 'refactor', 'unittest'];
     /** @var array<int,array{role:string,content:string}> 完整对话历史（多轮上下文就是这个） */
     private array $messages = [];
 
@@ -72,6 +77,23 @@ final class ChatModel
 
     /** 工具调用步数上限（vicerc ai.maxSteps，默认 8） */
     private int $maxSteps;
+
+    /**
+     * 当前生效的模型策略名（null = 没在用策略）。
+     *
+     * ⚠️ 手动切 provider/model 会把它清空：状态栏上挂着"策略=优质档"而实际跑的是用户手选的
+     * 便宜模型，比不显示更糟 —— 可见性的前提是**不能说谎**。
+     */
+    private ?string $strategyName = null;
+
+    /**
+     * 是否被**人工钉住**（true = 按任务类型的自动选档暂停）。
+     *
+     * 语义（"人工优先"）：任何人工选档动作——`Ctrl+R`、菜单里的策略项、手动切 provider/model——
+     * 都算钉住；只有**显式**切回「自动」才恢复自动路由。这样用户永远知道现在听谁的，
+     * 不会出现"我明明选了优质档，发个 /plan 它又变回去了"。
+     */
+    private bool $pinned = false;
 
     /** 只读工具实现（list_files/read_file），root=项目根 */
     private AiTools $tools;
@@ -163,6 +185,8 @@ final class ChatModel
         $this->pendingApproval = null; // 换 provider 连带取消未裁决的确认态（上一家的调用不带到这一家）
         $this->providerId = $id;
         $this->model = $model; // 换 provider 时清掉 model，否则会拿上一家的模型名去打这一家
+        $this->strategyName = null; // 手选了 provider → 不再属于任何策略（状态栏不许说谎）
+        $this->pinned = true;       // 人工选档 = 钉住：自动选档暂停，别跟用户抢方向盘
         $spec = $this->spec();
         if ($spec !== null) {
             $this->shell->setMessage($this->shell->t('ai.switched', [
@@ -170,6 +194,217 @@ final class ChatModel
                 'model'    => $spec->model,
             ]));
         }
+    }
+
+    /**
+     * 重载 provider 配置（内置 `config/providers.php` + 用户级 `~/.vicecode.providers.php`）。
+     *
+     * 用户级配置支持**应用内编辑 + 保存即生效**（见 EditorPanel 的保存钩子），所以这条路径
+     * 会在运行中被调用。**保住当前选择**：当前 provider 在新配置里仍存在就留着（用户可能只是
+     * 改了 base_url）；被删掉了才退回默认（`providerId = null` → `spec()` 取 `defaultId()`）。
+     * 当前模型在新配置里没有时不必特判——`spec()` 本就会退回该 provider 的默认模型。
+     *
+     * @param ProviderRegistry|null $registry 注入用（单测）；null = 按当前文件重新读一份
+     */
+    public function reloadProviders(?ProviderRegistry $registry = null): void
+    {
+        $keepId = $this->providerId;
+        $keepModel = $this->model;
+        $this->registry = $registry ?? new ProviderRegistry();
+        if ($keepId !== null && !$this->registry->has($keepId)) {
+            $this->pendingApproval = null;   // 当前 provider 被移除了：确认态跟着作废
+            $this->providerId = null;
+            $this->model = null;
+            return;
+        }
+        $this->providerId = $keepId;
+        $this->model = $keepModel;
+    }
+
+    /** 用户级配置文件的问题（null = 正常）；供 UI 在重载后提示「已保留原配置」 */
+    public function providersUserError(): ?string
+    {
+        return $this->registry->userError();
+    }
+
+    /** 用户级配置文件的路径（未启用时为 null） */
+    public function providersUserFile(): ?string
+    {
+        return $this->registry->userFile();
+    }
+
+    /** 用户级配置里定义的模型策略（name => ModelStrategy，按声明顺序） */
+    public function strategies(): array
+    {
+        return $this->registry->strategies();
+    }
+
+    /** 当前生效的策略名（null = 没在用策略，例如手动切的 provider/模型） */
+    public function strategyName(): ?string
+    {
+        return $this->strategyName;
+    }
+
+    /** 当前策略的展示名（策略已被删掉时退回名字本身，供状态栏用） */
+    public function strategyLabel(): ?string
+    {
+        if ($this->strategyName === null) {
+            return null;
+        }
+        return $this->registry->strategies()[$this->strategyName]?->label ?? $this->strategyName;
+    }
+
+    /**
+     * 应用一条模型策略：切换 provider/model 并记下策略名。
+     *
+     * **四类校验，一律拒绝 + 明确提示，绝不静默降级**（静默降级是这类功能最坏的失败方式：
+     * 用户以为在跑"优质档"，实际跑的是别的模型，还找不出原因）：
+     *  1. 策略不存在；
+     *  2. 目标 provider 没配置；
+     *  3. 目标 model 没在该 provider 里声明 —— ⚠️ `spec()` 在模型未登记时会**静默退回该
+     *     provider 的默认模型**，所以必须自己比对（`$spec->model !== $want`）才算校验过；
+     *  4. 策略声明的 `requires` 能力目标模型不具备（典型：`requires: ['tools']` 撞上没声明
+     *     `tools` 的便宜模型 —— 那样 Agent 工具会**静默失效**，不发 tools 也不报错）。
+     *
+     * @param bool $pin true = 人工选档（**钉住**，按任务类型的自动选档暂停）；
+     *                  false = 自动路由挑中的（不钉住，下一条按类型的请求可以再改）
+     */
+    public function applyStrategy(string $name, bool $pin = true): bool
+    {
+        $st = $this->registry->strategies()[$name] ?? null;
+        if ($st === null) {
+            $this->shell->setMessage($this->shell->t('ai.strategy_unknown', ['strategy' => $name]));
+            return false;
+        }
+        if (!$this->registry->has($st->providerId)) {
+            $this->shell->setMessage($this->shell->t('ai.strategy_no_provider', [
+                'strategy' => $st->label,
+                'provider' => $st->providerId,
+            ]));
+            return false;
+        }
+        $spec = $this->registry->spec($st->providerId, $st->model);
+        if ($spec === null) {
+            $this->shell->setMessage($this->shell->t('ai.strategy_no_provider', [
+                'strategy' => $st->label,
+                'provider' => $st->providerId,
+            ]));
+            return false;
+        }
+        if ($st->model !== null && $spec->model !== $st->model) {
+            $this->shell->setMessage($this->shell->t('ai.strategy_no_model', [
+                'strategy' => $st->label,
+                'model'    => $st->model,
+                'provider' => $st->providerId,
+            ]));
+            return false;
+        }
+        $missing = array_values(array_filter($st->requires, static fn(string $c): bool => !$spec->supports($c)));
+        if ($missing !== []) {
+            $this->shell->setMessage($this->shell->t('ai.strategy_missing_caps', [
+                'strategy' => $st->label,
+                'caps'     => implode('/', $missing),
+                'model'    => $spec->model,
+            ]));
+            return false;
+        }
+        $this->pendingApproval = null;   // 与 useProvider 同规则：换模型连带取消未裁决的确认态
+        $this->providerId = $st->providerId;
+        $this->model = $spec->model;
+        $this->strategyName = $st->name;
+        $this->pinned = $pin;
+        if ($pin) {
+            // 人工钉住：副带说清"自动选档暂停了"，否则用户会以为按任务类型还在生效
+            $this->shell->setMessage($this->shell->t('ai.strategy_applied_pinned', [
+                'strategy' => $st->label,
+                'provider' => $spec->label,
+                'model'    => $spec->model,
+            ]));
+        } else {
+            $this->shell->setMessage($this->shell->t('ai.strategy_applied', [
+                'strategy' => $st->label,
+                'provider' => $spec->label,
+                'model'    => $spec->model,
+            ]));
+        }
+        return true;
+    }
+
+    /** 是否被人工钉住（自动选档暂停）；供状态栏显示"现在听谁的" */
+    public function isPinned(): bool
+    {
+        return $this->pinned;
+    }
+
+    /** 是否有任何策略可自动路由（状态栏据此决定要不要显示「自动」） */
+    public function hasStrategies(): bool
+    {
+        return $this->registry->strategies() !== [];
+    }
+
+    /** 已知任务类型 = 4 个快捷动作 + 所有策略里声明的 kinds（去重排序；供前缀校验与提示） */
+    public function knownKinds(): array
+    {
+        $kinds = self::QUICK_ACTION_KINDS;
+        foreach ($this->registry->strategies() as $st) {
+            foreach ($st->kinds as $k) {
+                $kinds[] = $k;
+            }
+        }
+        $kinds = array_values(array_unique($kinds));
+        sort($kinds);
+        return $kinds;
+    }
+
+    /**
+     * 切回「自动」：解除钉住，之后按任务类型自动选档（快捷动作与 `/前缀`）。
+     * 策略名保留（状态栏继续显示当前实际跑的那一档，只是不再算"钉住"）。
+     */
+    public function useAutoStrategy(): void
+    {
+        $this->pinned = false;
+        $this->shell->setMessage($this->shell->t('ai.strategy_auto_on'));
+    }
+
+    /**
+     * 按任务类型选档（**人工优先**：钉住时完全不介入，并由调用方给出提示）。
+     *
+     * 命中规则：按配置里的策略声明顺序，取第一条 `kinds` 含该 kind 的。
+     * 不命中就不动（保持当前档），也不报错——"这条任务是普通的"本来就是常态。
+     *
+     * @return string|null 实际路由到的策略名；null = 没路由（钉住 / 无此类型 / 没配）
+     */
+    public function routeByKind(?string $kind): ?string
+    {
+        if ($kind === null || $kind === '' || $this->pinned) {
+            return null;
+        }
+        foreach ($this->registry->strategies() as $st) {
+            if (in_array($kind, $st->kinds, true)) {
+                return $this->applyStrategy($st->name, false) ? $st->name : null;
+            }
+        }
+        return null;
+    }
+
+    /** 在已定义的策略（含「自动」档）之间循环切换（环形）。一条都没配时提示怎么配。 */
+    public function cycleStrategy(): void
+    {
+        $names = array_keys($this->registry->strategies());
+        if ($names === []) {
+            $this->shell->setMessage($this->shell->t('ai.strategy_none'));
+            return;
+        }
+        // 首站是「自动」：没钉住时 Ctrl+R 第一次就是切到自动（等于回到自动），语义连贯
+        $stops = array_merge([ProviderRegistry::AUTO], $names);
+        $cur = $this->pinned && $this->strategyName !== null ? $this->strategyName : ProviderRegistry::AUTO;
+        $i = array_search($cur, $stops, true);
+        $next = $stops[(($i === false ? -1 : $i) + 1) % count($stops)];
+        if ($next === ProviderRegistry::AUTO) {
+            $this->useAutoStrategy();
+            return;
+        }
+        $this->applyStrategy($next);
     }
 
     /** 在当前 provider 内切到下一个模型（环形）。 */
@@ -182,6 +417,8 @@ final class ChatModel
         $i = array_search($spec->model, $spec->models, true);
         $next = $spec->models[(($i === false ? 0 : $i) + 1) % count($spec->models)];
         $this->model = $next;
+        $this->strategyName = null; // 手选了模型 → 不再属于任何策略
+        $this->pinned = true;       // 人工选档 = 钉住
         $this->shell->setMessage($this->shell->t('ai.switched', [
             'provider' => $spec->label,
             'model'    => $next,
@@ -196,8 +433,12 @@ final class ChatModel
      * 先把用户消息和一条**空的** assistant 消息入列，之后每个 token 都追加到那条
      * assistant 消息上——这样「流式」在数据层就是「最后一条消息在长」，
      * 渲染层不需要为「正在生成的消息」开特例。
+     *
+     * @param string|null $kind 任务类型（快捷动作的 kind，或输入框 `/前缀` 解析出来的）：
+     *                          用于**按任务类型自动选档**；null = 普通消息（不路由，保持当前档）。
+     *                          放在"生成中"检查**之后**处理——生成中绝不切模型。
      */
-    public function send(string $text): void
+    public function send(string $text, ?string $kind = null): void
     {
         $text = trim($text);
         if ($text === '') {
@@ -206,6 +447,12 @@ final class ChatModel
         if ($this->streaming) {
             $this->shell->setMessage($this->shell->t('ai.busy'));
             return;
+        }
+        $this->routeByKind($kind);
+        // 钉住时前缀不生效——必须说出来，否则用户以为 /plan 起作用了（静默失效最坏）。
+        // 注：这条提示会被**随后出现的、更该看的**错误覆盖（如「缺少 API key」）——优先级如此是对的。
+        if ($kind !== null && $this->pinned) {
+            $this->shell->setMessage($this->shell->t('ai.kind_ignored_pinned', ['kind' => $kind]));
         }
         $this->pendingApproval = null; // 新提问覆盖未裁决的确认态
         $this->steps = 0;
@@ -441,6 +688,14 @@ final class ChatModel
         if ($snap['provider'] !== null && $this->registry->has($snap['provider'])) {
             $this->providerId = $snap['provider'];
             $this->model = $snap['model']; // 换 provider 清 model 的规则在这里反着来：存档里 model 是配对存下来的
+            // 策略名**只在仍然指向同一个目标时**才恢复（策略被删掉/改过、或用户手选过别的模型，
+            // 就不该再挂着那个名字——状态栏不许说谎）
+            $st = $snap['strategy'] !== null ? ($this->registry->strategies()[$snap['strategy']] ?? null) : null;
+            if ($st !== null
+                && $st->providerId === $snap['provider']
+                && ($st->model === null || $st->model === $snap['model'])) {
+                $this->strategyName = $st->name;
+            }
         }
     }
 
@@ -454,6 +709,7 @@ final class ChatModel
         ChatStore::save($this->messages, [
             'provider' => $this->providerId,
             'model'    => $spec?->model,
+            'strategy' => $this->strategyName,
         ]);
     }
 

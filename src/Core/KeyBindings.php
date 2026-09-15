@@ -102,6 +102,7 @@ final class KeyBindings
                 ['Enter', 'help.a_send'],
                 ['Ctrl+P', 'help.a_provider'],
                 ['Ctrl+N', 'help.a_model'],
+                ['Ctrl+R', 'help.a_strategy'],
                 ['Ctrl+L', 'help.a_clear'],
                 ['Ctrl+V', 'help.e_paste'],
                 ['↑ / ↓', 'help.a_history'],

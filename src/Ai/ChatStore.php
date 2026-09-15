@@ -58,6 +58,7 @@ final class ChatStore
             'savedAt'  => time(),
             'provider' => is_string($meta['provider'] ?? null) ? $meta['provider'] : null,
             'model'    => is_string($meta['model'] ?? null) ? $meta['model'] : null,
+            'strategy' => is_string($meta['strategy'] ?? null) ? $meta['strategy'] : null,
             'messages' => $messages,
         ];
         $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -73,7 +74,7 @@ final class ChatStore
 
     /**
      * 读取对话存档；不存在 / 损坏 / 消息形状非法返回 null。
-     * @return array{messages:array<int,array<string,mixed>>,provider:?string,model:?string,savedAt:int}|null
+     * @return array{messages:array<int,array<string,mixed>>,provider:?string,model:?string,strategy:?string,savedAt:int}|null
      */
     public static function load(): ?array
     {
@@ -99,6 +100,7 @@ final class ChatStore
             'messages' => $data['messages'],
             'provider' => is_string($data['provider'] ?? null) ? $data['provider'] : null,
             'model'    => is_string($data['model'] ?? null) ? $data['model'] : null,
+            'strategy' => is_string($data['strategy'] ?? null) ? $data['strategy'] : null,
             'savedAt'  => is_int($data['savedAt'] ?? null) ? $data['savedAt'] : 0,
         ];
     }

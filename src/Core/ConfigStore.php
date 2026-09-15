@@ -23,6 +23,9 @@ final class ConfigStore
     /** 插件专用配置文件名（与 .vicerc 分离：.vicerc 只存 ViceCode 自身配置） */
     public const PLUGINS_FILE_NAME = '.vicecode.plugins.json';
 
+    /** 用户级模型（provider）配置文件名（与内置 config/providers.php 分离） */
+    public const PROVIDERS_FILE_NAME = '.vicecode.providers.php';
+
     /** 返回家目录（测试/沙箱用 HOME/USERPROFILE，缺失退回临时目录） */
     private static function homeDir(): string
     {
@@ -54,6 +57,26 @@ final class ConfigStore
             return $override;
         }
         return self::homeDir() . '/' . self::PLUGINS_FILE_NAME;
+    }
+
+    /**
+     * 返回用户级模型（provider）配置文件的绝对路径。
+     *
+     * 优先级：`VICECODE_PROVIDERS_CONFIG` 环境变量 → `~/.vicecode.providers.php`。
+     *
+     * 为什么是 `.php` 而不是像插件配置那样的 JSON：这里的配置形状与内置
+     * `config/providers.php` **完全一致**（含 `key_env` / `url_env` / `models` / `capabilities`），
+     * 用户可以直接从内置文件拷一段过来改；PHP 还允许写注释，而这份文件的主要用途正是
+     * 「教会用户怎么写」。代价是「应用内编辑 PHP 可能存出语法错误」——由
+     * `ProviderRegistry` 的语法安全加载兜住（语法错则保留上一份好配置并提示）。
+     */
+    public static function providersPath(): string
+    {
+        $override = getenv('VICECODE_PROVIDERS_CONFIG');
+        if (is_string($override) && $override !== '') {
+            return $override;
+        }
+        return self::homeDir() . '/' . self::PROVIDERS_FILE_NAME;
     }
 
     /**
@@ -199,6 +222,99 @@ final class ConfigStore
             return false;
         }
         return @file_put_contents($file, $json) !== false;
+    }
+
+    /**
+     * 用户级 provider 配置的**初始模板**（文件不存在时写入，供应用内编辑）。
+     *
+     * 只写注释 + `return [];`，**不写当前生效配置**：这份文件是「按 id 覆盖」语义，
+     * 把内置那两条抄进来会变成"冻结当前版本"，以后内置更新（改默认模型/加能力）就被它盖住了。
+     * 保持空数组 = 行为与没有这个文件完全一致，用户想改哪个再从注释里的例子抄。
+     */
+    public static function providersTemplate(): string
+    {
+        return <<<'PHP'
+<?php
+declare(strict_types=1);
+
+/**
+ * ViceCode 用户级模型（provider）配置。
+ *
+ * 与内置 `config/providers.php` 的关系：内置先读，这份文件按 **id 逐字段覆盖**，
+ * 新 id 追加在后面。所以只想把 openai 指到自建网关时，只写这一个 id 和要改的字段即可，
+ * 内置的 deepseek 会原样保留。`models` 是**整表覆盖**（写了就以这里为准，不做并集）。
+ *
+ * 密钥约定：key 只从环境变量读，**不要写进这个文件**（这个文件会被存进家目录）：
+ *   {PREFIX}_API_KEY   必填，缺了 AI 面板会提示
+ *   {PREFIX}_BASE_URL  可选，覆盖 base_url
+ *
+ * 例子（把 return 那一行换成下面这段即可，注意取消注释）：
+ *
+ *   return [
+ *       // 覆盖内置 openai：只写要改的字段，其余（模型列表等）继续用内置的
+ *       'openai' => [
+ *           'base_url' => 'https://my-gateway.internal/v1',
+ *       ],
+ *       // 追加一条任何 OpenAI 兼容端点（OpenRouter / Kimi / 千问 / GLM / Ollama / vLLM / 自建网关）
+ *       'my-gw' => [
+ *           'label'    => '我的网关',
+ *           'key_env'  => 'MYGW_API_KEY',
+ *           'base_url' => 'http://127.0.0.1:11434/v1',
+ *           'models'   => ['qwen2.5:14b' => ['tools']],
+ *           'model'    => 'qwen2.5:14b',
+ *       ],
+ *   ];
+ *
+ * 保存后即时生效（Ctrl+S），无需重启；语法写错会提示并沿用上一份可用配置。
+ * 改完回 AI 面板按 Ctrl+P 切 provider、Ctrl+N 切模型，确认新配置认到了。
+ *
+ * ── 模型策略（可选，见下面例子）──────────────────────────────────────────
+ *
+ * 把「这次要干什么」映射到一个具体模型，用于快速换档：
+ *   · 在 AI 面板按 **Ctrl+R** 循环切换；
+ *   · 或从菜单/命令面板的 AI 组里直接选（每条策略一个条目）；
+ *   · 状态栏右侧显示当前策略（手动切 provider/模型会自动脱离策略，不会显示错的档位）。
+ *
+ * 可以写 `requires` 声明能力要求：切换时若目标模型不具备该能力会**拒绝并提示**。
+ * 这条不是洁癖——Agent 工具依赖 `tools`，若"降级到便宜模型"撞上一个没声明 tools 的模型，
+ * 表现是工具**静默失效**（不报错），用户只会觉得"Agent 怎么不动了"。
+ *
+ * 自动选档（按任务类型）：策略可以写 `kinds`，请求带上这些类型时**自动**用本档。
+ * 任务类型只有两个来源，都不靠猜：① 快捷动作（explain / comment / refactor / unittest）；
+ * ② 输入框开头的指令前缀，如 `/plan 帮我把这块重构一下`（前缀不发给模型；写了未知类型会拒绝发送
+ * 并列出已知类型；想发字面量斜杠就写两个 `//`）。
+ * **人工优先**：手动选档（Ctrl+R 或菜单里选某条）会**钉住**，自动选档暂停；Ctrl+R 循环里
+ * 有一档「自动」可以切回去。
+ *
+ *   '@strategies' => [
+ *       'plan'  => ['label' => '计划', 'provider' => 'deepseek', 'model' => 'deepseek-reasoner',
+ *                   'kinds' => ['plan']],
+ *       'grind' => ['label' => '干活', 'provider' => 'deepseek', 'model' => 'deepseek-chat',
+ *                   'requires' => ['tools'], 'kinds' => ['comment', 'explain']],
+ *   ],
+ *
+ * 注：`@` 开头的键都是**保留段**，不会被当成 provider；策略名 `auto` 是保留的（循环里的"自动"档）；
+ * 策略里 model 写错会拒绝切换，不会静默回退到别的模型。
+ */
+
+return [];
+PHP;
+    }
+
+    /**
+     * 写入用户级 provider 配置文件；失败静默返回 false（不抛）。
+     *
+     * 写失败也不该让编辑入口失败——文件没建出来时调用方仍会把编辑器指向该路径，
+     * 用户手动保存即可（编辑器自己会报「无权限」）。
+     */
+    public static function saveProviders(string $content): bool
+    {
+        $file = self::providersPath();
+        $dir = dirname($file);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0700, true);
+        }
+        return @file_put_contents($file, $content) !== false;
     }
 
     /**

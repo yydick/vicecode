@@ -23,6 +23,7 @@ file_put_contents($sentinel, "<?php\n// ZZUNIQUEMARKER_LINE\n");
 
 require __DIR__ . '/../vendor/autoload.php';
 require __DIR__ . '/lib/isolation.php';
+require __DIR__ . '/lib/pty_screen.php';
 vc_isolate_config('vc_search_pty');   // 探针 App 与子进程都别读开发机真实 ~/.vicerc / 插件配置
 use App\App;
 use PhpTui\Tui\Display\Area;
@@ -90,6 +91,59 @@ function waitForAny(array $pipes, array $needles, int $timeoutMs): string
     return $acc;
 }
 
+/**
+ * 读到 pty 安静（连续 2 次空读）为止。用途：**上一步真的做完了再发下一步**，
+ * 避免新键入的字节与上一步那半截还没解析完的 SGR 鼠标序列抢解析器。
+ * （本函数丢弃字节——只用于"等状态稳定"，需要留证的步骤请用 waitForFrame。）
+ */
+function waitQuiet(array $pipes, int $maxMs = 2000): void
+{
+    global $readPty;
+    $end = microtime(true) + ($maxMs / 1000);
+    $quiet = 0;
+    while ($quiet < 2 && microtime(true) < $end) {
+        if ($readPty($pipes[1], 65536) === '') {
+            $quiet++;
+            usleep(60000);
+        } else {
+            $quiet = 0;
+        }
+    }
+}
+
+/**
+ * 条件等待：把原始字节累积到 $raw，直到**重建后的最终帧**满足 $pred，或超时。
+ *
+ * 与 waitForAny 的分工：那个匹配**归一化累积流**（快，但会被中间帧污染），本函数匹配
+ * **重放后的最终帧**（慢一点、语义正确）。**阴性断言必须用这个**——差分渲染只重发变化格、
+ * 同一行还会被拆成多次「定位+写入」，中间任何一帧渲染过的东西都永久留在累积流里。
+ * 只在「读到安静」之后重建一次：重建是 O(流长) 的，不能每轮都做。
+ *
+ * @param callable(string):bool $pred
+ */
+function waitForFrame(array $pipes, string &$raw, callable $pred, int $timeoutMs): bool
+{
+    global $readPty;
+    $end = microtime(true) + ($timeoutMs / 1000);
+    while (microtime(true) < $end) {
+        $quiet = 0;
+        while ($quiet < 2 && microtime(true) < $end) {
+            $chunk = $readPty($pipes[1], 65536);
+            if ($chunk === '') {
+                $quiet++;
+                usleep(60000);
+            } else {
+                $raw .= $chunk;
+                $quiet = 0;
+            }
+        }
+        if ($pred(vc_rebuild_screen($raw, 120, 40))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 探针：同尺寸布局算 SEARCH tab 点击坐标（0-based → SGR 1-based）
 $probe = new App();
 $sb = $probe->areas(Area::fromDimensions(120, 40))['sidebar'];
@@ -121,20 +175,57 @@ $outTab = waitForAny($pipes, ['searchfilecontents', '搜索文件内容'], 3000)
 check(str_contains($outTab, 'searchfilecontents') || str_contains($outTab, '搜索文件内容'),
     'SEARCH tab 显示输入占位提示（搜索文件内容）');
 
+// 等点击那对 SGR 序列解析完再键入（否则键入字节可能和它的尾巴抢解析器）
+waitQuiet($pipes);
+
 // 键入关键词（focus=sidebar 且 SEARCH tab 时字符进 query）
+// 断言对**最终帧**做（累积流会被中间帧污染），窗口给足：全量跑批时机器负载高，
+// 应用要慢半拍才把这行渲染出来——实测旧写法 3s 窗口偶发假阴性（全量批里 2/5 次），
+// 而同一批里搜索本身是成功的（R2 那步能拿到结果）。窗口短不是"更严格"，是更脆。
 $query = 'ZZUNIQUEMARKER';
 fwrite($pipes[0], $query);
-$outTyped = waitForAny($pipes, ['marker'], 3000);
-check(str_contains($outTyped, 'marker'), '键入进搜索框（捕获关键词 MARKER）');
+$rawTyped = '';
+$typed = waitForFrame($pipes, $rawTyped, static fn(string $f): bool => str_contains($f, 'zzuniquemarker'), 8000);
+check($typed, '键入进搜索框（最终帧里出现关键词 ZZUNIQUEMARKER）');
+if (!$typed) {
+    file_put_contents(__DIR__ . '/pty_search_dump.log', $rawTyped);
+    echo "  （键入超时：已转储原始输出到 tests/pty_search_dump.log）\n";
+}
 
 // 回车触发搜索（R1：Enter 触发）
 fwrite($pipes[0], "\r");
 
-// 等 grep 跑完（非阻塞管道 + 主循环 pollSearch 排空）；repo 不大、排除 vendor 后应很快
-$outRes = waitForAny($pipes, ['zzuniquemarker'], 6000);
-check(str_contains($outRes, 'zzuniquemarker'), 'R2：搜索结果在真实终端中出现（pollSearch 并入重绘生效）');
-check(!str_contains($outRes, 'nomatches') && !str_contains($outRes, 'noresults'),
-    'R2：有命中时不显示「无匹配结果」');
+// 等 grep 跑完，断言全部落在**最终帧**上（累积流会被中间帧污染）。旧写法有三处毛病：
+//   (a) 「结果出现」查 'zzuniquemarker' —— **输入框里就有这个词**，不搜也能通过（假阳性）。
+//       改查**只可能来自结果列表**的东西：命中行的内容 `// ZZUNIQUEMARKER_LINE`
+//       （归一化后 `zzuniquemarkerline`，比查询词多了 `line`，输入框不会长这样）。
+//   (b) 「不显示无匹配结果」查英文 'nomatches'/'noresults'，而本用例**没设 APP_LOCALE**、
+//       界面是默认 zh_CN —— 那串英文永远不会出现，该断言**恒为真**（僵尸断言，实测：把状态行
+//       注入成恒定「无匹配结果」后它照样 PASS）。改查中文串。
+//   (c) 两处都断言累积流：只要中间某帧渲染过「无匹配结果」（如「搜索中」那帧），断言必假阴性
+//       （实测注入该中间帧后累积流断言 FAIL、最终帧断言 PASS）。
+$rawRes = '';
+$listShown = waitForFrame(
+    $pipes,
+    $rawRes,
+    static fn(string $f): bool => str_contains($f, 'zzuniquemarkerline'),
+    8000
+);
+$frameRes = vc_rebuild_screen($rawRes, 120, 40);
+// 命中统计（「{n} 个匹配 / {files} 个文件」）由状态行与状态栏消息两处之一给出，此处只作辅证
+$statsShown = preg_match('/[1-9][0-9]*个匹配[0-9]+个文件/u', $frameRes) === 1
+    || preg_match('/[1-9][0-9]*matches[0-9]+files/', $frameRes) === 1;
+check($listShown,
+    'R2：结果列表渲染出命中内容（pollSearch 并入重绘生效；实际 命中行='
+    . ($listShown ? '有' : '无') . ' 统计=' . ($statsShown ? '有' : '无') . '）');
+check($statsShown, 'R2：命中统计可见（N 个匹配 / M 个文件）');
+check(!str_contains($frameRes, '无匹配结果') && !str_contains($frameRes, 'nomatches')
+    && !str_contains($frameRes, 'noresults'),
+    'R2：有命中时状态行不显示「无匹配结果」（对最终帧断言，中文串确实能被命中）');
+if (!$listShown) {
+    file_put_contents(__DIR__ . '/pty_search_dump.log', $rawRes);
+    echo "  （已转储原始输出到 tests/pty_search_dump.log）\n";
+}
 
 // 干净退出
 fwrite($pipes[0], "\x11");

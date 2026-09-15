@@ -81,11 +81,13 @@ final class VcTemp
 }
 
 /**
- * 隔离配置：建独占目录，把 `VICECODE_CONFIG` 与 `VICECODE_PLUGINS_CONFIG` 都指进去，
- * 返回 `.vicerc` 的绝对路径（pty 用例把它塞进子进程 env 即可，父子同源）。
+ * 隔离配置：建独占目录，把 `VICECODE_CONFIG` / `VICECODE_PLUGINS_CONFIG` /
+ * `VICECODE_PROVIDERS_CONFIG` 都指进去，返回 `.vicerc` 的绝对路径
+ * （pty 用例把它塞进子进程 env 即可，父子同源）。
  *
- * 插件配置一并隔离很重要：只隔离 `VICECODE_CONFIG` 时，`new App()` 仍会去读开发机的
- * `~/.vicecode.plugins.json`（实测你机器上就有 clock 的 format/timezone 覆盖）。
+ * 三份用户级配置一并隔离很重要：只隔离 `VICECODE_CONFIG` 时，`new App()` 仍会去读开发机的
+ * `~/.vicecode.plugins.json`（实测你机器上就有 clock 的 format/timezone 覆盖），
+ * 而 `ProviderRegistry` 会去读 `~/.vicecode.providers.php`（文件存在即覆盖内置 provider）。
  *
  * @param string $tag      目录名前缀，用测试名便于残留时定位（如 `vc_ai_copy`）
  * @param string $fileName 配置文件名，默认 `.vicerc`（与生产一致）
@@ -97,6 +99,7 @@ function vc_isolate_config(string $tag, string $fileName = '.vicerc'): string
     $cfg = $dir . '/' . $fileName;
     putenv('VICECODE_CONFIG=' . $cfg);
     putenv('VICECODE_PLUGINS_CONFIG=' . $dir . '/.vicecode.plugins.json');
+    putenv('VICECODE_PROVIDERS_CONFIG=' . $dir . '/.vicecode.providers.php');
     return $cfg;
 }
 

@@ -135,10 +135,34 @@ final class MenuBarPanel
                     ['label' => $this->shell->chat->toolAutoRun() ? $t('ai.tool_mode_confirm') : $t('ai.tool_mode_auto'),
                                                               'action' => 'ai.tool_mode',      'shortcut' => ''],
                     ['label' => $t('ai.compact_now_label'),      'action' => 'ai.compact_now',    'shortcut' => ''],
+                    ['label' => $t('ai.providers_label'),        'action' => 'ai.providers_config', 'shortcut' => ''],
                     ['label' => $t('ai.cleared_menu'),           'action' => 'ai.clear',          'shortcut' => ''],
                 ],
             ],
         ];
+        // 模型策略（用户级配置的 @strategies，可能一条都没配）：每条一个菜单项（直接选中某一条，
+        // 比只能循环切更好用）。命令面板的条目是从菜单定义派生的，所以这里加完面板里就能搜到。
+        $strategies = $this->shell->chat->strategies();
+        if ($strategies !== []) {
+            foreach ($defs as $i => $g) {
+                if (($g['label'] ?? '') === $t('menu.ai')) {
+                    // 第一项是「自动」（默认状态：按任务类型自己挑），后面每条策略一个条目
+                    $defs[$i]['items'][] = [
+                        'label'    => $t('ai.strategy_auto_item'),
+                        'action'   => 'ai.strategy_auto',
+                        'shortcut' => '',
+                    ];
+                    foreach ($strategies as $name => $st) {
+                        $defs[$i]['items'][] = [
+                            'label'    => $t('ai.strategy_item', ['label' => $st->label]),
+                            'action'   => 'ai.strategy:' . $name,
+                            'shortcut' => '',
+                        ];
+                    }
+                    break;
+                }
+            }
+        }
         // V1.1：插件命令组**只追加在末尾** —— 系统 4 组的下标与项序一概不变，
         // 下面那些按 $this->active/$this->sel 取数组的地方才不会错位。
         $pluginItems = $this->shell->pluginMenuItems();

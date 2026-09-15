@@ -53,6 +53,7 @@ putenv('APP_LOCALE=zh_CN');
 putenv('VICECODE_PLUGINS_DIR=' . $base);
 putenv('VICECODE_PLUGINS_CONFIG=' . $cfgFile);
 putenv('VICECODE_CONFIG=' . $base . '/vicerc.json');
+putenv('VICECODE_PROVIDERS_CONFIG=' . $base . '/.vicecode.providers.php');   // 别读开发机的模型配置
 
 $failed = false;
 function check(bool $cond, string $msg): void
@@ -253,6 +254,7 @@ $env = array_merge(getenv(), [
     'VICECODE_PLUGINS_DIR' => $base,
     'VICECODE_PLUGINS_CONFIG' => $cfgFile,
     'VICECODE_CONFIG' => $base . '/vicerc.json',
+    'VICECODE_PROVIDERS_CONFIG' => $base . '/.vicecode.providers.php',
 ]);
 
 echo "== 真实 pty：会话内 Space 切换 ==\n";

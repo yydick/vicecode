@@ -27,6 +27,9 @@ putenv('APP_LOCALE=zh_CN');
 $capsTmpDir = sys_get_temp_dir() . '/vc_caps_unit_' . getmypid();
 @mkdir($capsTmpDir, 0700, true);
 putenv('VICECODE_CONFIG=' . $capsTmpDir . '/.vicerc');
+// 用户级 provider 配置也要隔离：本测试断言的是**内置** config/providers.php 的内容，
+// 若开发机上有 ~/.vicecode.providers.php，覆盖合并会让断言随本机状态漂移。
+putenv('VICECODE_PROVIDERS_CONFIG=' . $capsTmpDir . '/.vicecode.providers.php');
 register_shutdown_function(static function () use ($capsTmpDir): void {
     @unlink($capsTmpDir . '/.vicerc');
     @unlink($capsTmpDir . '/.vicecode_ai');

@@ -102,6 +102,7 @@ file_put_contents($cfgPath, json_encode(['ai' => ['persist' => true]]));
 // 插件配置也指进独占目录（走 getenv() 合并进子进程 env）：否则子进程会读开发机
 // 真实 ~/.vicecode.plugins.json，断言会随本机配置漂移。
 putenv('VICECODE_PLUGINS_CONFIG=' . $tmpDir . '/.vicecode.plugins.json');
+putenv('VICECODE_PROVIDERS_CONFIG=' . $tmpDir . '/.vicecode.providers.php');   // 别读开发机的模型配置
 // 清理交给 lib/isolation.php 的 VcTemp（递归删，能处理 src/ 里的文件）
 
 // ── mock 服务端：MOCK_TOOLS=1（首轮回 tool_calls，收到 tool 结果后回文本）──

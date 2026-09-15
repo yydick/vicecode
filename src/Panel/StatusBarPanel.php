@@ -202,6 +202,19 @@ final class StatusBarPanel
                 . ($spec->supportsTools() ? '' : '·' . $t('status.no_tools'))
                 . ($this->shell->chat->isStreaming() ? ' …' : '');
 
+        // 模型策略段：只在配了策略时显示（`@strategies`）。
+        // 它必须**常显**，而且要**说清现在听谁的**：自动选档生效时带「·自动」后缀，
+        // 手动钉住时不带（手动切 provider/模型会清空策略名，所以这个段不会说谎）。
+        $stLabel = $this->shell->chat->strategyLabel();
+        $stAuto = !$this->shell->chat->isPinned();
+        if (!$this->shell->chat->hasStrategies()) {
+            $stText = '';
+        } elseif ($stLabel === null) {
+            $stText = $stAuto ? $t('status.strategy_auto') : '';
+        } else {
+            $stText = $stLabel . ($stAuto ? '·' . $t('status.strategy_auto') : '');
+        }
+
         // R5 拖拽分隔条时：把当前各面板尺寸显示在状态栏（高优先级，确保可见）。
         // 非拖拽时 t 为空，join() 会跳过，不占空间。
         $layout = $this->shell->isDragging() ? $this->shell->layoutSummary() : '';
@@ -216,6 +229,10 @@ final class StatusBarPanel
             ['k' => 'file',    'p' => 90,  'o' => 1, 'pfix' => $t('status.file') . '=', 't' => $file . $dirty],
             ['k' => 'mode',    'p' => 85,  'o' => 2, 't' => $t('status.mode') . '=' . $mode],
             ['k' => 'ai',      'p' => 80,  'o' => 4, 't' => $t('status.provider') . '=' . $ai],
+            // 策略段紧跟 AI 段（同一件事的两个侧面：哪一档 + 打到哪个模型）。
+            // 优先级略高于 AI 段：窄屏上宁可丢掉 provider/model 也要保住"我在哪个档"。
+            ['k' => 'strategy', 'p' => 82, 'o' => 4,
+                't' => $stText === '' ? '' : $t('status.strategy') . '=' . DisplayWidth::stripControl($stText)],
             ['k' => 'branch',  'p' => 70,  'o' => 3, 'pfix' => $t('status.branch') . '=', 't' => DisplayWidth::stripControl($this->shell->git->branch)],
             ['k' => 'quit',    'p' => 65,  'o' => 9, 't' => $t('status.quit')],
             ['k' => 'app',     'p' => 50,  'o' => 0, 't' => $t('app.title')],

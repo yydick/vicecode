@@ -90,6 +90,9 @@ $tmpDir = sys_get_temp_dir() . '/vice_compact_' . uniqid();
 $tmpCfg = $tmpDir . '/.vicerc';
 file_put_contents($tmpCfg, json_encode(['ai' => ['persist' => false]]));
 putenv('VICECODE_CONFIG=' . $tmpCfg);
+// 一并隔离用户级 provider 配置：否则 ProviderRegistry 会读开发机真实的
+// ~/.vicecode.providers.php（文件存在即覆盖内置 provider，断言会随本机配置漂移）
+putenv('VICECODE_PROVIDERS_CONFIG=' . $tmpDir . '/.vicecode.providers.php');
 
 // ─────────────── 1) 未超阈值：不触发压缩 ───────────────
 echo "== 未超阈值不触发 ==\n";

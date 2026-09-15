@@ -239,6 +239,7 @@ $env = array_merge(getenv(), [
     'TERM'             => 'xterm-256color',
     'APP_LOCALE'       => 'zh_CN',
     'VICECODE_CONFIG'  => $tmpDir . '/.vicerc',
+    'VICECODE_PROVIDERS_CONFIG' => $tmpDir . '/.vicecode.providers.php',   // 断言的是内置配置，别被开发机的用户配置覆盖
     'OPENAI_API_KEY'   => 'test-key-not-used',   // 只要有 key，别触发「缺 key」提示
 ]);
 

@@ -82,6 +82,7 @@ $vicerc = $base . '/vicerc.json';
 putenv('VICECODE_CONFIG=' . $vicerc);
 putenv('VICECODE_PLUGINS_DIR=' . $base);
 putenv('VICECODE_PLUGINS_CONFIG=' . $cfg);
+putenv('VICECODE_PROVIDERS_CONFIG=' . $base . '/.vicecode.providers.php');   // 同上：别读开发机的模型配置
 
 $vp = Area::fromDimensions(120, 40);
 $ext = new CoreExtension();

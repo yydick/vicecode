@@ -655,6 +655,11 @@ final class AiPanel
             $this->chat()->cycleModel();
             return true;
         }
+        // Ctrl+R 循环切换模型策略（在 AI 面板内，所以不会抢终端捕获态的 ^R 反向搜索）
+        if ($ctrl && strtolower($e->char) === 'r') {
+            $this->chat()->cycleStrategy();
+            return true;
+        }
 
         if ($e->char === "\r" || $e->char === "\n") {
             $this->send();
@@ -769,9 +774,20 @@ final class AiPanel
 
     // ── 发送 ────────────────────────────────────────
 
-    private function send(): void
+    /**
+     * 发送输入框内容（Enter 与快捷动作都走这里）。
+     *
+     * @param string|null $kind 快捷动作传入的任务类型；null = 由输入文本自己决定
+     *                          （`/前缀` 解析，见 resolveKind）
+     */
+    private function send(?string $kind = null): void
     {
         $text = trim($this->input);
+        if ($text === '') {
+            return;
+        }
+        // 指令前缀（`/plan 把这块重构一下`）：kind 只在最前面出现一次，**不发给模型**
+        [$kind, $text] = $this->resolveKind($text, $kind);
         if ($text === '') {
             return;
         }
@@ -782,12 +798,52 @@ final class AiPanel
         $this->draft = '';
         $this->input = '';
         $this->resetScroll(); // 新对话从顶部开始看
-        $this->chat()->send($expanded);
+        $this->chat()->send($expanded, $kind);
         // ⚠️ 缺失引用提示要在 send 之后汇总覆盖：send 可能再设提示（缺 key/生成中），
         // 先设的会被覆盖，用户就看不到「哪个 @ 引用被丢了」（实测踩过）
         if ($warnings !== []) {
             $this->shell->setMessage(implode('；', $warnings));
         }
+    }
+
+    /**
+     * 解析输入开头的**指令前缀**，得出本条的 kind。
+     *
+     * 规则（刻意不猜）：
+     *  - `$kind` 已由调用方给出（快捷动作）→ 直接用，不看文本；
+     *  - 文本以 `/<已知类型>` 开头 → 该类型，并把前缀从文本里去掉（**前缀不发给模型**）；
+     *  - 文本以 `/<未知词>` 开头 → **拒绝发送**并列出已知类型。用户在输入框打斜杠显然是想下指令，
+     *    把它当普通消息发出去（还带着斜杠）是更差的结果；
+     *  - 想发字面量开头的斜杠：写两个（`//plan`）→ 还原成一个（与命令行转义同理）。
+     *
+     * @return array{0:string|null,1:string} [kind, 去前缀后的文本]
+     */
+    private function resolveKind(string $text, ?string $kind): array
+    {
+        if ($kind !== null) {
+            return [$kind, $text];
+        }
+        if (!str_starts_with($text, '/')) {
+            return [null, $text];
+        }
+        if (str_starts_with($text, '//')) {
+            return [null, substr($text, 1)];      // 转义：`//plan` → 字面量 `/plan`
+        }
+        if (!preg_match('#^/([A-Za-z0-9_-]+)\s*(.*)$#s', $text, $m)) {
+            return [null, $text];                 // 光一个 `/`：当普通消息
+        }
+        $name = strtolower($m[1]);
+        $rest = $m[2];
+        $known = $this->chat()->knownKinds();
+        if (in_array($name, $known, true)) {
+            return [$name, $rest];
+        }
+        // 未知类型：拒绝发送 + 说清已知哪些（不静默降级成普通消息）
+        $this->shell->setMessage($this->shell->t('ai.kind_unknown', [
+            'kind'  => $name,
+            'known' => implode('/', $known),
+        ]));
+        return [null, ''];
     }
 
     /**
@@ -854,14 +910,17 @@ final class AiPanel
     }
 
     /** 外部直接发送（AI 快捷动作入口）：走与手动发送同一套 @展开/历史流程 */
-    public function sendPrompt(string $text): void
+    /**
+     * 直接发送一段文本（快捷动作走这里）：**带 kind**，让"按任务类型自动选档"能用上。
+     */
+    public function sendPrompt(string $text, ?string $kind = null): void
     {
         $text = trim($text);
         if ($text === '') {
             return;
         }
         $this->input = $text;
-        $this->send();
+        $this->send($kind);
     }
 
     /**
