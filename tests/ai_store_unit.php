@@ -13,6 +13,7 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 putenv('APP_LOCALE=zh_CN');
 
 use App\Ai\ChatModel;
@@ -33,10 +34,10 @@ function check(bool $cond, string $msg): void
     }
 }
 
-// 配置与存档全部隔离到 tmp
-$tmpCfg = tempnam(sys_get_temp_dir(), 'vice_store_');
+// 配置与存档全部隔离到**独占目录**
+// （tempnam 返回 /tmp 下的文件，dirname 就是 /tmp → 与别的测试共用 /tmp/.vicecode_ai）
+$tmpCfg = vc_isolate_config('vc_ai_store');
 file_put_contents($tmpCfg, '{}'); // ai.persist 缺省 = 开
-putenv('VICECODE_CONFIG=' . $tmpCfg);
 $storePath = dirname($tmpCfg) . '/' . ChatStore::FILE_NAME;
 
 // ─────────────── 1) 存/取往返 ───────────────

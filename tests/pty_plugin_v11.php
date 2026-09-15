@@ -17,6 +17,7 @@ declare(strict_types=1);
 chdir(__DIR__ . '/..');
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 
 // ── 测试插件：把最后收到的事件/命令写进状态栏段 ──────────────
 $base = sys_get_temp_dir() . '/vc_pv11_' . getmypid();
@@ -208,7 +209,7 @@ $env = array_merge(getenv(), [
     'LINES' => (string) H,
     'TERM' => 'xterm-256color',
     'VICECODE_PLUGINS_DIR' => $base,
-    'VICECODE_CONFIG' => tempnam(sys_get_temp_dir(), 'vc_v11cfg'),
+    'VICECODE_CONFIG' => vc_isolate_config('vc_v11_pty'),   // 独占配置目录，勿用 tempnam（dirname 会是 /tmp）
 ]);
 
 echo "== 真实 pty：事件与快捷键 ==\n";

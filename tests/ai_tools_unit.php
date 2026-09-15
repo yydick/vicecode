@@ -13,6 +13,7 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 putenv('APP_LOCALE=zh_CN');
 
 use App\Ai\AiTools;
@@ -89,22 +90,21 @@ function mockRegistry(int $port): ProviderRegistry
     ]);
 }
 
-// 测试配置隔离：不碰真实 ~/.vicerc
-$tmpCfg = tempnam(sys_get_temp_dir(), 'vice_ai_tools_');
+// 测试配置隔离：不碰真实 ~/.vicerc（且必须是独占目录，见 lib/isolation.php）
+$tmpCfg = vc_isolate_config('vc_ai_tools');
 putenv('VICECODE_CONFIG=' . $tmpCfg);
 
 // ─────────────── 1) AiTools 路径安全 ───────────────
 echo "== AiTools 路径安全 ==\n";
 
-$root = (string) tempnam(sys_get_temp_dir(), 'vice_root_');
-@unlink($root);
+$root = vc_tmp_dir('vc_ai_tools_root');
 @mkdir($root . '/src', 0777, true);
 file_put_contents($root . '/src/Foo.php', "<?php\necho 'foo';\n");
 file_put_contents($root . '/src/Bar.php', "bar\n");
 file_put_contents($root . '/README.md', "# hello\n");
 file_put_contents($root . '/binary.bin', "a\0b");
 // 出根 symlink：指向项目外
-$outside = (string) tempnam(sys_get_temp_dir(), 'vice_outside_');
+$outside = vc_tmp_file('vc_ai_tools_out');
 file_put_contents($outside, "secret");
 @symlink($outside, $root . '/evil_link');
 

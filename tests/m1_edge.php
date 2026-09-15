@@ -10,6 +10,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_m1_edge');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 
 use App\App;
 use App\Editor\Buffer;
@@ -293,7 +295,7 @@ try {
 $ms = (microtime(true) - $t0) * 1000;
 check(!$threw && $ms < 2000, sprintf('50k 字符超长行渲染不崩且耗时 %.0fms < 2000ms', $ms) . ($threw ? " ($msg)" : ''));
 
-$tmp = tempnam(sys_get_temp_dir(), 'vcedge') . '.txt';
+$tmp = vc_tmp_file('vcedge', '.txt');
 file_put_contents($tmp, "a\nb\nc"); // 末尾无换行
 $bNoEol = Buffer::fromFile($tmp);
 check($bNoEol->lines === ['a', 'b', 'c'], '末尾无换行文件按 3 行载入（不多出空行），实际 ' . json_encode($bNoEol->lines));

@@ -14,6 +14,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_sidebar_hscroll');   // 否则 new App() 会读开发机真实 ~/.vicerc（sidebarWidth 影响命中列）
 
 use App\App;
 use App\Git\GitFileStatus;

@@ -591,10 +591,33 @@ final class AiPanel
     private function helpLines(): array
     {
         $spec = $this->chat()->spec();
+        if ($spec === null) {
+            return [
+                $this->shell->t('ai.no_provider'),
+                $this->shell->t('ai.clear_hint'),
+            ];
+        }
+        // 当前模型能力（声明见 config/providers.php）：让用户一眼看出「这个模型能不能用工具」，
+        // 而不是等到 Agent 永不触发时才来猜。空列表显式说明「未声明任何能力」。
+        $caps = $spec->capabilities === []
+            ? $this->shell->t('ai.caps_none')
+            : implode(' · ', array_map(fn(string $c): string => $this->capLabel($c), $spec->capabilities));
         return [
-            $spec === null ? $this->shell->t('ai.no_provider') : $spec->label . ' / ' . $spec->model,
+            $spec->label . ' / ' . $spec->model,
+            $this->shell->t('ai.caps') . ': ' . $caps,
             $this->shell->t('ai.clear_hint'),
         ];
+    }
+
+    /**
+     * 能力标识 → 展示文案：已知能力走 i18n（`cap.tools` 等），配置里写的新能力名按原文显示
+     * （`Translator::t()` 缺 key 时原样返回 key，正好用来判断）。
+     */
+    private function capLabel(string $cap): string
+    {
+        $key = 'cap.' . $cap;
+        $txt = $this->shell->t($key);
+        return $txt === $key ? $cap : $txt;
     }
 
     // ── 事件 ────────────────────────────────────────

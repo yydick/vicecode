@@ -92,6 +92,19 @@ if ($uri === '/v1/chat/completions' && $method === 'POST') {
 
     // ── V2 场景开关（query 加不上——客户端 URL 是 base_url 拼的，故全走 env / 请求体判断）──
     $wantSummary = getenv('MOCK_SUMMARY') === '1';
+
+    // MOCK_ECHO_TOOLS=1：只回一行 `[tools=1]` / `[tools=0]`，用于端到端断言
+    // 「本次请求到底带没带 OpenAI tools 协议」（模型能力开关的验收靠它）。
+    // 放在 MOCK_TOOLS 之前：这两个开关互斥，echo 只关心请求体。
+    if (getenv('MOCK_ECHO_TOOLS') === '1') {
+        $hasTools = isset($req['tools']) && is_array($req['tools']) && $req['tools'] !== [];
+        sseFrame(['delta' => ['content' => '[tools=' . ($hasTools ? '1' : '0') . ']'], 'index' => 0]);
+        usleep($delayMs * 1000);
+        sseFrame(['delta' => [], 'index' => 0, 'finish_reason' => 'stop']);
+        echo "data: [DONE]\n\n";
+        flush();
+        return;
+    }
     // MOCK_TOOLS=1：首轮回 tool_calls，收到 role:tool 后回最终文本（Agent loop 正常往返）
     // MOCK_TOOLS=2：永远回 tool_calls（测 maxSteps 上限——模型不停要工具）
     $toolsMode = getenv('MOCK_TOOLS') ?: '0';

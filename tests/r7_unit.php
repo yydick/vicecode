@@ -16,6 +16,7 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 
 use App\App;
 use App\Core\ConfigStore;
@@ -34,13 +35,11 @@ function check(bool $cond, string $msg): void
     }
 }
 
-// 用临时文件隔离，避免污染真实 ~/.vicerc
-$tmp = sys_get_temp_dir() . '/vicecode_r7_' . uniqid('', true) . '.json';
-$tmpNone = sys_get_temp_dir() . '/vicecode_r7_none_' . uniqid('', true) . '.json';
-register_shutdown_function(static function () use ($tmp, $tmpNone): void {
-    @unlink($tmp);
-    @unlink($tmpNone);
-});
+// 用**独占目录**隔离，避免污染真实 ~/.vicerc。
+// ⚠️ 不能写成 sys_get_temp_dir() . '/xxx.json'：文件在 /tmp 根，dirname 就是 /tmp，
+// 于是 new App() 会去读 /tmp/.vicecode_ai（别的测试留下的对话存档）一起恢复。
+$tmp = vc_isolate_config('vc_r7');
+$tmpNone = vc_isolate_config('vc_r7_none');
 
 function setCfg(string $path): void
 {
@@ -101,8 +100,7 @@ check($app2->theme->id === 'dark', 'APP_THEME 覆盖配置文件 theme');
 clearEnv();
 
 echo "\n== 5) saveConfig() 落盘当前偏好 ==\n";
-$tmpSave = sys_get_temp_dir() . '/vicecode_r7_save_' . uniqid('', true) . '.json';
-@unlink($tmpSave);
+$tmpSave = vc_isolate_config('vc_r7_save');
 setCfg($tmpSave);
 clearEnv();
 $app3 = new App();  // $tmpSave 不存在 → 默认 dark / zh_CN 起步

@@ -9,6 +9,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_clipboard');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 
 use App\App;
 use App\Core\Clipboard;
@@ -106,7 +108,7 @@ echo "\n== 粘贴插入（editor / terminal / ai_input）==\n";
 if (!$tty) {
     // 编辑器：光标处插入（含多行拆分）
     $app = new App();
-    $f = tempnam(sys_get_temp_dir(), 'vc_paste');
+    $f = vc_tmp_file('vc_paste');
     file_put_contents($f, "line1\nline2\n");
     $app->openFile($f);
     $app->focus('editor');
@@ -131,7 +133,7 @@ if (!$tty) {
 
     // 触发键 Ctrl+V：经 handle 分发到 requestPaste
     $app2 = new App();
-    $f2 = tempnam(sys_get_temp_dir(), 'vc_paste2');
+    $f2 = vc_tmp_file('vc_paste2');
     file_put_contents($f2, "");
     $app2->openFile($f2);
     $app2->focus('editor');

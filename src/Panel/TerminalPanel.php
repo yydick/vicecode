@@ -196,7 +196,7 @@ final class TerminalPanel
             $this->buf->append($this->shell->t('term.interactive_exit') . "\n", false);
             $this->mode = 'runner';
             $this->captured = false;
-            $this->pty = null;
+            $this->dropPty();
             $this->emu = null;
             return true;
         }
@@ -281,7 +281,7 @@ final class TerminalPanel
             $env
         )) {
             $this->emu = null;
-            $this->pty = null;
+            $this->dropPty();
             $this->mode = 'runner';
             $this->captured = false;
             $this->ptyStartPending = false;
@@ -389,7 +389,7 @@ final class TerminalPanel
         )) {
             // 失败回退 runner（不致命）
             $this->emu = null;
-            $this->pty = null;
+            $this->dropPty();
             $this->mode = 'runner';
             $this->captured = false;
             $this->restorePending = false;
@@ -1121,15 +1121,31 @@ final class TerminalPanel
         $this->histIdx = -1;
     }
 
-    /** 退出时收尾：停掉还在跑的子进程，避免留下孤儿进程 */
+    /**
+     * 退出时收尾：停掉还在跑的子进程，避免留下孤儿进程
+     */
     public function shutdown(): void
     {
         // 先存盘（此时 emu 仍持有内容、pty 还没杀），再回收 pty 进程
         $this->saveSession();
         $this->runner->shutdown();
-        if ($this->pty !== null) {
-            $this->pty->shutdown();
-            $this->pty = null;
+        $this->dropPty();
+    }
+
+    /**
+     * 丢弃当前 pty 实例：**必须先 shutdown() 再置空**。
+     *
+     * PtyProcess 持有 bash `--rcfile` 用的临时文件（`/tmp/vicetui_rc_*`），只有
+     * `PtyProcess::shutdown()` 会删它；直接 `$this->pty = null` 会把文件永久留在 /tmp
+     * （实测：shell 每次自行退出——Ctrl+D / `exit`——就漏一个，一次会话一个，
+     * 应用退出时也不会被回收）。shutdown() 自身幂等，对已退出的进程调用是安全的。
+     */
+    private function dropPty(): void
+    {
+        if ($this->pty === null) {
+            return;
         }
+        $this->pty->shutdown();
+        $this->pty = null;
     }
 }

@@ -13,6 +13,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_m0_smoke');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 
 // M0 验收原按英文界面编写；固定 en 以匹配其标题断言（运行 app 默认已是 zh_CN）。
 putenv('APP_LOCALE=en');

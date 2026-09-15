@@ -27,6 +27,7 @@ return [
     'status.branch'    => '分支',
     'status.cwd'       => '目录',
     'status.provider'  => 'AI',
+    'status.no_tools'  => '无工具',
     'status.theme'     => '主题',
     'status.mode'      => '模式',
     'status.mode_edit' => '编辑',
@@ -112,6 +113,8 @@ return [
 
     'ai.no_provider'     => '未配置任何 Provider',
     'ai.no_key'          => '缺少 API key：请设置环境变量 {env}',
+    'ai.caps'            => '能力',
+    'ai.caps_none'       => '未声明任何能力',
     'ai.streaming'       => '生成中…',
     'ai.cancelled'       => '已停止生成',
     'ai.max_steps'       => '已达工具调用步数上限（{steps}），停止继续执行',
@@ -259,6 +262,12 @@ return [
     // 主题名（状态栏 / 菜单显示，跟随语言包）
     'theme.dark'             => '深色',
     'theme.midnight'         => '午夜蓝',
+
+    // 模型能力名（config/providers.php 的 capabilities；未知能力按原文显示）
+    'cap.tools'              => '工具调用',
+    'cap.reasoning'          => '推理',
+    'cap.vision'             => '识图',
+    'cap.audio'              => '语音',
 
     // 帮助页「触发方式」列（鼠标 / 输入描述）
     'keys.wheel'             => '滚轮',

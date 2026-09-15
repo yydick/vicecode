@@ -36,6 +36,17 @@
 - **极窄面板下前缀把首行撑宽**：W 小于前缀宽（`You: ` / `AI: `）时首行 = 前缀 + 至少 1 列正文，远超面板宽 → 触发 php-tui 的 `LineTruncator` 折行，把后续行整体挤下去（幽灵行）。前缀改为按 `min(前缀宽, max(0, W-2))` 夹紧（给正文留 2 列，2 列宽字素也放得下）。（`BUGFIXES` B12）
 - **Markdown 折行把前缀劈成两半**：前缀曾被当作折行流的第一个 span 交给 `spanWrapDisp`，缩进宽 > W/2 时会被从中间切开（实测 W=6 渲染成「`AI`」「`:`」两行）。统一为「前缀/缩进不进折行流」，与纯文本路径同语义。（B13）
 
+### 新增（模型能力声明 / tools 开关）
+
+- **模型能力（capabilities）**：`config/providers.php` 支持按模型声明能力——`tools`（函数调用）、`reasoning`（推理）、`vision`（识图）、`audio`（语音），写自定义名字也接受（UI 按原文显示，便于前向扩展）。两种粒度：`models` 里按模型声明（值写 `null` 走 provider 默认、写 `[]` 表示确实无能力），或 provider 级 `capabilities` 作为未声明模型的默认；仍兼容旧写法（`models` 为纯模型名列表）。**未声明 = 默认支持 `tools`**（老配置零迁移）。
+- **`tools` 能力真正影响行为**：只有声明了 `tools` 的模型，请求里才带 OpenAI `tools` 协议（Agent loop 的 `list_files` / `read_file` 依赖它）。纯推理模型因此不会因为携带工具被服务商拒掉整轮请求——内置配置已把 `deepseek-reasoner` 预声明为 `['reasoning']`；`gpt-4o` / `gpt-4.1-mini` 标了 `vision`。
+- **可见性**：AI 面板空态新增「能力: …」行（当前模型能力）；模型缺少 `tools` 时状态栏 AI 段带「无工具」标记，避免「Agent 工具从不触发」的无从排查。新增文案 `ai.caps` / `ai.caps_none` / `status.no_tools` / `cap.*`（中英两包同步）。
+
+### 修复（交互终端）
+
+- **每开一次交互终端，`/tmp` 里就永久多一个 `vicetui_rc_*`**：bash 的 `--rcfile` 集成脚本用临时文件承载，而 `TerminalPanel::pollPty()` 在 shell 退出（Ctrl+D / `exit`）时直接 `$this->pty = null` 丢掉实例、不调 `shutdown()`；`PtyProcess::shutdown()` 开头的「进程句柄已回收就 `return`」也**提前跳过**了文件清理。两条路径叠加 → 一次 shell 会话漏一个文件，应用退出也不会回收（本机实测攒了 33 个）。新增 `TerminalPanel::dropPty()`（先 `shutdown()` 再置空）并在四处丢弃点统一调用；`PtyProcess` 把 rc 文件清理抽成 `cleanupRcFile()`，早退分支也调用。（`BUGFIXES` D6）
+- **交互 shell 还活着时异常退出 → 留下活着的孤儿 shell**：子进程回收原先只挂在 `Lifecycle::quit()` 的关闭闭包上，而只有正常退出会经过它；未捕获异常等路径走到 `bin/vicecode.php` 的 `start()` finally，那里只做了 `saveConfig + restoreTerminal`。实测每次异常退出漏 **1 个活着的 bash**（被 reparent 到 init、一直占着 pty，且**忽略 SIGTERM**、只有 SIGKILL 能收）外加一个 rc 文件。新增 `App::shutdownResources()`（幂等）并在 finally 里兜底，与 Lifecycle 路径重复调用无害。（`BUGFIXES` D7）
+
 ### 依赖
 
 - 新增 `league/commonmark ^2.10`（Markdown 解析，只走 AST 遍历，不用其 HTML 渲染器）。
@@ -48,6 +59,12 @@
 - 新增 `tests/plugin_enabled_unit.php`（headless：缺省启用 / `enabled` 不注入插件 / 禁用后状态栏段·tick·命令·菜单·面板·事件全部不参与 / 切换落盘且只改 `enabled` / 配置文件 + Ctrl+S 同路径 / 侧栏与浮层 Space）与 `tests/pty_plugin_toggle.php`（真实 pty：会话内标注由「已启用」翻为「已禁用」、重启后该插件根本未加载、再按 Space 段立刻回来、40×10 极小视口不崩）。
 - 新增 `tests/ai_edge_unit.php`（headless：Markdown 块级嵌套内容不丢 + 既有排版零回归 / ESC·OSC·TAB·C0 进不了 span / 极窄 W=2…16 行宽上界 / 超长 4000 字符围栏的拼接不变量）与 `tests/pty_ai_inject.php`（真实 pty：mock 回复带 OSC 52 与 TAB，断言累计字节流里无带 ESC 的 OSC 载荷、无任何裸 TAB，而正文标记仍在）。两者都做过**强制失败注入**验证（停用 `sanitizeContent()` / 反转断言后 exit 非 0）。
 - 新增探针 `tests/probe_ai_edge.php`（不进跑批）：Markdown 块级丢失 / 控制字符透传 / 极窄宽度行宽的取证样本。
+- 新增 `tests/provider_caps_unit.php`（headless：能力解析全形状含旧写法兼容 / 端到端断言「只有声明 tools 的模型请求才带 tools」/ 状态栏标记与面板能力行的正反对照）与 `tests/pty_provider_caps.php`（真实 pty：临时替换 `config/providers.php` 后断言状态栏「无工具」标记出现，换回原配置后必须消失）。两者都做过强制失败注入验证。`examples/sse_server.php` 新增 `MOCK_ECHO_TOOLS=1`（回复 `[tools=1|0]` 回报请求体是否携带 tools）。
+- **测试隔离修复（两轮，共 51 个测试 + 1 个新 helper）**：
+  1. **配置目录不再落在 `/tmp` 根**：`tempnam()` / `sys_get_temp_dir().'/x.json'` 当 `VICECODE_CONFIG` 时，存档路径 `dirname(VICECODE_CONFIG)/.vicecode_ai` 会退化成 `/tmp/.vicecode_ai`——全体测试共用一份对话存档，`aiPersist` 默认开启，`App` 构造末尾的 `ChatModel::restore()` 会把**上一个测试的对话**恢复进来（「空态不是空的」、断言行号整体平移，随跑批顺序偶发）。**25 个测试**改用 `vc_isolate_config('tag')`。
+  2. **配置不再依赖开发机家目录**：25 个建了 `App` 却完全没设 `VICECODE_CONFIG` 的测试会读真实 `~/.vicerc`（布局/主题/语言）与 `~/.vicecode.plugins.json`。实测把 `~/.vicerc` 换成非默认布局 + 其它主题语言、`~/.vicecode_ai` 放一份对话后，**6 个测试挂**（`m6_unit` 主题环、`menu_dropdown` 菜单标签、`pty_git` GIT tab、`ai_hscroll` 折行宽、`sidebar_hscroll` 折叠命中列、`m1_edge` 翻页边界）——即"只在我这台机器上绿"。全部改为 `vc_isolate_config()`（同时隔离 `VICECODE_CONFIG` 与 `VICECODE_PLUGINS_CONFIG`）。
+  3. 新增 `tests/lib/isolation.php` 统一承载：`vc_isolate_config()`（独占目录 + 自动清理，pty 用例把返回路径塞进子进程 env，父子同源）、`vc_tmp_file()` / `vc_tmp_dir()`（替代裸 `tempnam()`，退出时自动删）。**41 处 `tempnam` 全部改走 helper**，`/tmp` 不再堆垃圾（含 `command_palette_unit` 与 `pty_ai_v2` 两处**从不清理**的目录——后者原来只 `rmdir` 空 `src/`，目录非空时静默失败）。
+  4. 新增断言：`pty_interactive` / `pty_session` / `pty_alt_screen` 断言"运行前后 `/tmp/vicetui_rc_*` 数量不增加"（`BUGFIXES` D6 的防回归）；`pty_crash` 新增**场景 B**（交互 shell 活着时崩溃）断言 rc 文件与 `bash --rcfile` 孤儿进程都不增加（D7 的防回归），并补了"shell 真的起来了"的正向锚点。**注入验证**：把 `dropPty()` 改回 `= null` 后前三个用例全部 FAIL（0→2 / 0→2 / 0→5）；摘掉 `bin` finally 里的 `shutdownResources()` 后场景 B 的两条断言都 FAIL（rc 0→1、孤儿 +1）。恢复后全绿。完整根因与取证见 `BUGFIXES` T2 / D6 / D7。
 
 ---
 

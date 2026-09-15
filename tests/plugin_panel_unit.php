@@ -12,6 +12,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_plugin_panel');   // 含插件配置：否则会读开发机 ~/.vicecode.plugins.json
 
 use App\App;
 use PhpTui\Term\Event\CharKeyEvent;

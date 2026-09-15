@@ -17,9 +17,13 @@ declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
 
+require __DIR__ . '/lib/isolation.php';
+
 // 隔离配置：pty 验收（pty_r5/r7/hscroll_key）退出时会写 ~/.vicerc，
 // 若不隔离，这里 new App() 会加载被污染的布局而非默认布局，导致默认值断言失准。
-putenv('VICECODE_CONFIG=' . tempnam(sys_get_temp_dir(), 'vc_r5cfg'));
+// 注意必须是**独占目录**下的配置文件——tempnam 落在 /tmp 根，dirname 就是 /tmp，
+// 会与别的测试共用 /tmp/.vicecode_ai（对话存档）与 /tmp/.vicecode_session。
+vc_isolate_config('vc_r5');
 
 use App\App;
 use PhpTui\Term\Event\MouseEvent;

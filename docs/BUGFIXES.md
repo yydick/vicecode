@@ -223,6 +223,43 @@
   D4）与 `sanitizeContent()`（保留换行的内容，本条）是两个场景的两个工具，不能互相替代；
   且「框架会帮我们丢掉控制字符」这类假设**必须用 pty 字节流证实**，读代码推断不算数。
 
+#### D6. 每开一次交互终端，`/tmp` 里就永久多一个 `vicetui_rc_*` `[本轮]`
+- **现象**：`/tmp/vicetui_rc_XXXXXXXX` 越积越多（本机一天跑批 + 手工用应用后攒了 33 个），
+  每个 190 字节，内容就是 bash `--rcfile` 用的那段集成脚本（stty + source ~/.bashrc + cwd 上报钩子）。
+- **根因**（两个叠加，缺一不可）：
+  1. `TerminalPanel::pollPty()` 在 shell 退出（Ctrl+D / `exit`）时**直接 `$this->pty = null`**，
+     丢掉实例却不调 `shutdown()` —— 而只有 `PtyProcess::shutdown()` 会 `unlink()` 那个 rc 文件。
+     用户每退一次 shell 就漏一个；`PtyProcess` 也没有 `__destruct` 兜底。
+  2. `PtyProcess::shutdown()` 开头的 `if (!is_resource($this->proc)) { … return; }` **提前返回**时
+     跳过了 rc 文件清理，于是「进程句柄已回收」这条路径也漏。
+- **修复**：`TerminalPanel` 新增 `dropPty()`（**先 `shutdown()` 再置空**），
+  `pollPty()` / `startPty()` 失败分支 / `restoreSession()` 失败分支 / `shutdown()` 四处统一走它；
+  `PtyProcess::shutdown()` 抽出 `cleanupRcFile()`，早退分支**也**调用（幂等）。
+- **防回归**：`tests/pty_interactive.php` `pty_persist.php` `pty_session.php` `pty_alt_screen.php`
+  （断言"运行前后 `/tmp/vicetui_rc_*` 数量不变"）。**反向验证**：不调 `dropPty()`（改回 `= null`）时
+  四个测试各至少新增 1 个残留文件（其中 `pty_alt_screen` +3）。
+- **注**：这条**不会**留下孤儿 shell —— 因为它的触发场景是「shell 自己先退出了」（Ctrl+D / `exit`），
+  漏的只是文件。**「shell 还活着时退出」是另一条路径，会漏一个活着的孤儿 shell**，见 D7。
+  不要把这两条混成一件事：D6 的位置是**正常退出**链路，D7 的位置是**异常退出**链路。
+
+#### D7. 交互 shell 还活着时异常退出 → 留下**活着的孤儿 shell** + rc 临时文件 `[本轮]`
+- **现象**：开着交互终端（shell 活着）时应用异常退出，那个 bash 会**继续活着**（实测每次运行漏 1 个，
+  `Ps` 状态、被 reparent 到 init、一直占着 pty），同时 `/tmp/vicetui_rc_*` 也留下。
+  **它扛得住 SIGTERM**（交互式 bash 忽略 SIGTERM），只有 SIGKILL 能收掉 —— 所以这些孤儿会一直堆着。
+- **根因**：子进程回收只挂在 `Lifecycle::quit()` 的关闭闭包上（`chat/search/terminal->shutdown()`），
+  而**只有正常退出（Ctrl+Q 等）会经过它**。`bin/vicecode.php` 的 `start()` 里那个 finally
+  只做了 `saveConfig()` + `restoreTerminal()`（那是当年修「崩溃后终端废掉」时加的，同样出于
+  「所有退出路径都要覆盖」的考虑，却漏了资源回收）→ 未捕获异常等路径上没人杀 pty 子进程。
+  ⚠️ 曾以为「pty 主端关闭时内核会发 SIGHUP 兜底」——**实测不成立**，bash 照活。
+- **修复**：`App::shutdownResources()`（**幂等**，`$resourcesDown` 闸住：正常路径由 Lifecycle 调、
+  异常路径由 finally 调，只真正回收一次），并把 `bin/vicecode.php` 的 finally 改成
+  `saveConfig()` → `shutdownResources()` → `restoreTerminal()`。
+- **防回归**：`tests/pty_crash.php` 新增场景 B —— 注入的 `throw` 不在启动时抛，而是**等 F2 把 shell
+  起起来之后**（以「`/tmp/vicetui_rc_*` 出现」为 shell 起没起的判据）再抛，然后断言
+  「rc 文件数不增加」+「`bash --rcfile` 进程数不增加」。**反向验证**：摘掉 finally 里的
+  `shutdownResources()` 后两条断言都 FAIL（rc 0→1、孤儿进程 +1）。
+  该用例同时补了正向锚点「shell 真的起来了」，否则阴性断言是空转。
+
 ---
 
 ### E. 交互回归
@@ -341,6 +378,34 @@
 - **为何长期没发现**：全量跑批一直显示"全绿"，没人会怀疑某个测试**根本没能力失败**。
 - **如何防扩散**：已做「强制失败注入」校验 —— 按每个测试各自的失败变量名（`$failed` / `$ok` / `$totalFailed` / `$hasClock`）注入必失败值，确认退出码非 0。**新增测试后应复跑此校验。**
 
+#### T2. 51 个测试的配置不隔离：串档 + 依赖开发机家目录 `[本轮]`
+- **现象一（串档）**：测试用 `tempnam(sys_get_temp_dir(), …)` 或 `sys_get_temp_dir().'/x.json'` 当
+  `VICECODE_CONFIG`。存档路径是 `dirname(VICECODE_CONFIG)/.vicecode_ai`，而这两种写法的 `dirname()`
+  都落在 `/tmp` 根 → 全体测试**共用 `/tmp/.vicecode_ai`**。`aiPersist` 默认开启、`App` 构造末尾会
+  `ChatModel::restore()`，于是后跑的测试**恢复了前一个测试的对话**（「空态不是空的」、断言行号整体
+  平移），且随跑批顺序偶发。**25 个测试**中招。
+- **现象二（依赖开发机家目录）**：另有一批测试建了 `App` 却**完全不设** `VICECODE_CONFIG`，
+  `ConfigStore` 回落到真实 `~/.vicerc`，插件配置回落到 `~/.vicecode.plugins.json`。
+  **测定手法**：不动真实 home，用 `HOME=<毒化目录>` 跑对照组（毒化 home 放一份非默认布局+其它主题
+  语言的 `~/.vicerc` 与一份带 tool_calls 的 `~/.vicecode_ai`，另跑空 home 作 CONTROL）。
+  结果：CONTROL 25/25 全过，POISON **挂 6 个** ——
+  `m6_unit`（主题环起点）、`menu_dropdown`（菜单标签）、`pty_git`（GIT tab 全挂）、
+  `ai_hscroll`（折行宽 430≠500）、`sidebar_hscroll`（折叠命中列）、`m1_edge`（翻页边界）。
+  即这些断言**只在本机配置下成立**。本机 `~/.vicerc` 本来就是 `aiInputHeight=8`（默认 5）、
+  `sidebarWidth=30`，所以这层依赖**早就在生效**，只是差异还没大到把断言顶翻。
+- **修复**：新增 `tests/lib/isolation.php`：
+  `vc_isolate_config('tag')`（独占目录，**同时**隔离 `VICECODE_CONFIG` 与 `VICECODE_PLUGINS_CONFIG`，
+  shutdown 自动清理；pty 用例把返回路径塞进子进程 env，父子同源）、
+  `vc_tmp_file()` / `vc_tmp_dir()`（替代裸 `tempnam`，退出时自动删）。
+  51 个测试改用它，**41 处 `tempnam` 全部收编**。
+- **同一轮挖出的两个次生缺陷**：`pty_ai_v2` 手写的清理只 `rmdir` 空的 `src/`（目录非空 → 静默失败，
+  目录连同存档永久留下）；`command_palette_unit` 的 `/tmp/vc_palette_<pid>` 压根没有清理。
+- **探针纪律**：`glob("$dir/*")` **不匹配点号开头的文件**，头一版清理器因此一个文件都没删掉、
+  `rmdir` 静默失败，跑批后 `/tmp` 留了 15 个残留目录 —— **清理/遍历这类"看不到报错"的收尾动作，
+  必须跑完用 `ls` 实地确认**。
+- **防回归**：毒化 HOME 复跑 POISON **归零**（天然的"反向可失败"证据）；跑批后
+  `/tmp` 零残留、无 `/tmp/.vicerc`/`.vicecode_ai`/`.vicecode_session`/`.vicecode.plugins.json`。
+
 ## 四、已知 vendor 补丁
 
 ### `php-tui/term` — `EventParser::advance()` 空行冲刷
@@ -382,7 +447,7 @@
 | 插件 | `plugin_unit` `pty_plugin` |
 | 剪贴板 / 选择 | `clipboard_unit` `selection_unit` |
 | 语言包 | `i18n_parity` |
-| 崩溃与还原 | `pty_crash` |
+| 崩溃与还原 | `pty_crash`（含**场景 B**：交互 shell 活着时崩溃 → 终端还原 + 资源回收 + 无孤儿进程） |
 | 极小视口 | `m1_edge`（已含退化尺寸至 1×1） |
 
 > `tests/` 下带 `probe` 字样的文件是**探索性探针，不是测试**，不参与验收（`run_tests.sh` 会跳过）：

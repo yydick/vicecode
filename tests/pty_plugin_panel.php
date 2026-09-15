@@ -18,6 +18,7 @@ declare(strict_types=1);
 chdir(__DIR__ . '/..');
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 
 // ── 测试插件：声明 2 个面板，内容渲染产出 ASCII 标记 ──────
 $base = sys_get_temp_dir() . '/vc_ppanel_' . getmypid();
@@ -236,7 +237,7 @@ $env = array_merge(getenv(), [
     'LINES' => (string) H,
     'TERM' => 'xterm-256color',
     'VICECODE_PLUGINS_DIR' => $base,
-    'VICECODE_CONFIG' => tempnam(sys_get_temp_dir(), 'vc_ppcfg'),
+    'VICECODE_CONFIG' => vc_isolate_config('vc_ppanel_pty'),   // 独占配置目录，勿用 tempnam（dirname 会是 /tmp）
 ]);
 
 echo "== 真实 pty：命令面板(F1) → host → 打开插件面板浮层 ==\n";

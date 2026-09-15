@@ -16,6 +16,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_plugin_v11');   // 含插件配置：否则会读开发机 ~/.vicecode.plugins.json
 
 use App\App;
 use App\Plugin\StatusSegment;
@@ -295,7 +297,7 @@ check(in_array('focus.changed', DemoPlugin::$events, true), 'Tab 键切换焦点
 
 $app3 = new App();
 DemoPlugin::$events = [];
-$tmp = tempnam(sys_get_temp_dir(), 'vc_v11f');
+$tmp = vc_tmp_file('vc_v11f');
 file_put_contents($tmp, "hello\n");
 $app3->openFile($tmp);
 check(in_array('file.opened', DemoPlugin::$events, true), 'openFile 发出 file.opened');

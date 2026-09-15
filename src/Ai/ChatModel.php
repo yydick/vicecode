@@ -336,8 +336,11 @@ final class ChatModel
         $this->finishReason = null;
         $this->messages[] = ['role' => 'assistant', 'content' => ''];
 
-        // 历史 + 本次，整段发出去就是多轮上下文；Agent 模式带只读工具定义
-        $cmd = $this->provider->buildCommand($spec, $this->messages, OpenAiCompatProvider::DEFAULT_TIMEOUT, AiTools::toolDefs());
+        // 历史 + 本次，整段发出去就是多轮上下文。
+        // 工具定义只在「当前模型声明了 tools 能力」时才带上（见 config/providers.php 的能力说明）：
+        // 纯推理类模型拿到 tools 常被服务商整轮拒掉，宁可不发。
+        $tools = $spec->supportsTools() ? AiTools::toolDefs() : null;
+        $cmd = $this->provider->buildCommand($spec, $this->messages, OpenAiCompatProvider::DEFAULT_TIMEOUT, $tools);
         if (!$this->runner->start($cmd, null)) {
             $this->streaming = false;
             $this->error = $this->shell->t('ai.error', ['msg' => 'spawn failed']);

@@ -20,7 +20,10 @@ declare(strict_types=1);
  * 运行：timeout 120 php tests/pty_scroll.php
  */
 
-$cfgFile = tempnam(sys_get_temp_dir(), 'vc_scrcfg');
+require __DIR__ . '/lib/isolation.php';
+
+// 独占配置目录：tempnam 的 dirname 是 /tmp，父子进程会一起读 /tmp/.vicecode_ai（对话存档）
+$cfgFile = vc_isolate_config('vc_scroll_pty');
 file_put_contents($cfgFile, (string) json_encode(['persistSession' => false]));
 $sessionFile = dirname($cfgFile) . '/.vicecode_session';
 @unlink($sessionFile); // 确保从干净状态开始

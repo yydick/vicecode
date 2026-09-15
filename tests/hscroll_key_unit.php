@@ -12,6 +12,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_hscroll_key');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 putenv('APP_LOCALE=zh_CN');
 
 use App\App;
@@ -50,7 +52,7 @@ $vp = Area::fromDimensions(160, 50);
 // ─────────────── 1) 编辑器焦点 ───────────────
 echo "== 编辑器焦点 Shift+←/→ ==\n";
 $line0 = str_repeat('x', 200);
-$tf = tempnam(sys_get_temp_dir(), 'vc_kh');
+$tf = vc_tmp_file('vc_kh');
 file_put_contents($tf, $line0);
 $app = new App();
 $app->openFile($tf);
@@ -109,7 +111,7 @@ check($aiHScroll($app) === 0, 'AI Shift+Left：hScroll=0（钳下界）');
 
 // ─────────────── 5) 普通 ←/→ 不触发横滚 ───────────────
 echo "== 普通 ←/→ 不触发横滚 ==\n";
-$tf = tempnam(sys_get_temp_dir(), 'vc_kp');
+$tf = vc_tmp_file('vc_kp');
 file_put_contents($tf, str_repeat('z', 200));
 $app = new App();
 $app->openFile($tf);
@@ -120,7 +122,7 @@ unlink($tf);
 
 // ─────────────── 6) 菜单打开期间被模态吞掉 ───────────────
 echo "== 菜单打开期间 Shift+←/→ 被吞 ==\n";
-$tf = tempnam(sys_get_temp_dir(), 'vc_km');
+$tf = vc_tmp_file('vc_km');
 file_put_contents($tf, str_repeat('w', 200));
 $app = new App();
 $app->openFile($tf);

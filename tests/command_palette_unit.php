@@ -9,6 +9,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_palette');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 
 use App\App;
 use PhpTui\Term\Event\CharKeyEvent;
@@ -17,7 +19,7 @@ use PhpTui\Term\Event\FunctionKeyEvent;
 use PhpTui\Term\KeyCode;
 use PhpTui\Tui\Display\Area;
 
-$base = sys_get_temp_dir() . '/vc_palette_' . getmypid();
+$base = vc_tmp_dir('vc_palette');   // 自动清理：原先用 sys_get_temp_dir()+'/vc_palette_<pid>' 从不删，每次跑批留一个
 @mkdir($base . '/plugins', 0777, true);
 putenv('VICECODE_PLUGINS_DIR=' . $base);
 

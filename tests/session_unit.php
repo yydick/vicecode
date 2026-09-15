@@ -16,6 +16,7 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 
 use App\App;
 use App\Core\ConfigStore;
@@ -33,10 +34,9 @@ function check(bool $cond, string $msg): void
     }
 }
 
-// 隔离配置：默认开启持久化
-$cfg = tempnam(sys_get_temp_dir(), 'vc_sscfg');
+// 隔离配置：默认开启持久化（**独占目录**——tempnam 的 dirname 是 /tmp，会与别的测试共用存档）
+$cfg = vc_isolate_config('vc_session');
 file_put_contents($cfg, (string) json_encode(['persistSession' => true]));
-putenv('VICECODE_CONFIG=' . $cfg);
 
 echo "== 1. Vt100Emulator 导出/导入纯文本往返 ==\n";
 $emu = new Vt100Emulator(80, 24);
@@ -81,9 +81,8 @@ check($app->terminal->captured === true, 'App 构造后：进入捕获恢复态 
 check(SessionStore::load() === null, '恢复后快照已「消费」（文件清除），不会重复恢复');
 
 echo "\n== 4. 默认关闭：persistSession=false 不恢复 ==\n";
-$cfg2 = tempnam(sys_get_temp_dir(), 'vc_sscfg2');
+$cfg2 = vc_isolate_config('vc_session_off');
 file_put_contents($cfg2, (string) json_encode(['persistSession' => false]));
-putenv('VICECODE_CONFIG=' . $cfg2);
 // 在 cfg2 名下预置一份快照
 SessionStore::save(['cwd' => '/tmp/x', 'text' => 'Y', 'savedAt' => 1]);
 $app2 = new App();

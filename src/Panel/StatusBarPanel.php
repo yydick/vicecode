@@ -193,11 +193,14 @@ final class StatusBarPanel
         // 否则用户改半天发现保存不了，会以为是 bug。
         $mode = $buf === null ? '—' : ($buf->readOnly ? $t('status.readonly') : $t('status.mode_edit'));
 
-        // M5：Provider/模型。生成中带省略号（AI 面板标题只有一个点，容易忽略）
+        // M5：Provider/模型。生成中带省略号（AI 面板标题只有一个点，容易忽略）。
+        // 模型没声明 tools 能力时补一个短标记——否则用户会疑惑「为什么 Agent 工具从不触发」。
         $spec = $this->shell->chat->spec();
         $ai = $spec === null
             ? '—'
-            : $spec->label . '/' . $spec->model . ($this->shell->chat->isStreaming() ? ' …' : '');
+            : $spec->label . '/' . $spec->model
+                . ($spec->supportsTools() ? '' : '·' . $t('status.no_tools'))
+                . ($this->shell->chat->isStreaming() ? ' …' : '');
 
         // R5 拖拽分隔条时：把当前各面板尺寸显示在状态栏（高优先级，确保可见）。
         // 非拖拽时 t 为空，join() 会跳过，不占空间。

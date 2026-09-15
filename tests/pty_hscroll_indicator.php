@@ -17,8 +17,11 @@ declare(strict_types=1);
  * 运行：timeout 120 php tests/pty_hscroll_indicator.php
  */
 
+require __DIR__ . '/lib/isolation.php';
+
 $env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40', 'APP_LOCALE' => 'en']);
-$env['VICECODE_CONFIG'] = tempnam(sys_get_temp_dir(), 'vc_hicfg');
+// 独占配置目录：tempnam 的 dirname 是 /tmp，会让父子进程都去读 /tmp/.vicecode_ai（对话存档）
+$env['VICECODE_CONFIG'] = vc_isolate_config('vc_hind_pty');
 
 $readPty = static function ($stream, int $len) {
     set_error_handler(static function (int $no, string $str): bool {
@@ -77,7 +80,7 @@ function check(bool $cond, string $msg): void
 // 超宽行：200 列。120 宽终端下编辑器可见宽 < 200，初始即溢出（标题含 ›）；
 // 滚到最右需 scrollLeft≈(200-可见宽)，发 60 次 Shift+→（步进 4）足以到底。
 $line = str_repeat('x', 200);
-$tf = tempnam(sys_get_temp_dir(), 'vc_hi');
+$tf = vc_tmp_file('vc_hi');
 file_put_contents($tf, $line);
 
 $SR = "\x1b[1;2C"; // Shift+Right

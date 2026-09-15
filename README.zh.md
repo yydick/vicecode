@@ -166,6 +166,8 @@ TUI_USE_SWOOLE=0 php bin/vicecode.php   # 强制回退到纯 php-tui/term 阻塞
 
 右侧 AI 面板已接入工作台：OpenAI 与 DeepSeek 兼容端点（配置在 `config/providers.php`，key 走环境变量），经 `curl` 子进程流式输出，UI 全程不阻塞。
 
+- **模型能力声明**：`config/providers.php` 里按模型声明能力（`tools` 函数调用 / `reasoning` 推理 / `vision` 识图 / `audio` 语音；也接受自定义名字），provider 级可给默认值，**不写则默认支持 `tools`**（老配置零迁移）。当前**只有 `tools` 影响行为**：只有声明了它的模型，请求里才会带 OpenAI `tools` 协议——纯推理模型（`deepseek-reasoner` 已预声明为 `['reasoning']`）因此不会因为带工具被服务商拒掉整轮请求。当前模型的能力显示在 AI 面板空态提示里，缺少 `tools` 时状态栏 AI 段会带「无工具」标记。
+
 - **代码上下文**：输入框里用 `@项目内路径` 引用文件——发送前自动展开成带语法高亮的围栏代码块（路径经项目根校验：`../`、绝对路径、出根 symlink、二进制一律拒绝；单文件上限 `ai.attachMaxBytes` 默认 64KB，超限截断并标注）；菜单「AI → 附加编辑器选区 / 附加当前文件」同样注入上下文。
 - **只读工具（Agent loop）**：模型可在项目内调用 `list_files` / `read_file`。调用在本地同步执行，循环持续到模型作答或达到 `ai.maxSteps`（默认 8）轮。消息流里可见调用行（`→ name(args)`）与单行结果摘要（`⚙ name(path) ✓`）——文件内容**不会**倾倒进对话。点击复制 tool 行得到的是摘要。设 `ai.toolAutoRun: false` 改为逐次确认（`y` 放行 / `n` 拒绝，`Esc` 取消）。
 - **上下文压缩**：估算 token 超过 `ai.compactThreshold`（默认 24000）时自动把旧历史压缩成摘要（保留最近 `ai.compactKeepRecent` 默认 6 条）再发真实请求；压缩绝不拆散 tool_call/结果对，失败则降级为不压缩、历史一条不丢。菜单「AI → 立即压缩对话历史」手动触发。

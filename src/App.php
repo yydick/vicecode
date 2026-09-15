@@ -118,6 +118,13 @@ class App
     /** 未保存确认状态机：null=无；['kind'=>'quit'|'close','path'=>?string] */
     public ?array $confirm = null;
 
+    /**
+     * 资源是否已回收（`shutdownResources()` 的幂等闸）。
+     * 正常退出由 `Lifecycle` 的关闭闭包调用，异常退出由 `bin/vicecode.php` 的 `finally` 兜底，
+     * 两条路径都可能到，必须只真正回收一次。
+     */
+    private bool $resourcesDown = false;
+
     /** 编辑器面板（行号 + 高亮 + 光标 + 多 Buffer 标签） */
     public EditorPanel $editor;
 
@@ -268,9 +275,7 @@ class App
         $this->panelHost = new PluginPanelHost($this);
         $this->clip = new Clipboard();        // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function (): void {
-            $this->chat->shutdown();
-            $this->search->shutdown();
-            $this->terminal->shutdown();
+            $this->shutdownResources();
         });
         // 退出时若开启持久化，shutdown 闭包会经 terminal->saveSession() 存盘；
         // 这里在构造末尾尝试恢复上次的 pty 会话（开启且存在快照时）。
@@ -871,6 +876,28 @@ class App
     public function requestQuit(): void
     {
         $this->lifecycle->requestQuit();
+    }
+
+    /**
+     * 回收子进程与落盘，**幂等**，任何退出路径都可调用。
+     *
+     *  - 正常退出：`Lifecycle::quit()` 的关闭闭包（构造时注入）调用本方法；
+     *  - 异常/其它退出：`bin/vicecode.php` 的 `start()` finally 调用本方法兜底。
+     *
+     * 为什么必须两条路都挂：只靠 Lifecycle 的话，一旦走到没经过它的退出路径（未捕获异常
+     * 最常见），pty/shell 子进程就没人收——只能等内核在 pty 主端关闭时发 SIGHUP 兜底
+     * （那是运气，不是我们的代码），且 bash `--rcfile` 的临时文件也不会被删。
+     * 收尾内容：停 AI 流、停搜索、停终端（存会话 + 杀 pty + 删 rc 文件）。
+     */
+    public function shutdownResources(): void
+    {
+        if ($this->resourcesDown) {
+            return;
+        }
+        $this->resourcesDown = true;
+        $this->chat->shutdown();
+        $this->search->shutdown();
+        $this->terminal->shutdown();
     }
 
     /** 请求关闭某个 buffer（dirty 时先弹确认；编辑器 Ctrl+W 走这里） */

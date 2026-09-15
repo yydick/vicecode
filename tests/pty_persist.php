@@ -15,7 +15,10 @@ declare(strict_types=1);
  * 运行：timeout 90 php tests/pty_persist.php
  */
 
-$cfgFile = tempnam(sys_get_temp_dir(), 'vc_pscfg');
+require __DIR__ . '/lib/isolation.php';
+
+// 独占配置目录：tempnam 的 dirname 是 /tmp，父子进程会一起读 /tmp/.vicecode_ai（对话存档）
+$cfgFile = vc_isolate_config('vc_persist_pty');
 $env = array_merge(getenv(), [
     'COLUMNS' => '120',
     'LINES' => '40',

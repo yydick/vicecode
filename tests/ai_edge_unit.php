@@ -28,8 +28,10 @@ use PhpTui\Tui\Display\Buffer as TuiBuffer;
 use PhpTui\Tui\Extension\Core\CoreExtension;
 use PhpTui\Tui\Widget\WidgetRenderer\AggregateWidgetRenderer;
 
+require __DIR__ . '/lib/isolation.php';
+
 putenv('APP_LOCALE=zh_CN');
-putenv('VICECODE_CONFIG=' . tempnam(sys_get_temp_dir(), 'vc_aiedge'));
+vc_isolate_config('vc_ai_edge');   // 独占配置目录：见 lib/isolation.php 顶部说明
 
 $failed = false;
 function check(bool $cond, string $msg): void

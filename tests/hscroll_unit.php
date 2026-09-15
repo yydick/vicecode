@@ -13,6 +13,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_hscroll');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 putenv('APP_LOCALE=zh_CN');
 
 use App\App;
@@ -79,7 +81,7 @@ function paint(App $app, Area $vp, AggregateWidgetRenderer $r): array
 echo "== EditorPanel::onScrollH + content() ==\n";
 // 单行 201 列：col25='M'、col35='N'，其余 'x'
 $line0 = str_repeat('x', 25) . 'M' . str_repeat('x', 9) . 'N' . str_repeat('x', 166);
-$tf = tempnam(sys_get_temp_dir(), 'vc_ed');
+$tf = vc_tmp_file('vc_ed');
 file_put_contents($tf, $line0);
 $app = new App();
 $app->openFile($tf);
@@ -157,7 +159,7 @@ check($app->terminal->hScroll === 0, '终端 hScroll 下界钳到 0');
 // ─────────────── 5) App::handleMouse 分发 ───────────────
 echo "== App::handleMouse 分发 ==\n";
 $line0 = str_repeat('z', 200);
-$tf = tempnam(sys_get_temp_dir(), 'vc_hm');
+$tf = vc_tmp_file('vc_hm');
 file_put_contents($tf, $line0);
 $app = new App();
 $app->openFile($tf);
@@ -193,7 +195,7 @@ check(DisplayWidth::mbDispToCharIndex('中文abc', 100) === 5, "显示列超尾 
 
 // 点击汉字列：onClick 把显示列换算成字符索引（修 bug：点「文」不再错位成索引2）
 $lineCJK = '中文abc';
-$tc = tempnam(sys_get_temp_dir(), 'vc_cjk');
+$tc = vc_tmp_file('vc_cjk');
 file_put_contents($tc, $lineCJK);
 $appC = new App();
 $appC->openFile($tc);
@@ -205,7 +207,7 @@ unlink($tc);
 
 // End：CJK 长行按 End 后，行尾应滚动进入视口（修 bug：光标消失/行尾不显示）
 $lineEnd = str_repeat('中', 50) . 'END';
-$te = tempnam(sys_get_temp_dir(), 'vc_end');
+$te = vc_tmp_file('vc_end');
 file_put_contents($te, $lineEnd);
 $appE = new App();
 $appE->openFile($te);
@@ -219,7 +221,7 @@ check(str_contains($bE->toLines()[0], 'END'), 'CJK 长行按 End：行尾 END �
 unlink($te);
 
 // 滚轮横滚在「光标位于行首」时也持久生效（修 bug：原先每帧被 content() 拉回 0，横滚看不到效果）
-$cw = tempnam(sys_get_temp_dir(), 'vc_cw');
+$cw = vc_tmp_file('vc_cw');
 file_put_contents($cw, str_repeat('x', 200));
 $appW = new App();
 $appW->openFile($cw);
@@ -254,7 +256,7 @@ check($buf->cursorRow === 0 && $buf->cursorCol === 0, '首行行首左移不越�
 echo "== 横向滚动边界指示 ‹/› ==\n";
 // 单行 201 列宽（dispWidth=202），textW=18：scrollLeft 合法区间 [0, 184]
 $lineI = str_repeat('x', 201);
-$ti = tempnam(sys_get_temp_dir(), 'vc_hi');
+$ti = vc_tmp_file('vc_hi');
 file_put_contents($ti, $lineI);
 $appI = new App();
 $appI->openFile($ti);
@@ -275,7 +277,7 @@ check($appI->editor->hRight === false, '滚到最右：右侧指示 › 不显�
 unlink($ti);
 
 // 短行（不溢出）：左右均无指示
-$ts = tempnam(sys_get_temp_dir(), 'vc_hs');
+$ts = vc_tmp_file('vc_hs');
 file_put_contents($ts, 'short');
 $appS = new App();
 $appS->openFile($ts);
@@ -288,7 +290,7 @@ unlink($ts);
 echo "== 横滚后点击定位光标 ==\n";
 // 100 字符单行，textW=18 → 上界 82，scrollLeft=10 不会被 content() 钳回
 $lineClick = str_repeat('abcdefghij', 10);
-$t9 = tempnam(sys_get_temp_dir(), 'vc_click');
+$t9 = vc_tmp_file('vc_click');
 file_put_contents($t9, $lineClick);
 $app9 = new App();
 $app9->openFile($t9);
@@ -313,7 +315,7 @@ unlink($t9);
 
 // CJK：横滚后点汉字列同样要按「显示列 + scrollLeft」换算字符索引
 $lineCJK9 = str_repeat('中', 30) . 'END';         // 63 列
-$t9c = tempnam(sys_get_temp_dir(), 'vc_click_cjk');
+$t9c = vc_tmp_file('vc_click_cjk');
 file_put_contents($t9c, $lineCJK9);
 $app9c = new App();
 $app9c->openFile($t9c);
@@ -327,7 +329,7 @@ unlink($t9c);
 
 // ─────────────── 10) 超长行（200k）横滚 ───────────────
 echo "== 超长行（200k 字符）横滚 ==\n";
-$tBig = tempnam(sys_get_temp_dir(), 'vc_big');
+$tBig = vc_tmp_file('vc_big');
 file_put_contents($tBig, str_repeat('x', 200000) . 'TAIL');
 $appBig = new App();
 $appBig->openFile($tBig);
@@ -352,7 +354,7 @@ unlink($tBig);
 // ─────────────── 11) 极小视口 + 横滚 ───────────────
 echo "== 极小视口下横滚 ==\n";
 foreach ([[8, 3], [5, 3], [2, 2]] as [$vw, $vh]) {
-    $tf = tempnam(sys_get_temp_dir(), 'vc_tiny');
+    $tf = vc_tmp_file('vc_tiny');
     file_put_contents($tf, str_repeat('x', 300));
     try {
         $aT = new App();
@@ -437,7 +439,7 @@ foreach ([[8, 3], [5, 3], [2, 2]] as [$vw, $vh]) {
 
 // 12.4 横滚上界按「可见区最宽行」而不是光标所在行：
 // 光标停在短行时，同一屏里的长行也必须能滚过去（旧实现上界按光标行，短行上根本滚不动）
-$tMix = tempnam(sys_get_temp_dir(), 'vc_mix');
+$tMix = vc_tmp_file('vc_mix');
 file_put_contents($tMix, "short\n" . str_repeat('L', 200) . "\n");
 $appMix = new App();
 $appMix->openFile($tMix);

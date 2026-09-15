@@ -9,6 +9,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_menu');   // 同上：只 pin APP_LOCALE 不够，布局/主题仍会从真实配置漂进来
 
 // 固化 locale：本测试断言中文菜单名（文件/帮助），但 App 优先读 ~/.vicerc 的 locale，
 // 未隔离会随操作员配置漂移。APP_LOCALE 优先级高于配置文件，故此处 pin zh_CN 保证确定性。

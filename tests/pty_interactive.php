@@ -17,7 +17,13 @@ declare(strict_types=1);
  * 注意：禁止裸跑 bin/vicecode.php，一律走本脚本（外层加 timeout 兜底）。
  */
 
-$cfgFile = tempnam(sys_get_temp_dir(), 'vc_itcfg');
+require __DIR__ . '/lib/isolation.php';
+
+// 独占配置目录：tempnam 的 dirname 是 /tmp，父子进程会一起读 /tmp/.vicecode_ai（对话存档）
+$cfgFile = vc_isolate_config('vc_interactive_pty');
+// 防回归（BUGFIXES D6）：交互 pty 的 bash `--rcfile` 临时文件必须随会话收尾被删，不能留在 /tmp。
+// 基准在启动应用**之前**取；同机并发进程也可能增减，故只断言"不增加"。
+$rcBefore = count((array) glob(sys_get_temp_dir() . '/vicetui_rc_*'));
 $env = array_merge(getenv(), [
     'COLUMNS' => '120',
     'LINES' => '40',
@@ -128,6 +134,9 @@ check(!$fatal, '无 Fatal / Uncaught / Warning');
 check(str_contains($n, 'hipty42'), 'F2 进入交互后，echo 输出真的被渲染（真实 shell 在 ViceCode 内运行）');
 check(str_contains($n, 'reenterok'), 'Esc 退出捕获再 F2 重新进入后，命令仍生效');
 check(str_contains($n, '交互终端已退出'), 'Ctrl+D 退出 shell 后自动退回 runner（出现「交互终端已退出」）');
+// D6 防回归：shell 自行退出（本用例的 Ctrl+D 路径）是最容易漏 rc 文件的一条
+$rcAfter = count((array) glob(sys_get_temp_dir() . '/vicetui_rc_*'));
+check($rcAfter <= $rcBefore, sprintf('退出后 /tmp 未残留 pty rc 文件（vicetui_rc_*：%d → %d）', $rcBefore, $rcAfter));
 
 if ($failed) {
     file_put_contents(__DIR__ . '/pty_interactive_dump.log', $out);

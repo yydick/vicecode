@@ -11,6 +11,7 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 putenv('APP_LOCALE=zh_CN');
 
 use App\App;
@@ -30,24 +31,19 @@ function check(bool $cond, string $msg): void
 }
 
 // 造一个临时「项目」作为 cwd（AiTools 的 root 与侧栏树都吃 getcwd()）
-$root = (string) tempnam(sys_get_temp_dir(), 'vice_attach_');
-@unlink($root);
+$root = vc_tmp_dir('vc_attach_root');
 @mkdir($root . '/src', 0777, true);
 file_put_contents($root . '/src/Foo.php', "<?php\necho 'foo';\n");
 file_put_contents($root . '/src/Bar.php', "bar\n");
 file_put_contents($root . '/big.txt', str_repeat('X', 10000));
 file_put_contents($root . '/README.md', "# readme\n");
-$outside = (string) tempnam(sys_get_temp_dir(), 'vice_attach_out_');
+$outside = vc_tmp_file('vc_attach_out');
 file_put_contents($outside, "secret");
 @symlink($outside, $root . '/evil_link');
 
-// ⚠️ 配置必须放进独立目录：存档路径 = dirname(VICECODE_CONFIG)/.vicecode_ai，
-// 若放 /tmp 根会读到之前测试残留的对话存档（restore 是按文件所在目录找的）
-$tmpDir = sys_get_temp_dir() . '/vice_attach_' . uniqid();
-@mkdir($tmpDir, 0700, true);
-$tmpCfg = $tmpDir . '/.vicerc';
+// 配置走独占目录（存档路径 = dirname(VICECODE_CONFIG)/.vicecode_ai，与别的测试隔离）
+$tmpCfg = vc_isolate_config('vc_attach');
 file_put_contents($tmpCfg, json_encode(['ai' => ['attachMaxBytes' => 2048]]));
-putenv('VICECODE_CONFIG=' . $tmpCfg);
 
 chdir($root); // 项目根
 $vp = Area::fromDimensions(120, 40);
@@ -191,8 +187,7 @@ $appA->menuAction('ai.tool_mode');
 check($appA->chat->toolAutoRun() === !$before, '菜单 ai.tool_mode 切换 toolAutoRun');
 
 chdir(__DIR__ . '/..');
-@unlink($tmpCfg);
-@rmdir($tmpDir);
+// 临时文件/配置目录的清理由 lib/isolation.php 的 shutdown 统一负责（见该文件顶部说明）
 
 echo "\n" . ($failed ? "SOME FAILED\n" : "RESULT: PASS\n");
 exit($failed ? 1 : 0);

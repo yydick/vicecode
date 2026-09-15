@@ -12,6 +12,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_m2_smoke');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 
 // 固定界面语言为 zh_CN，使渲染断言可确定
 putenv('APP_LOCALE=zh_CN');

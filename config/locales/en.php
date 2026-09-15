@@ -31,6 +31,7 @@ return [
     'status.branch'    => 'branch',
     'status.cwd'       => 'cwd',
     'status.provider'  => 'AI',
+    'status.no_tools'  => 'no tools',
     'status.theme'     => 'Theme',
     'status.mode'      => 'Mode',
     'status.mode_edit' => 'Edit',
@@ -120,6 +121,8 @@ return [
 
     'ai.no_provider'     => 'No provider configured',
     'ai.no_key'          => 'Missing API key: set env {env}',
+    'ai.caps'            => 'Capabilities',
+    'ai.caps_none'       => 'none declared',
     'ai.streaming'       => 'Generating…',
     'ai.cancelled'       => 'Generation stopped',
     'ai.max_steps'       => 'Reached max tool-call steps ({steps}), stopping',
@@ -289,4 +292,10 @@ return [
     'panel.title'            => 'Plugin Panels',
     'panel.empty'            => '(No plugin panels)',
     'panel.close'            => 'Esc close · Tab switch',
+
+    // Model capabilities (config/providers.php `capabilities`; unknown ones shown verbatim)
+    'cap.tools'              => 'tools',
+    'cap.reasoning'          => 'reasoning',
+    'cap.vision'             => 'vision',
+    'cap.audio'              => 'audio',
 ];

@@ -13,8 +13,9 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 putenv('APP_LOCALE=zh_CN');
-putenv('VICECODE_CONFIG=' . tempnam(sys_get_temp_dir(), 'vice_md_'));
+vc_isolate_config('vc_ai_md');   // 独占配置目录：见 lib/isolation.php 顶部说明
 
 use App\Ai\MarkdownFormatter;
 use App\App;

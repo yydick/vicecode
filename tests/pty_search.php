@@ -22,6 +22,8 @@ $sentinel = $root . '/search_sentinel_zzz.php';
 file_put_contents($sentinel, "<?php\n// ZZUNIQUEMARKER_LINE\n");
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_search_pty');   // 探针 App 与子进程都别读开发机真实 ~/.vicerc / 插件配置
 use App\App;
 use PhpTui\Tui\Display\Area;
 

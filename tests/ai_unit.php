@@ -11,6 +11,7 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 putenv('APP_LOCALE=zh_CN');
 
 use App\Ai\ChatModel;
@@ -811,8 +812,8 @@ check($over === [], 'mbWrapDisp 每行宽度都不超过给定宽度（混排越
 // ── AI 输入框「输入三行」：框高 5 → 内容 3 行，长输入换行、超长向上滚出 ──
 echo "\n== AI 输入框三行渲染 ==\n";
 // 隔离配置：避开 ~/.vicerc 里残留的旧 aiInputHeight，确保走默认 5
-$tmpCfg = tempnam(sys_get_temp_dir(), 'vice_ai_');
-putenv('VICECODE_CONFIG=' . $tmpCfg);
+// （独占目录，不用 tempnam——它落在 /tmp 根，会让对话存档与别的测试串档）
+$tmpCfg = vc_isolate_config('vc_ai_unit');
 $appI = new App();
 // 框高默认 5 → 内容高 = 5 - 2 = 3；框宽取 12 → 内容宽 = 10
 $boxH = $appI->layout->aiInputHeight; // 默认 5

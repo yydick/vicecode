@@ -16,6 +16,7 @@ declare(strict_types=1);
 chdir(__DIR__ . '/..');
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 
 $failed = false;
 function check(bool $cond, string $msg): void
@@ -89,19 +90,19 @@ $waitFor = static function ($stream, array $needles, float $timeoutSec = 12.0) u
 };
 
 // ── 临时「项目」目录：应用的 cwd，@引用与工具的 root ──
-$tmpDir = sys_get_temp_dir() . '/vice_pty_v2_' . uniqid();
+// 用 vc_tmp_dir（递归清理）：原先手写的 register_shutdown_function 只 rmdir 空的 src/，
+// 而 src/ 里有 Foo.php → rmdir 静默失败 → 目录连同存档一起永久留在 /tmp。
+$tmpDir = vc_tmp_dir('vice_pty_v2');
 @mkdir($tmpDir . '/src', 0777, true);
 file_put_contents($tmpDir . '/src/Foo.php', "<?php\necho 'footoken';\n");
 file_put_contents($tmpDir . '/sample.txt', 'HELLOCONTEXT');
 // 配置与 AI 存档同目录（restore 按 dirname(VICECODE_CONFIG) 找档）
 $cfgPath = $tmpDir . '/.vicerc';
 file_put_contents($cfgPath, json_encode(['ai' => ['persist' => true]]));
-register_shutdown_function(static function () use ($tmpDir): void {
-    @unlink($tmpDir . '/.vicecode_ai');
-    @unlink($tmpDir . '/.vicerc');
-    @rmdir($tmpDir . '/src');
-    @rmdir($tmpDir);
-});
+// 插件配置也指进独占目录（走 getenv() 合并进子进程 env）：否则子进程会读开发机
+// 真实 ~/.vicecode.plugins.json，断言会随本机配置漂移。
+putenv('VICECODE_PLUGINS_CONFIG=' . $tmpDir . '/.vicecode.plugins.json');
+// 清理交给 lib/isolation.php 的 VcTemp（递归删，能处理 src/ 里的文件）
 
 // ── mock 服务端：MOCK_TOOLS=1（首轮回 tool_calls，收到 tool 结果后回文本）──
 $port = 18961;

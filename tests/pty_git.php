@@ -24,6 +24,11 @@ register_shutdown_function(static function () use ($fixture): void {
     @unlink($fixture);
 });
 
+// 隔离配置（须在构造 $env 之前，子进程 env 走 getenv() 合并）：
+// 否则测试进程的探针 App 与子进程都会读开发机真实 ~/.vicerc（语言/布局）与 ~/.vicecode.plugins.json。
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_git_pty');
+
 $env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40']);
 
 function normalize(string $raw): string

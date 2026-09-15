@@ -13,6 +13,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_m1_smoke');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 
 // 固定界面语言为 zh_CN，使渲染断言可确定（运行 app 时可用 APP_LOCALE=en 切换英文）
 putenv('APP_LOCALE=zh_CN');
@@ -76,7 +78,7 @@ $b->moveLeft();
 $b->delete();
 check($b->lines[0] === 'hix', 'moveLeft+delete 删除光标前字符');
 // 保存落盘
-$tmp = tempnam(sys_get_temp_dir(), 'm1buf');
+$tmp = vc_tmp_file('m1buf');
 file_put_contents($tmp, ''); // 确保可写
 $b2 = Buffer::empty('t2');
 $b2->path = $tmp;
@@ -89,7 +91,7 @@ unlink($tmp);
 
 // ───────────────────────── 3) 目录树 ─────────────────────────
 echo "== 目录树 ==\n";
-$dir = sys_get_temp_dir() . '/m1tree_' . uniqid();
+$dir = vc_tmp_dir('m1tree');
 mkdir($dir . '/sub', 0777, true);
 file_put_contents($dir . '/a.txt', 'AAA');
 file_put_contents($dir . '/sub/b.txt', 'BBB');
@@ -198,7 +200,7 @@ $app2->handle(CodedKeyEvent::new(KeyCode::Left, 0), $vp);
 check($app2->buffer->cursorCol === 0, 'Home+Left 不越界（cursorCol=0）');
 
 // 超大文件保护
-$big = tempnam(sys_get_temp_dir(), 'm1big');
+$big = vc_tmp_file('m1big');
 file_put_contents($big, str_repeat('x', 6_000_000));
 $bigBuf = Buffer::fromFile($big);
 check($bigBuf->readOnly && $bigBuf->noticeKey === 'editor.too_large', '超大文件 readOnly + 提示 key');
@@ -236,7 +238,7 @@ check($hasKw, '高亮输出含黄色关键字 Span');
 check(Highlighter::highlightLines(['plain'], null) === null, 'highlightLines(null) = null');
 
 // 真实打开 .php 文件渲染不崩，且含内容
-$phpFile = tempnam(sys_get_temp_dir(), 'm1hl') . '.php';
+$phpFile = vc_tmp_file('m1hl', '.php');
 file_put_contents($phpFile, implode("\n", $phpSrc));
 $appHl = new App();
 $appHl->openFile($phpFile);
@@ -251,8 +253,8 @@ unlink($phpFile);
 // ───────────────────────── 6) 多 Buffer 标签（R7） ─────────────────────────
 echo "== 多 Buffer 标签（R7） ==\n";
 $appR7 = new App();
-$fA = tempnam(sys_get_temp_dir(), 'r7a') . '.txt';
-$fB = tempnam(sys_get_temp_dir(), 'r7b') . '.txt';
+$fA = vc_tmp_file('r7a', '.txt');
+$fB = vc_tmp_file('r7b', '.txt');
 file_put_contents($fA, "A1\nA2");
 file_put_contents($fB, "B1");
 $appR7->openFile($fA);
@@ -283,7 +285,7 @@ echo "== 未保存确认（R8） ==\n";
 // 退出热键是 Ctrl+Q（Ctrl+C 与「复制」冲突，只保留「中断终端命令」语义）
 // 退出确认：dirty 时 Ctrl+Q 先弹确认，不立即退出
 $appR8 = new App();
-$fR8 = tempnam(sys_get_temp_dir(), 'r8') . '.txt';
+$fR8 = vc_tmp_file('r8', '.txt');
 file_put_contents($fR8, "orig");
 $appR8->openFile($fR8);
 $appR8->focusIndex = array_search('editor', App::PANELS);
@@ -306,7 +308,7 @@ check($appR8->quit === true, 'y → 确认退出（quit=true）');
 
 // 关闭确认：Ctrl+W 关闭 dirty buffer 弹确认；y 关闭丢弃
 $appR8b = new App();
-$fR8b = tempnam(sys_get_temp_dir(), 'r8b') . '.txt';
+$fR8b = vc_tmp_file('r8b', '.txt');
 file_put_contents($fR8b, "orig");
 $appR8b->openFile($fR8b);
 $appR8b->focusIndex = array_search('editor', App::PANELS);
@@ -323,7 +325,7 @@ check(!$appR8b->hasBuffer($fR8b), 'y → 关闭丢弃并移除 buffer');
 
 // 非 dirty 时直接退出 / 直接关闭，不弹确认
 $appR8c = new App();
-$fR8c = tempnam(sys_get_temp_dir(), 'r8c') . '.txt';
+$fR8c = vc_tmp_file('r8c', '.txt');
 file_put_contents($fR8c, "clean");
 $appR8c->openFile($fR8c);
 $appR8c->handle(CharKeyEvent::new('q', KeyModifiers::CONTROL), $vp);
@@ -331,7 +333,7 @@ check($appR8c->quit === true && $appR8c->confirm === null, '非 dirty 时 Ctrl+Q
 
 // Ctrl+C 不再是退出热键（避免与「复制」冲突）：静默忽略，不弹确认也不退出
 $appR8d = new App();
-$fR8d = tempnam(sys_get_temp_dir(), 'r8d') . '.txt';
+$fR8d = vc_tmp_file('r8d', '.txt');
 file_put_contents($fR8d, "clean");
 $appR8d->openFile($fR8d);
 $appR8d->handle(CharKeyEvent::new('c', KeyModifiers::CONTROL), $vp);
@@ -346,7 +348,7 @@ unlink($fR8d);
 // ───────────────────────── 8) 编辑器鼠标交互（R6） ─────────────────────────
 echo "== 编辑器鼠标交互（R6） ==\n";
 $appR6 = new App();
-$fR6 = tempnam(sys_get_temp_dir(), 'r6') . '.txt';
+$fR6 = vc_tmp_file('r6', '.txt');
 file_put_contents($fR6, implode("\n", array_map(static fn(int $i): string => "line $i", range(1, 50))));
 $appR6->openFile($fR6);
 $appR6->focusIndex = array_search('editor', App::PANELS);

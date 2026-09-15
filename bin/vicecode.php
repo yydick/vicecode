@@ -179,6 +179,10 @@ function start(bool $sw, array $argv): void
         startMain($app, $term, $sw);
     } finally {
         $app->saveConfig();       // R7：退出前把偏好落盘（~/.vicerc），内部容错不抛
+        // 资源回收兜底（与终端还原同理，必须覆盖**所有**退出路径）：正常退出由 Lifecycle 的
+        // 关闭闭包做，但未捕获异常等路径只走到这里——不在这里收，pty/shell 子进程就只靠内核
+        // 在 pty 主端关闭时发 SIGHUP 兜底，bash `--rcfile` 的临时文件也不会被删。幂等。
+        $app->shutdownResources();
         restoreTerminal($term);
     }
 }

@@ -214,11 +214,14 @@ final class PtyProcess
         return false;
     }
 
-    /** 强制杀掉并回收（退出应用 / 测试收尾时调用） */
+    /** 强制杀掉并回收（退出应用 / 测试收尾时调用）。幂等。 */
     public function shutdown(): void
     {
         if (!is_resource($this->proc)) {
+            // 进程句柄已经没了（例如 pollExited 结算过）也要删掉 rc 文件——
+            // 早期版本在这里直接 return，导致 shell 自行退出后 /tmp/vicetui_rc_* 永久残留。
             $this->running = false;
+            $this->cleanupRcFile();
             return;
         }
         if ($this->running) {
@@ -238,9 +241,15 @@ final class PtyProcess
         $this->proc = null;
         $this->pipes = [];
         $this->running = false;
+        $this->cleanupRcFile();
+    }
+
+    /** 删掉 bash `--rcfile` 用的临时文件（shell 启动后即可安全删除） */
+    private function cleanupRcFile(): void
+    {
         if ($this->rcFile !== null && is_file($this->rcFile)) {
             @unlink($this->rcFile);
-            $this->rcFile = null;
         }
+        $this->rcFile = null;
     }
 }

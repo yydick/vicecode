@@ -15,6 +15,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_search');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 putenv('APP_LOCALE=zh_CN');
 
 use App\App;
@@ -157,7 +159,7 @@ check($cs->matched === $max, '达 MAX_MATCHES 后停止摄入（matched 不再�
 check($cs->truncated === true, 'truncated 标记置位（界面需提示已截断）');
 
 // openHit：打开文件并把光标定位到 grep 行号（1-based → 0-based）
-$tmp = tempnam(sys_get_temp_dir(), 'vc_');
+$tmp = vc_tmp_file('vc_search_hit');
 file_put_contents($tmp, implode("\n", array_fill(0, 10, 'line')));
 $app->search->openHit($tmp, 5);
 check($app->buffer !== null && $app->buffer->path === $tmp, 'openHit 打开文件并切换当前 buffer');
@@ -262,7 +264,7 @@ check($app->message === $app->t('search.empty_query'), '空 query 回车提示�
 check($app->search->running === false, '空 query 回车未起进程');
 
 // 回车命中 → 打开文件并定位（R3 全链路：CodedKeyEvent → onKey → searchKey → triggerOrActivate → openHit）
-$tmp2 = tempnam(sys_get_temp_dir(), 'vc_');
+$tmp2 = vc_tmp_file('vc_search_hit2');
 file_put_contents($tmp2, implode("\n", array_fill(0, 8, 'row')));
 $app->search->query = 'needle';
 $app->search->editingQuery = false;       // 结果态：回车=激活当前行
