@@ -190,9 +190,18 @@ class App
     public StatusBarPanel $statusBar;
 
     /**
-     * 已加载的插件（V1：运行时动态加载，目录扫描 plugins 下各子目录的 plugin.json + 运行时 require）。
+     * **全部**已加载的插件（V1：运行时动态加载，目录扫描 plugins 下各子目录的 plugin.json + 运行时 require）。
      * 由 PluginLoader 在构造末尾填充；插件文件不在 composer autoload 内，
      * 产品版由内嵌 Zend 运行时解释（见 project_plugin.md）。
+     * 含被用户禁用（`<id>.enabled=false`）的插件——插件页/侧栏要列出它们才能再打开。
+     * @var list<\App\Plugin\PluginInterface>
+     */
+    public array $allPlugins = [];
+
+    /**
+     * **启用**的插件子集（= allPlugins 过滤掉 `<id>.enabled=false` 者）。
+     * 状态栏段、tick 周期、命令、自定义面板一律只看这一份，因此「禁用」天然意味着
+     * 不注入任何段/命令/面板，而无需在每个消费点各写一次判断。
      * @var list<\App\Plugin\PluginInterface>
      */
     public array $plugins = [];
@@ -275,40 +284,97 @@ class App
         // VICECODE_PLUGINS_DIR 可把插件根目录指到别处（测试用；仿 ConfigStore::pluginsPath()
         // 的 env 覆盖惯例）—— 这样测试能在 tmp 下造命令型插件而不污染 plugins/。
         $pluginBase = getenv('VICECODE_PLUGINS_DIR');
-        $this->plugins = PluginLoader::load(
+        $this->allPlugins = PluginLoader::load(
             (is_string($pluginBase) && $pluginBase !== '') ? $pluginBase : __DIR__ . '/..'
         );
         // 插件配置注入：VSCode 式「插件声明默认（configDefaults）+ 用户配置覆盖」。
         // 可选能力——插件若实现 configure()/configDefaults() 则注入合并后的配置，否则跳过
         // （不影响未实现它们的插件）。用户配置来自插件专用文件 ConfigStore::loadPlugins()。
+        // 注意：配置注入对**全部**插件做（含被禁用的），这样它们被重新启用时配置已经就绪。
         $userPlugins = ConfigStore::loadPlugins();
         $this->userPluginConfig = $userPlugins;
-        foreach ($this->plugins as $plugin) {
-            $defaults = method_exists($plugin, 'configDefaults')
-                ? $plugin->configDefaults()
-                : [];
-            $user = $userPlugins[$plugin->id()] ?? [];
-            if (is_array($user) && method_exists($plugin, 'configure')) {
-                $plugin->configure(array_merge($defaults, $user));
+        foreach ($this->allPlugins as $plugin) {
+            if (method_exists($plugin, 'configure')) {
+                $plugin->configure(array_merge(
+                    $this->pluginDefaults($plugin),
+                    $this->pluginUserOverrides($plugin->id())
+                ));
             }
         }
-        // 命令在**装载期**注册一次即可（不重新 require 插件，重注册只会产生 duplicate 冲突）
-        $this->registerPluginCommands();
-        // 面板同样在装载期汇聚一次（与命令同机制：冻结快照，之后每帧只读）
-        $this->collectPluginPanels();
+        // 启用集 + 注册表：命令/菜单/面板都在装载期一次性冻结（每帧只读）。
+        $this->rebuildActivePlugins();
+        $this->rebuildPluginRegistrations();
         $this->emitPluginEvent('app.ready');
+    }
+
+    /** 插件声明的默认配置；未实现 configDefaults() 返回空数组。@return array<string,mixed> */
+    private function pluginDefaults(\App\Plugin\PluginInterface $p): array
+    {
+        if (!method_exists($p, 'configDefaults')) {
+            return [];
+        }
+        $d = $p->configDefaults();
+        return is_array($d) ? $d : [];
+    }
+
+    /**
+     * 用户对某插件的配置覆盖（~/.vicecode.plugins.json 的 `<id>` 段），**剔除核心保留键 `enabled`**——
+     * 启用状态归核心管，不该混进插件自己的配置（否则 configure() 会收到一个它不认识的键，
+     * 插件页展示的"有效配置"也会多出一行噪音）。
+     * @return array<string,mixed>
+     */
+    private function pluginUserOverrides(string $id): array
+    {
+        $sec = $this->userPluginConfig[$id] ?? null;
+        if (!is_array($sec)) {
+            return [];
+        }
+        unset($sec['enabled']);
+        return $sec;
+    }
+
+    /** 该插件是否启用（缺省启用；`<id>.enabled=false` 关闭） */
+    public function pluginIsEnabled(string $id): bool
+    {
+        return ConfigStore::pluginEnabled($this->userPluginConfig, $id);
+    }
+
+    /** 由 allPlugins ∩ 启用状态重算启用的插件子集（保持装载顺序） */
+    private function rebuildActivePlugins(): void
+    {
+        $this->plugins = array_values(array_filter(
+            $this->allPlugins,
+            fn(\App\Plugin\PluginInterface $p): bool => $this->pluginIsEnabled($p->id())
+        ));
+    }
+
+    /**
+     * 重建装载期冻结的插件注册表（命令 / 快捷键 / 冲突 / 菜单快照 / 自定义面板）。
+     *
+     * 供两处调用：构造末尾一次；以及运行时启用状态变化后重算（热启用/禁用即靠这个生效）。
+     * 每次都先清空再重注册——否则禁用后旧命令仍留在菜单里，而重新启用又会被判成 duplicate。
+     * 不重新 require / new 插件实例（保住插件自身运行期状态），只针对**当前启用子集**重建。
+     */
+    private function rebuildPluginRegistrations(): void
+    {
+        $this->pluginCommands = [];
+        $this->pluginShortcuts = [];
+        $this->pluginConflicts = [];
+        $this->pluginPanels = [];
+        $this->pluginMenuSnapshot = [];
+        $this->registerPluginCommands();     // 内含 rebuildPluginMenuSnapshot()
+        $this->collectPluginPanels();
     }
 
     /**
      * 计算单个插件的「有效配置」= 默认(configDefaults) ∩ 用户 ~/.vicecode.plugins.json 覆盖。
      * 与构造期注入、reloadPluginConfig 用的是同一套合并逻辑，供 PluginsPanel / SidebarPanel 展示当前生效值。
+     * 不含核心保留键 `enabled`（启用状态另以状态标注展示）。
      * @return array<string,mixed>
      */
     public function pluginEffectiveConfig(\App\Plugin\PluginInterface $p): array
     {
-        $defaults = method_exists($p, 'configDefaults') ? $p->configDefaults() : [];
-        $user = $this->userPluginConfig[$p->id()] ?? [];
-        return is_array($user) ? array_merge($defaults, $user) : $defaults;
+        return array_merge($this->pluginDefaults($p), $this->pluginUserOverrides($p->id()));
     }
 
     /**
@@ -321,7 +387,7 @@ class App
         $path = ConfigStore::pluginsPath();
         if (!is_file($path)) {
             $data = [];
-            foreach ($this->plugins as $p) {
+            foreach ($this->allPlugins as $p) {
                 $cfg = $this->pluginEffectiveConfig($p);
                 if ($cfg !== []) {
                     $data[$p->id()] = $cfg;
@@ -334,20 +400,64 @@ class App
 
     /**
      * 重新加载插件配置（VSCode「重载窗口」的平替，但无需退出进程）。
-     * 重读专用插件配置文件（与 ~/.vicerc 分离），按「默认 ∩ 用户覆盖」重新注入每个插件。
+     * 重读专用插件配置文件（与 ~/.vicerc 分离），按「默认 ∩ 用户覆盖」重新注入每个插件，
+     * 并重算启用集与注册表——所以用户直接在配置文件里改 `"enabled": false` 再 Ctrl+S，
+     * 与在插件页按 Space 切换是**同一条生效路径**。
      */
     public function reloadPluginConfig(): void
     {
-        $userPlugins = ConfigStore::loadPlugins();
-        $this->userPluginConfig = $userPlugins;
-        foreach ($this->plugins as $plugin) {
-            $defaults = method_exists($plugin, 'configDefaults') ? $plugin->configDefaults() : [];
-            $user = $userPlugins[$plugin->id()] ?? [];
-            if (is_array($user) && method_exists($plugin, 'configure')) {
-                $plugin->configure(array_merge($defaults, $user));
+        $this->userPluginConfig = ConfigStore::loadPlugins();
+        foreach ($this->allPlugins as $plugin) {
+            if (method_exists($plugin, 'configure')) {
+                $plugin->configure(array_merge(
+                    $this->pluginDefaults($plugin),
+                    $this->pluginUserOverrides($plugin->id())
+                ));
             }
         }
+        $this->rebuildActivePlugins();
+        $this->rebuildPluginRegistrations();
         $this->emitPluginEvent('config.reloaded');
+    }
+
+    /**
+     * 启用/禁用单个插件：落盘 → 立即热生效（重算启用集与注册表），无需重启。
+     * 被禁用的插件仍留在 $allPlugins（插件页/侧栏照旧列出，可再打开），只是不再注入
+     * 状态栏段 / tick / 命令 / 自定义面板。
+     */
+    public function setPluginEnabled(string $id, bool $enabled): void
+    {
+        ConfigStore::savePluginEnabled($id, $enabled);
+        $sec = $this->userPluginConfig[$id] ?? null;
+        if (!is_array($sec)) {
+            $sec = [];
+        }
+        $sec['enabled'] = $enabled;
+        $this->userPluginConfig[$id] = $sec;
+        $this->rebuildActivePlugins();
+        $this->rebuildPluginRegistrations();
+        $this->emitPluginEvent('config.reloaded');
+    }
+
+    /** 翻转单个插件的启用状态（插件页/侧栏按 Space 的终点） */
+    public function togglePlugin(string $id): bool
+    {
+        $on = !$this->pluginIsEnabled($id);
+        $this->setPluginEnabled($id, $on);
+        // 静默切换会让用户不确定「到底生效没有」——给一条明确回执
+        $this->setMessage($this->t($on ? 'plugins.toggled_on' : 'plugins.toggled_off', ['id' => $id]));
+        return $on;
+    }
+
+    /** 按 id 找插件（含被禁用者）；找不到返回 null */
+    public function pluginById(string $id): ?\App\Plugin\PluginInterface
+    {
+        foreach ($this->allPlugins as $p) {
+            if ($p->id() === $id) {
+                return $p;
+            }
+        }
+        return null;
     }
 
     // ── V1.1：插件命令注册与执行 ──────────────────────────────
@@ -1440,6 +1550,14 @@ class App
                     $this->search->query .= $ch;
                     $this->search->editingQuery = true;
                 }
+                return;
+            }
+            // 扩展(插件) tab 交互：Space 切换选中插件的启用/禁用（无需进浮层）。
+            // 空格在 EventParser 里是普通可打印字符（CharKeyEvent(' ')），不是 Coded 键，
+            // 所以只能在这里拦。其余字符保持原有行为（落到下面，包括 'q' 退出）。
+            if ($this->focusPanel() === 'sidebar' && $this->sidebar->tabIndex === 3
+                && $event->char === ' ' && !($event->modifiers & KeyModifiers::CONTROL)) {
+                $this->sidebar->toggleSelectedPlugin();
                 return;
             }
             if (strtolower($event->char) === 'q') {

@@ -155,6 +155,37 @@ final class ConfigStore
         return is_array($legacy) ? $legacy : [];
     }
 
+    /**
+     * 插件是否启用：约定用插件自身配置对象里的保留键 `enabled`（见 docs/plugins.md 启用/禁用小节）。
+     * 缺失视为启用（老配置零迁移）；显式 false / 0 / "0" 视为禁用；其余值视为启用。
+     * @param array<string,mixed> $pluginsConfig ConfigStore::loadPlugins() 的结果
+     */
+    public static function pluginEnabled(array $pluginsConfig, string $id): bool
+    {
+        $sec = $pluginsConfig[$id] ?? null;
+        if (!is_array($sec) || !array_key_exists('enabled', $sec)) {
+            return true;
+        }
+        $v = $sec['enabled'];
+        return $v !== false && $v !== 0 && $v !== '0';
+    }
+
+    /**
+     * 持久化单个插件的启用状态：读出现有映射、只改该插件的 `enabled` 键、整份写回。
+     * 保留该插件其它配置键与其它插件的配置（绝不整份覆盖），失败静默返回 false。
+     */
+    public static function savePluginEnabled(string $id, bool $enabled): bool
+    {
+        $all = self::loadPlugins();
+        $sec = $all[$id] ?? null;
+        if (!is_array($sec)) {
+            $sec = [];
+        }
+        $sec['enabled'] = $enabled;
+        $all[$id] = $sec;
+        return self::savePlugins($all);
+    }
+
     /** 写入插件专用配置文件（整份即插件配置映射）；失败静默返回 false。 */
     public static function savePlugins(array $data): bool
     {

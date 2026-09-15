@@ -93,6 +93,9 @@ final class PluginPanelHost
         if ($tabs === []) {
             return false;
         }
+        // 面板列表会随「插件启用/禁用」在运行期变化（装载期汇聚的是快照，不是常量），
+        // 所以用前先夹一次 sel，避免指向已消失的 tab。
+        $this->sel = max(0, min(count($tabs) - 1, $this->sel));
         $panel = $tabs[$this->sel]['panel'];
         if ($panel->onChar !== null) {
             return ($panel->onChar)($e);
@@ -135,6 +138,7 @@ final class PluginPanelHost
                 return true;
             default:
                 if ($n > 0) {
+                    $this->sel = max(0, min($n - 1, $this->sel));
                     $panel = $tabs[$this->sel]['panel'];
                     if ($panel->onKey !== null) {
                         return ($panel->onKey)($e);

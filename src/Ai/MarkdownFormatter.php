@@ -120,12 +120,26 @@ final class MarkdownFormatter
 
         if ($node instanceof BlockQuote) {
             $style = $this->theme->style('mdQuote');
-            // ⚠️ BlockQuote 的子节点是**块级**（Paragraph），不是行内——要按块展开再逐行加 │
+            $pre = $this->indentText($depth) . '│ ';
+            // ⚠️ BlockQuote 的子节点是**块级**（Paragraph 之外还可能是代码块 / 嵌套列表 /
+            // 标题）。只按行内展开（renderInlines($child->children())）会让非 Paragraph 的
+            // 子节点内容**静默消失**——它们的 children() 为空（代码在 getLiteral()，列表在
+            // ListItem 里）。实测 `> ```php …` 与 `> - a\n> - b` 都整段丢失。
             foreach ($node->children() as $child) {
-                $lines = [[]];
-                $this->renderInlines($child->children(), $lines, $style);
-                foreach ($lines as $spans) {
-                    $out[] = [[$this->indentText($depth) . '│ ', $style], ...$spans];
+                if ($child instanceof Paragraph) {
+                    // 段落走行内展开，正文沿用引用色（既有语义，别改）
+                    $lines = [[]];
+                    $this->renderInlines($child->children(), $lines, $style);
+                    foreach ($lines as $spans) {
+                        $out[] = [[$pre, $style], ...$spans];
+                    }
+                    continue;
+                }
+                // 其余块级子节点：递归渲染后逐行挂引用前缀，不丢内容
+                $tmp = [];
+                $this->renderBlock($child, $tmp, $depth);
+                foreach ($tmp as $spans) {
+                    $out[] = [[$pre, $style], ...$spans];
                 }
             }
             return;
@@ -174,27 +188,32 @@ final class MarkdownFormatter
     /** @param list<list<array{0:string,1:Style}>> $out */
     private function renderListItem(ListItem $item, array &$out, int $depth, ?int $num = null): void
     {
-        $pad = $this->indentText($depth);
+        $indent = $this->indentText($depth);
         $marker = $num === null ? '• ' : ($num . '. ');
-        $lead = $pad . $marker;                             // 首行前缀
-        $cont = $pad . str_repeat(' ', mb_strwidth($marker)); // 续行与首行文字对齐
+        $lead = $indent . $marker;                             // 首行前缀
+        $cont = $indent . str_repeat(' ', mb_strwidth($marker)); // 续行与首行文字对齐
         $everLed = false;
         foreach ($item->children() as $child) {
             if ($child instanceof ListBlock) {
-                $this->renderBlock($child, $out, $depth + 1); // 嵌套列表
+                $this->renderBlock($child, $out, $depth + 1); // 嵌套列表（自带更深缩进）
                 $everLed = true;
                 continue;
             }
-            $lines = [[]];
-            $this->renderInlines($child->children(), $lines, Style::default());
-            foreach ($lines as $spans) {
-                if (!$everLed) {
-                    $out[] = [[$lead, Style::default()], ...$spans];
-                    $everLed = true;
-                } else {
-                    $out[] = [[$cont, Style::default()], ...$spans];
-                }
+            // ⚠️ 列表项的子节点也是**块级**：除 Paragraph 外还可能是代码块 / 引用 / 标题。
+            // 原实现直接 renderInlines($child->children())，对代码块（内容在 getLiteral()、
+            // children() 为空）与引用（子节点是块）会**静默丢内容**；实测
+            // `- 步骤\n\n  ```php…` 的代码块整块消失。改为统一走 renderBlock（depth=0，
+            // 缩进由本方法用 lead/cont 给），并保留「首行带标记、续行对齐」的既有排版。
+            $tmp = [];
+            $this->renderBlock($child, $tmp, 0);
+            foreach ($tmp as $spans) {
+                $out[] = [[$everLed ? $cont : $lead, Style::default()], ...$spans];
+                $everLed = true;
             }
+        }
+        if (!$everLed) {
+            // 空列表项（`- ` 之后什么都没有）：只留标记，别让它在屏幕上消失
+            $out[] = [[$lead, Style::default()]];
         }
     }
 

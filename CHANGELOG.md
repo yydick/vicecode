@@ -22,6 +22,20 @@
 - **AI 快捷动作**：菜单「AI」组（解释代码 / 加注释 / 重构建议 / 编写单元测试），进命令面板可搜；编辑器内 `Ctrl+E` 一键「解释代码」（自动附当前文件或选区、起全新对话直接发送）。
 - **配置**：`.vicerc` 新增 `ai` 段：`persist` / `toolAutoRun` / `maxSteps` / `compactThreshold` / `compactKeepRecent` / `attachMaxBytes`。
 
+### 新增（插件启用 / 禁用开关）
+
+- **插件开关**：约定写在 `~/.vicecode.plugins.json` 的 `<id>.enabled`（**核心保留键**，不注入插件的 `configure()`、不进「有效配置」展示；缺省即启用，老配置零迁移）。入口两处等价：侧栏「扩展」tab 与「已安装插件」浮层里选中插件后按 `Space` 切换。
+- **立即热生效**：切换当场重算「启用的插件子集」并重建命令 / 菜单 / 自定义面板注册表（**不重新实例化插件**，插件自身运行期状态保留），无需重启；直接改配置文件再 `Ctrl+S` 是**同一条生效路径**（重读配置 → 重算启用集 → 重建注册表）。
+- **被禁用 = 整条链路退出**：不注入状态栏段（`statusSegments()` 不再被调用）、不参与 tick、命令从菜单与命令面板消失且快捷键解绑、自定义面板从浮层消失、不再接收生命周期事件；但仍列在插件页/侧栏并标注 `[已禁用]`（可再打开，否则禁用后无从恢复）。切换后状态栏给出明确回执。
+- 文案新增 `plugins.disabled` / `plugins.toggled_on` / `plugins.toggled_off`，并更新 `plugins.hint`（中英两包同步）。
+
+### 修复（AI 面板边界深挖）
+
+- **Markdown 块级子节点内容整段丢失**：列表项 / 引用块内的子节点除段落外还可能是围栏代码块、嵌套列表、引用、标题——它们的 `children()` 为空（代码在 `getLiteral()`），原实现一律按行内展开 → 内容**静默消失**（`- 步骤` 下缩进的代码块、`> - a` 的列表整段不见，无任何报错）。改为「段落走行内展开（保留引用正文色），其余块级子节点递归 `renderBlock()` 后逐行挂前缀」；列表标记/续行对齐语义与空列表项标记一并保住。（`BUGFIXES` B11）
+- **不可信内容原样写进终端（终端转义注入）**：模型回复与 `@文件`/工具读到的文件内容里的 `ESC ] 52 ; c ; … BEL` 会被逐字写进终端 → 可**改写系统剪贴板**（`ESC [ 2 J` 之类可清屏）；TAB 则因终端按 8 列制表位展开、`dispWidth()` 只按 1 列计，导致该行内容错位散行。新增 `DisplayWidth::sanitizeContent()`（TAB 展开为 4 空格 + 剔除**除换行外**的 C0/`\x7F`），在消息正文、工具调用参数、工具摘要、错误行与 AI 输入框（粘贴内容）入口统一净化；Markdown 在解析前净化（保留换行，块结构不受影响）。（`BUGFIXES` D5）
+- **极窄面板下前缀把首行撑宽**：W 小于前缀宽（`You: ` / `AI: `）时首行 = 前缀 + 至少 1 列正文，远超面板宽 → 触发 php-tui 的 `LineTruncator` 折行，把后续行整体挤下去（幽灵行）。前缀改为按 `min(前缀宽, max(0, W-2))` 夹紧（给正文留 2 列，2 列宽字素也放得下）。（`BUGFIXES` B12）
+- **Markdown 折行把前缀劈成两半**：前缀曾被当作折行流的第一个 span 交给 `spanWrapDisp`，缩进宽 > W/2 时会被从中间切开（实测 W=6 渲染成「`AI`」「`:`」两行）。统一为「前缀/缩进不进折行流」，与纯文本路径同语义。（B13）
+
 ### 依赖
 
 - 新增 `league/commonmark ^2.10`（Markdown 解析，只走 AST 遍历，不用其 HTML 渲染器）。
@@ -31,6 +45,9 @@
 - 新增 headless：`tests/ai_tools_unit.php`（路径安全 / Agent loop 端到端 / maxSteps / approve-deny / 流内渲染）、`tests/ai_md_unit.php`（Markdown 元素 / spanWrapDisp 拼接不变量 / 缓存命中）、`tests/ai_store_unit.php`（存取往返 / 0600 / Ctrl+L 清档 / persist=false）、`tests/ai_attach_unit.php`（@展开与拒绝 / 选区与当前文件附加 / 快捷动作与菜单）、`tests/ai_compact_unit.php`（自动触发 / 失败降级 / tool 对不拆散 / 手动压缩）。
 - 新增 pty：`tests/pty_ai_v2.php`（三轮真实会话：@展开与两轮工具 / 重启恢复 / y 确认放行）。
 - `tests/ai_unit.php` 的 SseParser 断言升级为结构化事件形状（V2 唯一破坏性 API 变更）；`tests/plugin_v11_unit.php` 菜单组索引断言随 AI 组插入顺延。
+- 新增 `tests/plugin_enabled_unit.php`（headless：缺省启用 / `enabled` 不注入插件 / 禁用后状态栏段·tick·命令·菜单·面板·事件全部不参与 / 切换落盘且只改 `enabled` / 配置文件 + Ctrl+S 同路径 / 侧栏与浮层 Space）与 `tests/pty_plugin_toggle.php`（真实 pty：会话内标注由「已启用」翻为「已禁用」、重启后该插件根本未加载、再按 Space 段立刻回来、40×10 极小视口不崩）。
+- 新增 `tests/ai_edge_unit.php`（headless：Markdown 块级嵌套内容不丢 + 既有排版零回归 / ESC·OSC·TAB·C0 进不了 span / 极窄 W=2…16 行宽上界 / 超长 4000 字符围栏的拼接不变量）与 `tests/pty_ai_inject.php`（真实 pty：mock 回复带 OSC 52 与 TAB，断言累计字节流里无带 ESC 的 OSC 载荷、无任何裸 TAB，而正文标记仍在）。两者都做过**强制失败注入**验证（停用 `sanitizeContent()` / 反转断言后 exit 非 0）。
+- 新增探针 `tests/probe_ai_edge.php`（不进跑批）：Markdown 块级丢失 / 控制字符透传 / 极窄宽度行宽的取证样本。
 
 ---
 

@@ -114,6 +114,32 @@ final class DisplayWidth
         return (string) preg_replace('/[\x00-\x1F\x7F]/', '', $s);
     }
 
+    /**
+     * 内容净化（外部/模型内容进终端前的必过关卡）：制表符展开为空格 + 剔除控制字符。
+     *
+     * 与 stripControl() 的区别（两个都不能少）：
+     *  - **保留换行**：Markdown 与代码块的排版靠 `\n`，stripControl 会把 `\n`(0x0A) 一并删掉；
+     *  - **制表符先展开再清洗**：终端按 8 列制表位解释 TAB，而 dispWidth() 只按 1 列计，
+     *    两边不一致会让该行错位、越过面板边界（同一个「宽度必须与 php-tui 同源」的教训）；
+     *  - `\r` 一并剔除，CRLF 自然退化成 LF。
+     *
+     * 为什么必须有：AI 回复内容与 `@文件`/工具读到的文件内容都是**不可信输入**。若原样进入
+     * span 文本，php-tui 会逐字写进终端——`\x1b]52;c;…\x07` 能直接改写系统剪贴板、
+     * `\x1b[2J` 能清屏，属于终端转义注入（与 BUGFIXES D4 对状态栏外部值同一类问题）。
+     */
+    public static function sanitizeContent(string $s, int $tabWidth = 4): string
+    {
+        if ($s === '') {
+            return '';
+        }
+        if (str_contains($s, "\t")) {
+            $s = str_replace("\t", str_repeat(' ', max(1, $tabWidth)), $s);
+        }
+        // 走字节级替换（不加 /u）：非法 UTF-8 输入也不会让 preg 返回 null。
+        // 保留 \x0A(\n)，剔除其余 C0 控制符与 \x7F。
+        return (string) preg_replace('/[\x00-\x09\x0B-\x1F\x7F]/', '', $s);
+    }
+
     /** 按显示列宽右侧补空格对齐 */
     public static function mbPadDisp(string $s, int $disp): string
     {
@@ -177,7 +203,10 @@ final class DisplayWidth
      * （放不下就整体挪到下一行，否则行宽会超出 1 列，又触发上面的折行）。
      * 空段保留为一个空行，否则连续换行会被吃掉。
      *
-     * @return string[] 每行 dispWidth() 都 <= $width（$width<=0 时返回 ['']）
+     * @return string[] 每行 dispWidth() 都 <= $width；唯一例外是 $width < 单个字素宽度
+     *                  （如 $width=1 遇 2 列宽汉字/emoji）——字素不可劈开、也不该丢字符，
+     *                  此时该行必然超宽 1 列。调用方应保证可用宽度 >= 2。
+     *                  $width<=0 时返回 ['']
      */
     public static function mbWrapDisp(string $s, int $width): array
     {
@@ -216,6 +245,7 @@ final class DisplayWidth
      *  - 一个 span 跨行被切时，续行首 span 沿用原样式（粗体/代码色跨行不丢）；
      *  - **拼接不变量**：所有输出行的 span 文件拼接 == 所有输入 span 文本拼接。
      *    这条与 mbWrapDisp 的验收纪律同源（B9 的教训：折行宽度错位靠拼回原文才能抓出）。
+     *  - 每行宽度 <= $width；例外同 mbWrapDisp（$width < 单个字素宽度时该行必然超宽 1 列）。
      *
      * @param list<array{0:string,1:mixed}> $spans
      * @return list<list<array{0:string,1:mixed}>>

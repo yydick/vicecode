@@ -8,6 +8,7 @@ use App\Explorer\FileTree;
 use App\Explorer\TreeNode;
 use App\Git\GitClient;
 use App\Git\GitModel;
+use App\Plugin\PluginInterface;
 use App\Search\SearchRow;
 use App\Text\DisplayWidth;
 use PhpTui\Term\Event\CodedKeyEvent;
@@ -259,11 +260,11 @@ final class SidebarPanel
                 }
             }
         } else {
-            foreach ($this->shell->plugins as $p) {
+            foreach ($this->shell->allPlugins as $p) {
                 $cfg = $this->shell->pluginEffectiveConfig($p);
                 $cfgStr = $cfg === [] ? $this->shell->t('plugins.no_config')
                     : implode(' ', array_map(static fn($k, $v): string => $k . '=' . $v, array_keys($cfg), $cfg));
-                $text = '» ' . $p->id() . ' [' . $this->shell->t('plugins.enabled') . '] ' . $cfgStr;
+                $text = '» ' . $p->id() . ' [' . $this->pluginStatusLabel($p) . '] ' . $cfgStr;
                 if ($w($text) > $max) {
                     $max = $w($text);
                 }
@@ -633,7 +634,7 @@ final class SidebarPanel
                 $this->movePluginSelection(1);
                 return true;
             case KeyCode::Enter:
-                $plugins = $this->shell->plugins;
+                $plugins = $this->shell->allPlugins;
                 if (isset($plugins[$this->pluginSel])) {
                     $this->shell->pluginsPanel->open();
                 }
@@ -643,11 +644,14 @@ final class SidebarPanel
         }
     }
 
-    /** 扩展(插件) tab 内容：列出已加载插件及其有效配置；Enter/点击打开配置浮层。 */
+    /**
+     * 扩展(插件) tab 内容：列出**全部**已加载插件（含被禁用者，否则禁用后无从恢复）、
+     * 其启用状态与有效配置；↑/↓ 选择，Space 切换启用/禁用，Enter/点击打开配置浮层。
+     */
     private function pluginsContent(Area $sidebar, array &$lines): void
     {
         $innerW = max(0, $sidebar->width - 2);
-        $plugins = $this->shell->plugins;
+        $plugins = $this->shell->allPlugins;
         if ($plugins === []) {
             $lines[] = Line::fromSpans(Span::styled(
                 $this->shell->t('plugins.no_plugins'),
@@ -678,10 +682,13 @@ final class SidebarPanel
             $tickStr = $tick !== null ? "tick={$tick}s" : 'tick=none';
             $sel = $i === $this->pluginSel;
             $marker = $sel ? '» ' : '  ';
-            $text = $marker . $p->id() . '  [' . $this->shell->t('plugins.enabled') . ' · ' . $tickStr . ']  ' . $cfgStr;
+            $text = $marker . $p->id() . '  [' . $this->pluginStatusLabel($p) . ' · ' . $tickStr . ']  ' . $cfgStr;
+            // 选中反显优先；禁用项以弱化样式区分（状态字样同时保留，不靠颜色单独承载语义）
             $style = $sel
                 ? Style::default()->addModifier(Modifier::REVERSED)
-                : Style::default();
+                : ($this->shell->pluginIsEnabled($p->id())
+                    ? Style::default()
+                    : $this->shell->theme->style('dim'));
             $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW), $style));
             $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
         }
@@ -911,7 +918,7 @@ final class SidebarPanel
         if ($this->tabIndex === 3) {
             if ($pos->y >= $sb->position->y + 3) {
                 $idx = ($pos->y - ($sb->position->y + 3)) + $this->pluginOffset;
-                $plugins = $this->shell->plugins;
+                $plugins = $this->shell->allPlugins;
                 if (isset($plugins[$idx])) {
                     $this->pluginSel = $idx;
                     $this->shell->pluginsPanel->open();
@@ -1157,12 +1164,38 @@ final class SidebarPanel
     /** 扩展(插件) tab 列表选择移动（钳到合法范围；无插件时不越界） */
     private function movePluginSelection(int $delta): void
     {
-        $n = count($this->shell->plugins);
+        $n = count($this->shell->allPlugins);
         if ($n === 0) {
             $this->pluginSel = 0;
             return;
         }
         $this->pluginSel = max(0, min($n - 1, $this->pluginSel + $delta));
+    }
+
+    /** 扩展(插件) tab 当前选中插件的 id（无插件返回 null） */
+    public function selectedPluginId(): ?string
+    {
+        $p = $this->shell->allPlugins[$this->pluginSel] ?? null;
+        return $p?->id();
+    }
+
+    /** 扩展(插件) tab 按 Space 的终点：翻转当前选中插件的启用状态 */
+    public function toggleSelectedPlugin(): bool
+    {
+        $id = $this->selectedPluginId();
+        if ($id === null) {
+            return false;
+        }
+        $this->shell->togglePlugin($id);
+        return true;
+    }
+
+    /** 插件启用状态文案（启用/禁用）——UI 与 hScroll 宽度计算共用同一份，避免两处漂移 */
+    private function pluginStatusLabel(PluginInterface $p): string
+    {
+        return $this->shell->pluginIsEnabled($p->id())
+            ? $this->shell->t('plugins.enabled')
+            : $this->shell->t('plugins.disabled');
     }
 
     // ── 内部 ────────────────────────────────────────

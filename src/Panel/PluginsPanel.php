@@ -36,6 +36,17 @@ final class PluginsPanel
 
     private int $scroll = 0;
 
+    /** 选中的插件下标（↑/↓ 移动；Space 切换其启用状态） */
+    private int $sel = 0;
+
+    /**
+     * contentLines() 每次重建时记录的「每个插件条目占据的行区间」。
+     * 条目高度可变（有无配置/命令/冲突提示），无法用固定行高换算，故渲染时顺手记账，
+     * 供 widget() 把选中项滚进可视区。
+     * @var list<array{start:int,end:int}> start/end 均为 0-based 闭区间
+     */
+    private array $entryRanges = [];
+
     private int $panelW = 70;
 
     private int $panelH = 20;
@@ -53,6 +64,7 @@ final class PluginsPanel
     {
         $this->open = true;
         $this->scroll = 0;
+        $this->sel = 0;
     }
 
     public function close(): void
@@ -61,7 +73,11 @@ final class PluginsPanel
         $this->scroll = 0;
     }
 
-    /** 打开期间消费按键（Esc/q 关闭，上下/翻页滚动，Enter 在 ViceCode 编辑器内打开配置）。返回 true 表示已消费。 */
+    /**
+     * 打开期间消费按键：Esc/q 关闭，↑/↓ 移动选中插件，PgUp/PgDn/Home/End 滚动，
+     * Space 切换选中插件的启用/禁用，Enter 在 ViceCode 编辑器内打开配置。
+     * 返回 true 表示已消费。
+     */
     public function onKey(CodedKeyEvent $e, int $viewH): bool
     {
         switch ($e->code) {
@@ -69,15 +85,15 @@ final class PluginsPanel
                 $this->close();
                 return true;
             case KeyCode::Enter:
-                // 在 ViceCode 自己的编辑器里打开 ~/.vicerc 编辑（而非外部编辑器）
+                // 在 ViceCode 自己的编辑器里打开插件专用配置文件编辑（而非外部编辑器）
                 $this->shell->openPluginConfig();
                 $this->close();
                 return true;
             case KeyCode::Up:
-                $this->scrollBy(-1);
+                $this->moveSelection(-1);
                 return true;
             case KeyCode::Down:
-                $this->scrollBy(1);
+                $this->moveSelection(1);
                 return true;
             case KeyCode::PageUp:
                 $this->scrollBy(-max(1, $viewH - 1));
@@ -101,13 +117,74 @@ final class PluginsPanel
             $this->close();
             return true;
         }
+        if ($e->char === ' ') {
+            // 切换选中插件的启用状态（立即热生效）
+            $this->toggleSelected();
+            return true;
+        }
         if ($e->char === "\r" || $e->char === "\n") {
-            // Enter 的字符形态：在 ViceCode 编辑器内打开 ~/.vicerc 编辑
+            // Enter 的字符形态：在 ViceCode 编辑器内打开插件专用配置文件编辑
             $this->shell->openPluginConfig();
             $this->close();
             return true;
         }
         return false;
+    }
+
+    /** 浮层当前选中的插件 id（列表为空返回 null） */
+    public function selectedPluginId(): ?string
+    {
+        $p = $this->shell->allPlugins[$this->sel] ?? null;
+        return $p?->id();
+    }
+
+    /** 选中的插件是否已启用（无选中返回 false，仅作展示用） */
+    public function selectedPluginEnabled(): bool
+    {
+        $id = $this->selectedPluginId();
+        return $id !== null && $this->shell->pluginIsEnabled($id);
+    }
+
+    /** ↑/↓：在插件条目间移动选中（并保证其滚入可视区；不能越界） */
+    public function moveSelection(int $delta): void
+    {
+        $n = count($this->shell->allPlugins);
+        if ($n === 0) {
+            $this->sel = 0;
+            return;
+        }
+        $this->sel = max(0, min($n - 1, $this->sel + $delta));
+        $this->scrollSelectionIntoView();
+    }
+
+    /** Space：翻转选中插件的启用状态 */
+    public function toggleSelected(): void
+    {
+        $id = $this->selectedPluginId();
+        if ($id !== null) {
+            $this->shell->togglePlugin($id);
+        }
+    }
+
+    /**
+     * 把选中条目滚进可视区。依赖 contentLines() 记账的 entryRanges（未构建时什么都不做）。
+     * $innerH/$total 缺省按「最近一次渲染的内高」估算——已经足够，因为下一次 widget()
+     * 会用精确值再夹一次，不会出现漂移累积。
+     */
+    private function scrollSelectionIntoView(?int $innerH = null, ?int $total = null): void
+    {
+        $range = $this->entryRanges[$this->sel] ?? null;
+        if ($range === null) {
+            return;
+        }
+        $innerH ??= max(1, $this->panelH - 2);
+        $total ??= count($this->contentLines());
+        if ($range['start'] < $this->scroll) {
+            $this->scroll = $range['start'];
+        } elseif ($range['end'] >= $this->scroll + $innerH) {
+            $this->scroll = $range['end'] - $innerH + 1;
+        }
+        $this->scroll = max(0, min($this->scroll, max(0, $total - $innerH)));
     }
 
     public function viewHeightFor(int $vpW, int $vpH): int
@@ -127,41 +204,49 @@ final class PluginsPanel
         return $this->shell->pluginEffectiveConfig($p);
     }
 
-    /** @return string[] 浮层全部内容行（未裁剪、未滚动） */
+    /** @return string[] 浮层全部内容行（未裁剪、未滚动）；同时记录每个插件条目的行区间 */
     public function contentLines(): array
     {
         $t = fn(string $k): string => $this->shell->t($k);
         $lines = [];
+        $this->entryRanges = [];
         $lines[] = $t('plugins.title');
         $lines[] = '';
-        $plugins = $this->shell->plugins;
+        // 列出**全部**已加载插件（含被禁用者）：禁用后仍需能从这里再打开
+        $plugins = $this->shell->allPlugins;
         if ($plugins === []) {
-            $lines[] = '(none)';
+            $lines[] = $t('plugins.no_plugins');
             $lines[] = '';
         }
-        foreach ($plugins as $p) {
+        $this->sel = count($plugins) === 0 ? 0 : max(0, min($this->sel, count($plugins) - 1));
+        foreach ($plugins as $i => $p) {
+            $start = count($lines);
             $id = $p->id();
+            $on = $this->shell->pluginIsEnabled($id);
             $config = $this->effectiveConfig($p);
             $cfgStr = $config === []
                 ? $t('plugins.no_config')
                 : implode('  ', array_map(static fn($k, $v): string => $k . '=' . $v, array_keys($config), $config));
             $tick = method_exists($p, 'tickInterval') ? $p->tickInterval() : null;
             $tickStr = $tick !== null ? "tick={$tick}s" : 'tick=none';
-            $lines[] = '• ' . $id . '  [' . $t('plugins.enabled') . ' · ' . $tickStr . ']';
-            $lines[] = '   ' . $cfgStr;
+            $marker = $i === $this->sel ? '» ' : '  ';
+            $status = $on ? $t('plugins.enabled') : $t('plugins.disabled');
+            $lines[] = $marker . '• ' . $id . '  [' . $status . ' · ' . $tickStr . ']';
+            $lines[] = '     ' . $cfgStr;
             // V1.1：命令清单（快捷键只列绑定成功的，避免菜单/页面承诺一个按了没反应的组合）
             $cmds = $this->shell->pluginCommandsOf($id);
             if ($cmds !== []) {
-                $lines[] = '   ' . $t('plugins.commands') . ' (' . count($cmds) . '):';
+                $lines[] = '     ' . $t('plugins.commands') . ' (' . count($cmds) . '):';
                 foreach ($cmds as $local => $c) {
                     $sc = $this->shell->pluginShortcutOf($id . '.' . $local);
-                    $lines[] = '     ⌘ ' . $c->title . ($sc !== null ? '  (' . $sc . ')' : '');
+                    $lines[] = '       ⌘ ' . $c->title . ($sc !== null ? '  (' . $sc . ')' : '');
                 }
             }
             // 冲突必须可见：静默忽略一个快捷键，用户会以为插件坏了
             foreach ($this->shell->pluginConflictsOf($id) as $info) {
-                $lines[] = '     ⚠ ' . $this->conflictText($info);
+                $lines[] = '       ⚠ ' . $this->conflictText($info);
             }
+            $this->entryRanges[$i] = ['start' => $start, 'end' => count($lines) - 1];
             $lines[] = '';
         }
         $lines[] = $t('plugins.config_path') . ': ' . ConfigStore::pluginsPath();
@@ -203,17 +288,21 @@ final class PluginsPanel
         if ($vpW < 8 || $vpH < 5) {
             return ParagraphWidget::fromString('');
         }
+        $all = $this->contentLines();          // 一次构建：内部记好 entryRanges，供选中项滚动定位
+        $total = count($all);
         $longest = 0;
-        foreach ($this->contentLines() as $l) {
+        foreach ($all as $l) {
             $longest = max($longest, DisplayWidth::dispWidth($l));
         }
         $this->panelW = max(3, min($vpW - 2, $longest + 4));
-        $this->panelH = max(3, min($vpH - 2, $this->contentLineCount() + 2));
+        $this->panelH = max(3, min($vpH - 2, $total + 2));
 
         $innerW = max(0, $this->panelW - 2);
         $innerH = max(0, $this->panelH - 2);
-        $this->scroll = max(0, min($this->scroll, max(0, $this->contentLineCount() - $innerH)));
-        $slice = array_slice($this->contentLines(), $this->scroll, $innerH);
+        $this->scroll = max(0, min($this->scroll, max(0, $total - $innerH)));
+        // 让选中条目保持在可视区内（↑/↓ 移动后自动跟随；面板变矮时也拉回来）
+        $this->scrollSelectionIntoView($innerH, $total);
+        $slice = array_slice($all, $this->scroll, $innerH);
 
         $lines = [];
         foreach ($slice as $text) {

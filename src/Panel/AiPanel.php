@@ -160,7 +160,8 @@ final class AiPanel
         $cursor = '▌';
 
         // 首行带提示符 '> '，整段按显示列宽软换行（mbWrapDisp 已处理输入里的既有 \n）
-        $wrapped = DisplayWidth::mbWrapDisp('> ' . $this->input, $W);
+        // 净化：粘贴进来的内容同样可能带 ESC/TAB（终端转义注入与制表符错位，同消息流）
+        $wrapped = DisplayWidth::mbWrapDisp(DisplayWidth::sanitizeContent('> ' . $this->input), $W);
         if ($wrapped === []) {
             $wrapped = [''];
         }
@@ -415,7 +416,14 @@ final class AiPanel
      */
     private function pushTextRows(array &$rows, string $prefix, Style $style, string $text, int $W, int $msgIdx, \App\Core\Theme $theme): void
     {
-        $indW = mb_strwidth($prefix);
+        // 模型回复 / @文件 / 工具读到的文件内容都是不可信输入：先展开 TAB、剔除控制字符
+        // （终端转义注入面 + TAB 会按 8 列制表位展开导致错位，见 DisplayWidth::sanitizeContent）
+        $text = DisplayWidth::sanitizeContent($text);
+        // ⚠️ 前缀不能吃掉整行：极窄面板下（W < 前缀宽）原先会产出「前缀 + 正文」远超 W 的行，
+        // php-tui 的 LineTruncator 超宽会**折行**，把后面所有行挤下去（幽灵行）。
+        // 这里给正文留至少 2 列（2 列宽的字素也放得下），前缀按需截断。
+        $indW = min(mb_strwidth($prefix), max(0, $W - 2));
+        $prefix = DisplayWidth::mbCutDisp($prefix, $indW);
         $indent = str_repeat(' ', $indW);
         $bodyW = max(1, $W - $indW);
         // ⚠️ 正文要按「扣除缩进后的宽度」折行：续行会再加上 $indent，
@@ -441,25 +449,31 @@ final class AiPanel
 
     /**
      * Markdown 消息入列：逻辑行（MarkdownFormatter 产出）→ 前缀/缩进 + span 感知软换行。
-     * 首物理行带前缀；同消息的其余行（含换行产生的续行）一律 4 列缩进对齐——
+     * 首物理行带前缀；同消息的其余行（含换行产生的续行）一律同宽缩进对齐——
      * 「拼回去等于原文」的拼接不变量在 ai_hscroll 里钉死，别动这里的结构。
+     * 前缀宽度会按面板宽夹紧（极窄视口下截断，见函数内注释）。
      * @param list<array{0:list<array{0:string,1:Style}>,1:int}> $rows
      */
     private function pushMarkdownRows(array &$rows, string $prefix, Style $pStyle, string $markdown, int $W, int $msgIdx, \App\Core\Theme $theme): void
     {
-        $logical = $this->markdownLines($markdown, $theme);
-        $indW = mb_strwidth($prefix);
+        // 同 pushTextRows：Markdown 也可能来自模型或 @文件（不可信输入），先净化。
+        // 保留 \n（块结构靠它），只展开 TAB 并剔除其它控制字符；缓存键基于净化后的文本。
+        $logical = $this->markdownLines(DisplayWidth::sanitizeContent($markdown), $theme);
+        // 前缀同样不能吃掉整行（理由见 pushTextRows）
+        $indW = min(mb_strwidth($prefix), max(0, $W - 2));
+        $prefix = DisplayWidth::mbCutDisp($prefix, $indW);
         $indent = str_repeat(' ', $indW);
         $flowW = max(1, $W - $indW);
         $first = true;
         foreach ($logical as $spans) {
-            $flow = $first ? [[$prefix, $pStyle], ...$spans] : $spans;
-            foreach (DisplayWidth::spanWrapDisp($flow, $flowW) as $k => $phys) {
-                if ($first && $k === 0) {
-                    $rows[] = [$phys, $msgIdx]; // 首行已含前缀 span
-                } else {
-                    $rows[] = [[[$indent, Style::default()], ...$phys], $msgIdx];
-                }
+            // ⚠️ 前缀/缩进**不进折行流**（与 pushTextRows 同款）：若把前缀拼进 flow 再交给
+            // spanWrapDisp，当前缀宽于流宽（极窄面板：indW > flowW）时它会被**从中间劈开**
+            // （实测 W=6 时渲染成「AI」「:」两行），且首行能放的内容反而更少。
+            // 放在流外则每行宽度恒为 indW + 内容(≤ flowW) ≤ W，前缀也永远完整。
+            foreach (DisplayWidth::spanWrapDisp($spans, $flowW) as $k => $phys) {
+                $isLead = $first && $k === 0;
+                $pre = $isLead ? [$prefix, $pStyle] : [$indent, Style::default()];
+                $rows[] = [[$pre, ...$phys], $msgIdx];
             }
             $first = false;
         }
