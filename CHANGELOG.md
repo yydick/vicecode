@@ -12,6 +12,15 @@
 
 > 本轮主题：**AI V2** —— 把 AI 从「孤岛聊天框」接进工作台：代码上下文、只读工具 Agent loop、上下文压缩、对话持久化与 Markdown 渲染。
 
+### 新增（折扣时段 + 成本档自动切档）
+
+- **服务商折扣时段**：provider 级可写 `off_peak` 声明闲时窗口（`days` 三字母缩写或 `*`、`from`/`to` 用 `HH:MM`、`tz` 用 `±HH:MM` 偏移；`from > to` = 跨天、`from === to` = 全天；`days` 指**窗口开始那天**）。解析与判定是纯函数 `App\Ai\OffPeak`（坏条目只丢自己），因此能用**固定时刻**直接单测，无需 sleep 到某个钟点。
+- **成本档 `cost`**：provider 级整数，越小越便宜。折扣时段内**有多个候选时取 `cost` 最小的一档**；未声明 `cost` 的排在所有已声明者之后（未知 ≠ 免费）。
+- **模型策略 `auto_offpeak`**：策略可写 `'auto_offpeak' => false` 退出闲时降档（如"计划档"不该被便宜档顶掉）；默认 `true`，老配置零迁移。
+- **优先级**：任务类型（快捷动作 / `/前缀`）**优先**，它没命中时才轮到时段兜底；命中却被拒绝（如 `requires` 不满足）时**不再改道**——那是用户显式指定的路。人工选档（`Ctrl+R` / 菜单 / 手切 provider/model）会钉住，时段规则完全不介入。
+- **折扣结束不主动回切**：没有"该回哪一档"的确定答案（"之前那档"需记忆且热重载后可能失效），把方向盘交回用户。为此状态栏的「·折扣」标记按**当前时刻实时计算**，折扣一结束就消失（不记忆历史，避免说谎）；菜单 AI 组里此刻打折的档位也带标记，一眼看出该切哪一档。
+- **配置示例**已补进内置 `config/providers.php` 注释与用户级配置模板（`ConfigStore::providersTemplate()`）。内置文件里**不替服务商断言折扣**，只给注释掉的写法示例。新增文案 `status.strategy_offpeak` / `ai.strategy_offpeak_applied` / `ai.strategy_offpeak_item` / `ai.strategy_offpeak_all_day`（中英两包同步）。
+
 ### 新增（AI V2）
 
 - **代码上下文**：AI 输入框支持 `@文件` 引用（发送前展开为围栏代码块，路径经 realpath + 项目根前缀校验，`../` / 绝对路径 / symlink 出根 / 二进制一律拒绝；单文件上限 `ai.attachMaxBytes` 默认 64KB，超限截断标注）；菜单「AI → 附加编辑器选区 / 附加当前文件」；引用缺失时状态栏提示且不阻断发送。
@@ -46,6 +55,13 @@
 
 - **每开一次交互终端，`/tmp` 里就永久多一个 `vicetui_rc_*`**：bash 的 `--rcfile` 集成脚本用临时文件承载，而 `TerminalPanel::pollPty()` 在 shell 退出（Ctrl+D / `exit`）时直接 `$this->pty = null` 丢掉实例、不调 `shutdown()`；`PtyProcess::shutdown()` 开头的「进程句柄已回收就 `return`」也**提前跳过**了文件清理。两条路径叠加 → 一次 shell 会话漏一个文件，应用退出也不会回收（本机实测攒了 33 个）。新增 `TerminalPanel::dropPty()`（先 `shutdown()` 再置空）并在四处丢弃点统一调用；`PtyProcess` 把 rc 文件清理抽成 `cleanupRcFile()`，早退分支也调用。（`BUGFIXES` D6）
 - **交互 shell 还活着时异常退出 → 留下活着的孤儿 shell**：子进程回收原先只挂在 `Lifecycle::quit()` 的关闭闭包上，而只有正常退出会经过它；未捕获异常等路径走到 `bin/vicecode.php` 的 `start()` finally，那里只做了 `saveConfig + restoreTerminal`。实测每次异常退出漏 **1 个活着的 bash**（被 reparent 到 init、一直占着 pty，且**忽略 SIGTERM**、只有 SIGKILL 能收）外加一个 rc 文件。新增 `App::shutdownResources()`（幂等）并在 finally 里兜底，与 Lifecycle 路径重复调用无害。（`BUGFIXES` D7）
+
+### 修复（启动入口 / 异常退出）
+
+- **非 tty 的 stdin → 启动即 `PHP Fatal error` + exit 255**：`vicecode </dev/null`（或把 stdin 重定向 / 管道）时，php-tui 的 raw mode 初始化（靠 `stty -g` 探测）必然失败并抛异常，而 `bin/vicecode.php` 顶层的 `catch (Throwable)` 挂在 `Swoole\Coroutine\run()` **外面** —— Swoole 不把协程内抛出的异常传播给调用者，于是那个 catch 形同虚设：用户看到的是一屏 PHP 堆栈、退出码 255。现在：① 加 `stream_isatty(STDIN)` 前置守卫，非 tty 直接给「需要交互式终端：stdin 不是 TTY」并以 1 退出（发生在**任何终端操作之前**，不进 alternate screen、不跑 stty）；② 把 try/catch 挪进**协程闭包内部**，异常带出后统一经 `reportFatal()` 输出一行人话 + exit 1 —— 于是**任何**启动/运行期异常都不再喷 PHP Fatal 堆栈。（`BUGFIXES` D8）
+- **异常退出时读键协程不退 → 进程挂住**：只做上面 ①② 会让异常路径挂住 —— `Coroutine\run()` 必须等容器内**所有**子协程结束才返回，而读键协程还挂在 `while (!$app->quit)` 里，异常就永远报告不出去。现在 `start()` 的 `catch` 里先置 `$app->quit = true;` 再上抛（实测崩溃场景的退出码由 **-1** 变 **1**）。（`BUGFIXES` D8）
+- **证伪一条旧候选**（不是修复，是澄清）：曾以为「终端关闭会因 stdin EOF 让主循环空转挂住」。实测**不成立** —— pty 主端关闭后，`Coroutine::waitEvent` 永远返回 false、`stream_select` 报 0、`feof`/`meta.eof` 恒 false、非阻塞 `fread` 返回空串（与 EAGAIN 不可区分）、**连阻塞 `fread` 都永久挂住** → 用户态根本感知不到，那个 `fread === '' → EOF` 分支是死代码；而**真实**终端关闭（带 controlling terminal）由内核 **SIGHUP 直接终止**进程。（`BUGFIXES` D8 末段）
+- **终端关闭（SIGHUP）→ 交互 shell 的 rc 临时文件永久残留**：rc 临时文件原先只在「正常退出 / 走 `finally`」时删（D6/D7 修的就是这两条），而终端关闭是内核发 SIGHUP 直接终止进程、`finally` 不执行 → 实测每关一次终端 `/tmp/vicetui_rc_*` **+1**。修法**不枚举退出路径**，而是让 **bash 读完 rc 就自删**（rc 最后一行 `command rm -f -- <自身路径>`）：文件寿命只剩毫秒级，之后无论进程怎么死都不可能残留（`unlink` 不影响 bash 已持有的 fd，实测 bash 照常起、命令照常跑）。⚠️ 连带影响：`rc 文件出现`不再是「shell 起来了」的可靠证据（只存活毫秒级），`tests/pty_crash.php` 场景 B 的判据已改为 `bash --rcfile` **进程数**。（`BUGFIXES` D9）
 
 ### 新增（用户级模型配置：免改仓库接入任意端点）
 
@@ -83,6 +99,9 @@
 
 ### 测试
 
+- 新增 `tests/pty_rc_cleanup.php`（真实 pty：交互 shell 启动后 rc 临时文件**已自删**；再发 SIGHUP 断言仍不残留；含三条正向锚点并自行清理孤儿 shell）。**注入验证**：注释掉自删行后两条核心断言都 FAIL（`vicetui_rc_*：0 → 1`）—— 正是用户报的现象原样复现。
+- 新增 `tests/pty_notty.php`：**非 tty 的 stdin**（`['file','/dev/null','r']` + stdout/stderr 走管道）跑 `bin/vicecode.php`，两个底座分支各 6 条断言（退出码**恰为 1** / 人话提示 / 不喷 `Fatal error`·`Uncaught`·`Stack trace` / **不进 alternate screen**）。这条路径此前**从未被覆盖**（所有跑 bin 的测试都用 `['pty']`）。三组注入验证见 `BUGFIXES` D8。
+- `tests/pty_crash.php` 断言收紧并修掉一处**假断言**（`BUGFIXES` T4）：`runInPty()` 第 3 个返回值原先恒为空串，场景 A 却拿它做判断（永假分支，一直靠 `$out` 含 `"Uncaught"` 蒙过）；现改为读 `$out` 并查 `crash injected`，两处崩溃场景都收紧为「exit **恰为 1**」+「不含 `Fatal error`/`Uncaught`」。
 - 新增 `tests/provider_user_unit.php`（用户级配置：合并四种情形 / 文件缺失 / 语法错 / 返回非数组 / 脏条目跳过 / env 覆盖路径 / `openProvidersConfig()` 生成的模板可用 / 菜单与命令面板入口 / 热重载保住 provider 与 model / 坏配置的状态栏提示）与 `tests/pty_providers.php`（真实 pty：启动即加载用户配置并显示在状态栏；在该文件上按 `Ctrl+S` 出现热重载回执；干净退出仍还原终端）。
 - 新增 `tests/lib/pty_screen.php`：**多字节感知**的屏幕重建助手（重放 CSI 定位/擦除得到最终帧，行内归一化后匹配）。差分渲染只重发变化格、同一行会被拆成多次「定位+写入」，直接对累积流做子串匹配会踩坑——本轮实测状态栏 `Model config reloaded` 在流里成了 `modelconfig` + `eloaded`。旧 pty 测试里那几份**逐字节**内联重建器只对 ASCII 成立（中文断言会静默失效），未迁移，但已在文件头注明「新测试用这份」。
 - 用户级配置纳入测试隔离：`vc_isolate_config()` 现在同时覆盖 `VICECODE_CONFIG` / `VICECODE_PLUGINS_CONFIG` / `VICECODE_PROVIDERS_CONFIG`（否则 `ProviderRegistry` 会读开发机真实的 `~/.vicecode.providers.php`）；7 个显式设 env、未走 helper 的老测试逐一手工补上。

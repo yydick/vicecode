@@ -45,6 +45,20 @@ final class ProviderRegistry
      */
     public const AUTO = 'auto';
 
+    /**
+     * provider 级字段：**成本档**（整数，越小越便宜）。
+     * 折扣时段里有多个候选时按它排序取最便宜的；**不写 = 未知**，排序时排在所有已声明者**之后**
+     * （绝不能当成 0——那会让"没标成本"变成"最便宜"，把用户甩到不知道贵不贵的档位上）。
+     */
+    public const COST_KEY = 'cost';
+
+    /**
+     * provider 级字段：**折扣时段**列表，语法与判定见 `OffPeak`。
+     * 声明在 provider 上是因为"折扣"是**服务商**的属性（同一家的多个模型共用一套闲时），
+     * 策略侧只需用 `auto_offpeak` 表达"这档愿不愿意被闲时规则选中"。
+     */
+    public const OFFPEAK_KEY = 'off_peak';
+
     /** @var array<string,array<string,mixed>> */
     private array $config;
 
@@ -143,6 +157,9 @@ final class ProviderRegistry
                 model: is_string($model) && trim($model) !== '' ? trim($model) : null,
                 requires: self::parseCaps($entry['requires'] ?? null),
                 kinds: self::parseCaps($entry['kinds'] ?? null),
+                // 默认 true：不写这个字段的老配置，行为 = "允许被折扣时段选中"。
+                // 用 array_key_exists 而非 ?? 是刻意的——要区分"没写"与"写了 false"。
+                autoOffpeak: !(array_key_exists('auto_offpeak', $entry) && $entry['auto_offpeak'] === false),
             );
         }
         return $out;
@@ -239,6 +256,38 @@ final class ProviderRegistry
     {
         $v = $this->config[$id]['label'] ?? null;
         return is_string($v) ? $v : $id;
+    }
+
+    /**
+     * 某个 provider 的**折扣时段**（规范化后的窗口列表；没配/写错 → 空列表）。
+     *
+     * 规范化交给 `OffPeak::parseWindows()`，这里只负责"从配置里哪个键取"。
+     * 不缓存解析结果——`spec()` 也是每次从 `$this->config` 现算，保持同一风格；
+     * 配置在热重载时会整个换 registry，没必要自己维护一层失效逻辑。
+     *
+     * @return array<int,array{days:?array<int,int>,from:int,to:int,tz:?string}>
+     */
+    public function offPeak(string $id): array
+    {
+        return OffPeak::parseWindows($this->config[$id][self::OFFPEAK_KEY] ?? null);
+    }
+
+    /**
+     * 某个 provider 的**成本档**（整数，越小越便宜）；未声明/写错 → null（= 未知）。
+     *
+     * 只认整数：写成 `'2'`（字符串）也接受——PHP 配置里手写错的成本比严格类型更重要，
+     * 但写成 `'cheap'` 这种就按未声明处理，不让排序拿到无意义的键。
+     */
+    public function cost(string $id): ?int
+    {
+        $v = $this->config[$id][self::COST_KEY] ?? null;
+        if (is_int($v)) {
+            return $v;
+        }
+        if (is_string($v) && preg_match('/^-?\d+$/', trim($v))) {
+            return (int) trim($v);
+        }
+        return null;
     }
 
     /**

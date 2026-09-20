@@ -30,6 +30,10 @@ final class ModelStrategy
      * @param string|null $model 目标模型；null = 用该 provider 的默认模型
      * @param string[] $requires 能力要求（需被目标模型满足，否则拒绝应用）
      * @param string[] $kinds    任务类型；请求带这些 kind 时**自动**用本档（人工钉住时不生效）
+     * @param bool $autoOffpeak 是否允许被**折扣时段**规则自动选中（默认 true）。
+     *                          与 `kinds` 的区别：kinds 是"这类任务该用我"，off_peak 是"现在便宜该用我"。
+     *                          写 false = 只靠 kinds 或人工选中，时段规则不碰这一档（例如"计划档"
+     *                          即使在闲时也不该被便宜档顶掉）。
      */
     public function __construct(
         public readonly string $name,
@@ -38,6 +42,7 @@ final class ModelStrategy
         public readonly ?string $model = null,
         public readonly array $requires = [],
         public readonly array $kinds = [],
+        public readonly bool $autoOffpeak = true,
     ) {
     }
 }

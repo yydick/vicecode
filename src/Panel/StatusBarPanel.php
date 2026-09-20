@@ -205,14 +205,17 @@ final class StatusBarPanel
         // 模型策略段：只在配了策略时显示（`@strategies`）。
         // 它必须**常显**，而且要**说清现在听谁的**：自动选档生效时带「·自动」后缀，
         // 手动钉住时不带（手动切 provider/模型会清空策略名，所以这个段不会说谎）。
+        // 折扣时段再加一个「·折扣」：它必须**实时**算——折扣一结束后缀就自己消失，
+        // 否则状态栏会一直挂着"折扣中"，比不显示更误导。
         $stLabel = $this->shell->chat->strategyLabel();
         $stAuto = !$this->shell->chat->isPinned();
+        $offPeak = $this->shell->chat->offPeakActive() ? '·' . $t('status.strategy_offpeak') : '';
         if (!$this->shell->chat->hasStrategies()) {
             $stText = '';
         } elseif ($stLabel === null) {
             $stText = $stAuto ? $t('status.strategy_auto') : '';
         } else {
-            $stText = $stLabel . ($stAuto ? '·' . $t('status.strategy_auto') : '');
+            $stText = $stLabel . ($stAuto ? '·' . $t('status.strategy_auto') : '') . $offPeak;
         }
 
         // R5 拖拽分隔条时：把当前各面板尺寸显示在状态栏（高优先级，确保可见）。

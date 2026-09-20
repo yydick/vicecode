@@ -95,6 +95,9 @@ final class ChatModel
      */
     private bool $pinned = false;
 
+    /** 时钟（折扣时段判定用）；构造可注入，默认 `new DateTimeImmutable('now')` */
+    private \Closure $now;
+
     /** 只读工具实现（list_files/read_file），root=项目根 */
     private AiTools $tools;
 
@@ -114,6 +117,7 @@ final class ChatModel
         private App $shell,
         private ?ProviderRegistry $registry = null,
         ?AiTools $tools = null,
+        ?\Closure $now = null,
     ) {
         $this->runner = new CommandRunner();
         $this->provider = new OpenAiCompatProvider();
@@ -121,6 +125,9 @@ final class ChatModel
         $this->tools = $tools ?? new AiTools();
         $this->toolAutoRun = ConfigStore::aiToolAutoRun();
         $this->maxSteps = ConfigStore::aiMaxSteps();
+        // 时钟可注入：折扣时段判定必须能在单测里固定在任意时刻（否则只能 sleep 到那个钟点）。
+        // ⚠️ 属性类型不能写 callable（PHP 属性不支持），所以存 \Closure。
+        $this->now = $now ?? static fn(): \DateTimeImmutable => new \DateTimeImmutable('now');
     }
 
     // ── 状态读取 ──────────────────────────────────────
@@ -272,42 +279,13 @@ final class ChatModel
     public function applyStrategy(string $name, bool $pin = true): bool
     {
         $st = $this->registry->strategies()[$name] ?? null;
-        if ($st === null) {
-            $this->shell->setMessage($this->shell->t('ai.strategy_unknown', ['strategy' => $name]));
+        $reject = $this->strategyRejectReason($name);
+        if ($reject !== null) {
+            $this->shell->setMessage($reject);
             return false;
         }
-        if (!$this->registry->has($st->providerId)) {
-            $this->shell->setMessage($this->shell->t('ai.strategy_no_provider', [
-                'strategy' => $st->label,
-                'provider' => $st->providerId,
-            ]));
-            return false;
-        }
+        // $reject === null 已保证 $st 与 $spec 非 null（见 strategyRejectReason）
         $spec = $this->registry->spec($st->providerId, $st->model);
-        if ($spec === null) {
-            $this->shell->setMessage($this->shell->t('ai.strategy_no_provider', [
-                'strategy' => $st->label,
-                'provider' => $st->providerId,
-            ]));
-            return false;
-        }
-        if ($st->model !== null && $spec->model !== $st->model) {
-            $this->shell->setMessage($this->shell->t('ai.strategy_no_model', [
-                'strategy' => $st->label,
-                'model'    => $st->model,
-                'provider' => $st->providerId,
-            ]));
-            return false;
-        }
-        $missing = array_values(array_filter($st->requires, static fn(string $c): bool => !$spec->supports($c)));
-        if ($missing !== []) {
-            $this->shell->setMessage($this->shell->t('ai.strategy_missing_caps', [
-                'strategy' => $st->label,
-                'caps'     => implode('/', $missing),
-                'model'    => $spec->model,
-            ]));
-            return false;
-        }
         $this->pendingApproval = null;   // 与 useProvider 同规则：换模型连带取消未裁决的确认态
         $this->providerId = $st->providerId;
         $this->model = $spec->model;
@@ -328,6 +306,51 @@ final class ChatModel
             ]));
         }
         return true;
+    }
+
+    /**
+     * 策略可用性**预判**（无副作用、不设提示）：null = 可用；否则返回该拒绝的提示文案。
+     *
+     * 抽出来是为了让"折扣时段"批量挑档时**先筛后切**——如果候选里最便宜那条是配错的，
+     * 预判能让我们直接跳过它去试下一条，而不是把一堆拒绝提示刷到状态栏上（最后一条还会
+     * 盖掉真正切档成功的那条）。四类拒绝的判定条件与文案与 `applyStrategy()` 完全一致，
+     * `applyStrategy()` 现在就是"预判 + 提交"。
+     */
+    private function strategyRejectReason(string $name): ?string
+    {
+        $st = $this->registry->strategies()[$name] ?? null;
+        if ($st === null) {
+            return $this->shell->t('ai.strategy_unknown', ['strategy' => $name]);
+        }
+        if (!$this->registry->has($st->providerId)) {
+            return $this->shell->t('ai.strategy_no_provider', [
+                'strategy' => $st->label,
+                'provider' => $st->providerId,
+            ]);
+        }
+        $spec = $this->registry->spec($st->providerId, $st->model);
+        if ($spec === null) {
+            return $this->shell->t('ai.strategy_no_provider', [
+                'strategy' => $st->label,
+                'provider' => $st->providerId,
+            ]);
+        }
+        if ($st->model !== null && $spec->model !== $st->model) {
+            return $this->shell->t('ai.strategy_no_model', [
+                'strategy' => $st->label,
+                'model'    => $st->model,
+                'provider' => $st->providerId,
+            ]);
+        }
+        $missing = array_values(array_filter($st->requires, static fn(string $c): bool => !$spec->supports($c)));
+        if ($missing !== []) {
+            return $this->shell->t('ai.strategy_missing_caps', [
+                'strategy' => $st->label,
+                'caps'     => implode('/', $missing),
+                'model'    => $spec->model,
+            ]);
+        }
+        return null;
     }
 
     /** 是否被人工钉住（自动选档暂停）；供状态栏显示"现在听谁的" */
@@ -372,7 +395,12 @@ final class ChatModel
      * 命中规则：按配置里的策略声明顺序，取第一条 `kinds` 含该 kind 的。
      * 不命中就不动（保持当前档），也不报错——"这条任务是普通的"本来就是常态。
      *
-     * @return string|null 实际路由到的策略名；null = 没路由（钉住 / 无此类型 / 没配）
+     * ⚠️ 返回值有一个**刻意的区分**：`''` = "命中了一条策略，但应用失败（已给出拒绝提示）"。
+     * 调用方（`send()`）据此决定还要不要兜底跑折扣时段规则——命中却失败说明这条路是用户
+     * **明确指定**的（如 `/plan`），此时再自动换到别的档位等于无视用户的显式意图。
+     * 只有 null（钉住 / 没带 kind / 没命中）才是"任务类型这条规则没意见"。
+     *
+     * @return string|null 实际路由到的策略名；`''` = 命中但被拒绝；null = 没路由
      */
     public function routeByKind(?string $kind): ?string
     {
@@ -381,11 +409,104 @@ final class ChatModel
         }
         foreach ($this->registry->strategies() as $st) {
             if (in_array($kind, $st->kinds, true)) {
-                return $this->applyStrategy($st->name, false) ? $st->name : null;
+                return $this->applyStrategy($st->name, false) ? $st->name : '';
             }
         }
         return null;
     }
+
+    /**
+     * 按**折扣时段**选档：此刻有 provider 在打折，就切到"打折的档里最便宜的那个"。
+     *
+     * 这是 `routeByKind()` 的**兜底**——只在它没意见（返回 null）时才轮到这里，
+     * 所以任务类型的显式意图永远赢。`pinned` 人工钉住时同样完全不介入。
+     *
+     * 为什么"降档"这件事要由**成本档**来决定，而不是配置顺序：用户配了 `cost` 就是在表达
+     * "几号档更便宜"，按它升序取第一条才符合"闲时省钱"的直觉；没写 `cost` 的一律排在
+     * 已声明者**之后**（未知不等于免费）。
+     *
+     * 打折组为空 → 什么都不做（保持当前档，不提示）。这是刻意的：平时大多数时刻都没有
+     * 折扣，若每次发消息都提示一句"没有折扣"会把状态栏刷成噪音。
+     *
+     * @return string|null 实际路由到的策略名；null = 没换（钉住 / 无折扣 / 无可用候选）
+     */
+    public function routeByOffPeak(): ?string
+    {
+        if ($this->pinned) {
+            return null;
+        }
+        $now = ($this->now)();
+        $candidates = [];                       // [cost, 声明序, name, label, providerId]
+        foreach ($this->registry->strategies() as $st) {
+            if (!$st->autoOffpeak) {
+                continue;                       // 该档明确不参与闲时降档（如"计划档"）
+            }
+            if ($this->strategyRejectReason($st->name) !== null) {
+                continue;                       // 配错的候选直接跳过，不让它把拒绝提示刷上状态栏
+            }
+            $windows = $this->registry->offPeak($st->providerId);
+            if ($windows === [] || !OffPeak::isActive($windows, $now)) {
+                continue;
+            }
+            $cost = $this->registry->cost($st->providerId);
+            $candidates[] = [$cost, $windows, $st];
+        }
+        if ($candidates === []) {
+            return null;
+        }
+        // 已声明 cost 的按升序在前，未声明的排最后；同 cost 保持配置声明顺序（稳定排序）
+        usort($candidates, static function (array $a, array $b): int {
+            if ($a[0] === null && $b[0] === null) {
+                return 0;
+            }
+            if ($a[0] === null) {
+                return 1;
+            }
+            if ($b[0] === null) {
+                return -1;
+            }
+            return $a[0] <=> $b[0];
+        });
+        foreach ($candidates as [, $windows, $st]) {
+            if ($this->applyStrategy($st->name, false)) {
+                $until = OffPeak::activeUntil($windows, $now);
+                // 折扣提示要带上"为什么切"和"到几点"——否则用户只会看到档位莫名其妙变了
+                $this->shell->setMessage($this->shell->t('ai.strategy_offpeak_applied', [
+                    'strategy' => $st->label,
+                    'provider' => $this->registry->label($st->providerId),
+                    'model'    => (string) $this->model,
+                    'until'    => $until ?? $this->shell->t('ai.strategy_offpeak_all_day'),
+                ]));
+                return $st->name;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 当前生效的档位是否正处在折扣时段（供状态栏打 `·折扣` 标记）。
+     *
+     * **实时计算**，不记忆"上次是不是打折"：折扣结束的那一刻标记必须自己消失，
+     * 否则状态栏就在说谎（用户会以为现在还是便宜价）。
+     */
+    public function offPeakActive(): bool
+    {
+        return $this->strategyName !== null && $this->strategyOffPeakActive($this->strategyName);
+    }
+
+    /**
+     * **任意一条**策略此刻是否打折（供菜单给每条策略打标；不要求它是当前档）。
+     * 策略不存在 → false。
+     */
+    public function strategyOffPeakActive(string $name): bool
+    {
+        $st = $this->registry->strategies()[$name] ?? null;
+        if ($st === null) {
+            return false;
+        }
+        return OffPeak::isActive($this->registry->offPeak($st->providerId), ($this->now)());
+    }
+
 
     /** 在已定义的策略（含「自动」档）之间循环切换（环形）。一条都没配时提示怎么配。 */
     public function cycleStrategy(): void
@@ -448,7 +569,12 @@ final class ChatModel
             $this->shell->setMessage($this->shell->t('ai.busy'));
             return;
         }
-        $this->routeByKind($kind);
+        $routed = $this->routeByKind($kind);
+        // 任务类型没意见（含"没带 kind"）时才轮到折扣时段兜底。
+        // `''` = 命中了策略但被拒绝：那是用户**显式指定**的路，不许再自动改道。
+        if ($routed === null) {
+            $this->routeByOffPeak();
+        }
         // 钉住时前缀不生效——必须说出来，否则用户以为 /plan 起作用了（静默失效最坏）。
         // 注：这条提示会被**随后出现的、更该看的**错误覆盖（如「缺少 API key」）——优先级如此是对的。
         if ($kind !== null && $this->pinned) {

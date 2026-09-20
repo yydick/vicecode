@@ -82,7 +82,10 @@ final class MenuBarPanel
      */
     public function definitions(): array
     {
-        $t = fn(string $k): string => $this->shell->t($k);
+        // ⚠️ 必须收下 `$params` 并转交：这个闭包原来只声明了 `$k`，于是 `$t('ai.strategy_item',
+        // ['label' => …])` 的第二个实参被**静默丢弃** → 菜单里策略项一直显示字面量 `策略：{label}`。
+        // PHP 对"多传的实参"不报错，所以这个 bug 需要靠"菜单文案里真的有策略名"才能发现。
+        $t = fn(string $k, array $params = []): string => $this->shell->t($k, $params);
         $defs = [
             [
                 'label' => $t('menu.file'),
@@ -153,8 +156,12 @@ final class MenuBarPanel
                         'shortcut' => '',
                     ];
                     foreach ($strategies as $name => $st) {
+                        // 此刻打折的档位直接标出来——用户"该切哪一档"的答案就在菜单里，
+                        // 不必先切过去再看状态栏。判定是实时的（见 ChatModel::offPeakActive 同源）。
+                        $tier = $this->shell->chat->strategyOffPeakActive($name);
                         $defs[$i]['items'][] = [
-                            'label'    => $t('ai.strategy_item', ['label' => $st->label]),
+                            'label'    => $t('ai.strategy_item', ['label' => $st->label])
+                                . ($tier ? ' · ' . $t('ai.strategy_offpeak_item') : ''),
                             'action'   => 'ai.strategy:' . $name,
                             'shortcut' => '',
                         ];

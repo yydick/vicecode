@@ -260,6 +260,65 @@
   `shutdownResources()` 后两条断言都 FAIL（rc 0→1、孤儿进程 +1）。
   该用例同时补了正向锚点「shell 真的起来了」，否则阴性断言是空转。
 
+#### D8. 非 tty 的 stdin → 启动即 `PHP Fatal error` + exit 255（顶层 catch 接不住协程异常） `[本轮]`
+- **现象**：`vicecode </dev/null`（或把 stdin 重定向/管道）时，进程喷一屏 PHP 堆栈并以 **255** 退出：
+  `PHP Fatal error: Uncaught RuntimeException: Could not get stty settings in …/SttyRawMode.php:33`。
+- **根因**（两层，缺一不可）：
+  1. php-tui 取 raw mode 靠 `stty -g` 探测，**非 tty 时 stty 必然失败** →
+     `vendor/php-tui/term/src/RawMode/SttyRawMode.php:33` 抛 `RuntimeException`；
+  2. `bin/vicecode.php` 顶层的 `catch (Throwable)` **挂在 `Swoole\Coroutine\run()` 外面**，
+     而 **`run()` 内部抛出的异常不会传播给调用者**（实测：外层 catch 形同虚设，异常直接变成
+     `PHP Fatal error: Uncaught`，`reportFatal` 的人话提示根本没机会跑）。
+- **修复**（三处，各管一段）：
+  1. **非 tty 前置守卫**（`start()` 之前、协程之外）：`stream_isatty(STDIN)` 为假时经 `reportFatal()`
+     给「需要交互式终端：stdin 不是 TTY」并 exit 1 —— 发生在**任何终端操作之前**（不进
+     alternate screen、不跑 stty）；
+  2. **try/catch 挪进协程闭包内部**：协程内捕获 → `$fatal` 带出 → 协程外统一 `reportFatal()`。
+     于是**任何**启动/运行期异常都是一行人话 + exit 1，而不是 PHP Fatal 堆栈；
+  3. ⚠️ 只做 2 会让进程**挂住**：`Coroutine\run()` 必须等容器内**所有**子协程结束才返回，
+     而读键协程还挂在 `while (!$app->quit)` 里 → 异常永远报告不出去。故在 `start()` 的 `catch` 里
+     补 `$app->quit = true;` 再上抛（实测 `pty_crash` 场景 B 的退出码由 **-1** 变 **1**）。
+- **防回归**：新增 `tests/pty_notty.php`（两个底座分支 × 6 条：恰为 1 退出 / 人话提示 /
+  不喷 `Fatal error`·`Uncaught`·`Stack trace` / 不进 alternate screen），并把 `tests/pty_crash.php`
+  两处断言收紧为「**恰为 1**」+「不含 Fatal/Uncaught」。
+- **反向验证**（三组注入，均实测）：① 摘掉非 tty 守卫 → 只红「说清是交互式终端」1 条
+  （其余仍绿：协程内 catch 兜住了 stty 异常，只是提示不针对该场景）；
+  ② 把 catch 换回 `run()` 外面 → 场景 A 红 3 条（实测 exit 255 + 打出 `Uncaught`）；
+  ③ 去掉异常路径的 `$app->quit = true` → 场景 B 红 2 条（实测 -1：进程挂住到被 SIGKILL）。
+- **注**：非 tty 的 stdin 在本项目里**从来没被覆盖过** —— 所有跑 `bin/vicecode.php` 的测试都用
+  `['pty']` 描述符（stdin 是 tty）。所以这条 bug 是在 pty 测试全绿的情况下长期存活的。
+- **同轮澄清的一件"不是 bug"**：`bin/vicecode.php` 读键处那个 `fread() === '' → EOF → break` 分支，
+  原是候选 ⑤「终端关闭会挂住」的修复点，**实测证伪**：pty 主端关闭后 `waitEvent` **永远返回 false**
+  （60/60 轮纯超时）、`stream_select` 报 0、`feof`/`meta.eof` 恒 false、非阻塞 `fread` 返回空串
+  （与 EAGAIN 不可区分）、**连阻塞 `fread` 都永久挂住** → 该分支实为**死代码**；
+  而**真实**终端关闭（`pty.fork()` 带 controlling terminal）内核直接 **SIGHUP 终止**进程，不会挂住。
+  （顺带实测到一条**真的**泄漏：SIGHUP 不执行 finally，交互 shell 开着时关终端会残留
+  `/tmp/vicetui_rc_*` —— 见下条 D9。）
+  - 取证探针（不参与跑批）：`tests/probe_pty_eof.php`（pty 对端消失各信号对比）、
+    `tests/probe_pty_sighup.py`（真 controlling terminal + SIGHUP；需 python3 —— PHP 没有
+    setsid/TIOCSCTTY 入口）。
+
+#### D9. 终端关闭（SIGHUP）→ 交互 shell 的 rc 临时文件永久残留 `[本轮]`
+- **现象**：开着交互终端（F2 起了 shell）时关掉终端窗口，`/tmp/vicetui_rc_*` 每关一次 **+1**
+  （实测 0 → 1）。此时**没有**孤儿 shell —— 交互 bash 与应用同进程组，被内核的 SIGHUP 一起收走。
+- **根因**：rc 临时文件只在「应用正常退出」与「走 `start()` 的 finally」时被删（D6/D7 修的正是这两条），
+  而**终端关闭是内核直接发 SIGHUP 终止进程**，`finally` 不执行 → 没人删。SIGKILL 同理。
+  这是 D6/D7 之后的**第三条退出路径：信号终止**。
+- **修复（换思路：不再枚举退出路径）**：让 **bash 读完 rc 就自删** ——
+  `PtyProcess::buildIntegrationRc()` 在 rc 的**最后一行**追加 `command rm -f -- <自身路径>`。
+  文件寿命因此只剩毫秒级，之后**任何**退出路径（正常 / 异常 / SIGHUP / SIGKILL / 掉电）都不可能残留，
+  也就不必再去补第三条、第四条路径。
+  - **为何安全**：`unlink` 只摘掉目录项，bash 此时**已持有该 fd**，仍能继续读到 EOF；且这行是最后一行，
+    执行到它时后面已无内容。实测（pty.fork + 手写 rc）：bash 照常起、提示符正常、命令正常执行。
+  - `PtyProcess::cleanupRcFile()` 保留作兜底（bash 没起来 / `proc_open` 失败时仍由应用侧删）。
+- **判据变化的连锁**：rc 文件只在毫秒级窗口内存在 → **不能再拿「rc 文件出现」当「shell 起来了」的证据**
+  （30ms 轮询会偶发看不到）。`tests/pty_crash.php` 场景 B 的 shell 启动判据已改为
+  「`bash --rcfile` **进程数**增加」；其余测试的「rc 数量不增加」断言仍然成立（而且更强）。
+- **防回归**：新增 `tests/pty_rc_cleanup.php` —— 真实 pty 起 shell → 断言 rc 已自删 →
+  发 SIGHUP → 断言仍不残留；带两条正向锚点（应用起来了 / shell 起来了 / SIGHUP 真的送到了），
+  并自行清理它制造的那条孤儿 bash（真实场景由内核一起收走，本用例只给应用发信号）。
+  **反向验证**：把自删行注释掉 → 两条核心断言都 FAIL（`vicetui_rc_*：0 → 1`），正是用户报的现象。
+
 ---
 
 ### E. 交互回归
@@ -446,6 +505,36 @@
   同一条纪律：**判"屏上有什么"一律重建最终帧**；且**段名是本地化的**（zh 下是「焦点=」而不是
   `focus`），锚点要挑与语言无关的（值里的标识符 `AI_INPUT`、或 app 标题 `ViceCode`）。
 
+#### T4. `pty_crash.php` 场景 A 的断言查了一个**恒为空串**的变量 `[本轮]`
+- **现象**（D8 修复时才暴露）：场景 A 的「异常被顶层捕获并报错」写作
+  `str_contains($err, 'crash injected') || str_contains($out, 'Uncaught')`，
+  而 `runInPty()` 的第 3 个返回值**恒为 `''`**（`return [$code, $out . $err, ''];`）
+  → 前半段永假，这条断言其实一直靠 `$out` 里含 `"Uncaught"` 才「通过」。
+- **为什么长期没暴露**：D8 之前 Swoole 分支的异常确实是 `PHP Fatal error: Uncaught …`，
+  `"Uncaught"` 稳定出现 —— 断言用**框架的报错字样**蒙对了。D8 把提示改成人话（`reportFatal`）后
+  `"Uncaught"` 不再出现，假断言立刻变红。
+- **修复**：`runInPty()` 第 3 个返回值改回 `$err` 本身；断言只读 `$out`（stdout+stderr 并集）并改查
+  `crash injected`，另加「不含 `Fatal error`/`Uncaught`」「exit **恰为 1**」两条。
+- **教训**：断言里出现**框架/上游的报错字样**（`Uncaught` / `Fatal error`）是危险信号 ——
+  它测的是「谁报的错」而不是「错误有没有被我们处理」；提示文案一改，断言就失去意义。
+  另外：**`[$a, $b, $c] = f()` 里那个从没被赋过真实值的变量，要当场追一下**（本例是返回值恒空串）。
+
+#### T5. 菜单脚本项一直显示字面量 `策略：{label}`（闭包少声明参数，PHP 静默丢弃实参）`[本轮]`
+- **现象**：配了 `@strategies` 后，菜单「AI」组里的策略项文案是 `策略：{label}`，占位符**从未被替换**。
+- **根因**：`MenuBarPanel::definitions()` 里的翻译闭包写作 `$t = fn(string $k): string => $this->shell->t($k);`
+  —— **只声明了一个参数**。PHP 对"多传的实参"**不报错也不警告**（用户态函数的额外实参只是被忽略），
+  于是 `$t('ai.strategy_item', ['label' => $st->label])` 的 `['label' => …]` 被静默丢掉，
+  `Translator::t()` 拿到的 `$params` 为空 → 原样返回含 `{label}` 的模板。
+- **为什么长期没暴露**：这条路径只有**配了 `@strategies` 的菜单文案**会走到；`strategy_unit` /
+  `kind_route_unit` 只断言菜单项的 `action`（`ai.strategy:<name>`），从不看 `label`。
+  即"断言挑了一个不会带上这个 bug 的字段"。
+- **修复**：闭包改为 `fn(string $k, array $params = []): string => $this->shell->t($k, $params);`。
+- **防回归**：`tests/route_offpeak_unit.php` 的菜单段新增两条断言——菜单项 label 里**必须有策略名**、
+  且**不得残留 `{label}`**。两条都用注入验证过可失败（把闭包参数改回去即双红）。
+- **教训**：本项目里 `$t(...)` 的写法有两种（`App::t(string, array)` 与各处只收 key 的闭包）。
+  **凡是给同一个模板传了参数，就要回头确认那个闭包收不收 `$params`** —— 这类"多传参数被吞"
+  的 bug 没有报错、没有日志，只有把**渲染结果**拿来断言才抓得到。
+
 ## 四、已知 vendor 补丁
 
 ### `php-tui/term` — `EventParser::advance()` 空行冲刷
@@ -480,14 +569,16 @@
 | Search | `search_unit` `pty_search` |
 | AI / 流式 | `ai_unit` `ai_copy_unit` `ai_hscroll`（超长消息折行 + 横滚上界） `pty_ai`（≥200 列） |
 | AI 内容渲染 / Markdown / 不可信内容 | `ai_md_unit`（Markdown 元素与 spanWrapDisp 不变量）`ai_edge_unit`（块级嵌套内容不丢 / 控制字符净化 / 极窄宽度行宽上界 / 超长围栏拼接不变量）`pty_ai_inject`（终端转义注入，mock 回复带 OSC 52 + TAB） |
-| 终端 / PTY | `interactive_term_unit` `hscroll_unit`（超长输出横滚 + 选区抓取） `selection_unit` `pty_term` `pty_interactive` `pty_session` `pty_persist` `pty_alt_screen` `pty_scroll` |
+| 模型策略 / 折扣时段降档 | `strategy_unit`（策略解析与四类拒绝）`kind_route_unit`（按任务类型自动选档 / 人工优先）`offpeak_unit`（窗口语法与判定纯函数，含跨天 × days × tz）`route_offpeak_unit`（cost 排序、候选预筛、kinds 优先、菜单与状态栏标记）`pty_strategy` `pty_offpeak`（真实请求打到哪一档，靠 mock 日志断言调用序列） |
+| 终端 / PTY | `interactive_term_unit` `hscroll_unit`（超长输出横滚 + 选区抓取） `selection_unit` `pty_term` `pty_interactive` `pty_session` `pty_persist` `pty_alt_screen` `pty_scroll` `pty_rc_cleanup`（rc 临时文件读完自删 + SIGHUP 不残留） |
 | 布局 / 拖拽 | `r5_unit` `pty_r5` |
 | 配置持久化 | `r7_unit` `pty_r7` |
 | 菜单 / 快捷键 | `menu_unit` `menu_dropdown` `m6_unit` `pty_menu` |
 | 插件 | `plugin_unit` `pty_plugin` |
 | 剪贴板 / 选择 | `clipboard_unit` `selection_unit` |
 | 语言包 | `i18n_parity` |
-| 崩溃与还原 | `pty_crash`（含**场景 B**：交互 shell 活着时崩溃 → 终端还原 + 资源回收 + 无孤儿进程） |
+| 崩溃与还原 | `pty_crash`（含**场景 B**：交互 shell 活着时崩溃 → 终端还原 + 资源回收 + 无孤儿进程；异常必须走 `reportFatal` 人话 + **恰为 1** 退出） |
+| 启动入口 / stdin 形态 | `pty_crash`（pty 正常路径 + 崩溃路径）`pty_notty`（**非 tty stdin** → 人话 + exit 1 + 不进 alternate screen）`cli_dir`（启动参数解析） |
 | 极小视口 | `m1_edge`（已含退化尺寸至 1×1） |
 
 > `tests/` 下带 `probe` 字样的文件是**探索性探针，不是测试**，不参与验收（`run_tests.sh` 会跳过）：
