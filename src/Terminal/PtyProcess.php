@@ -98,10 +98,9 @@ final class PtyProcess
         // 其它 shell（zsh/fish 等）暂不支持 cwd 捕获，退回原 exec "$0" -i 行为。
         $base = basename($shell);
         if ($base === 'bash') {
-            $rc = $this->buildIntegrationRc($rows, $cols);
             $tmp = tempnam(sys_get_temp_dir(), 'vicetui_rc_');
             if ($tmp !== false) {
-                file_put_contents($tmp, $rc);
+                file_put_contents($tmp, $this->buildIntegrationRc($rows, $cols, $tmp));
                 $this->rcFile = $tmp;
                 $argv = [$shell, '--rcfile', $tmp, '-i'];
             } else {
@@ -139,9 +138,17 @@ final class PtyProcess
 
     /**
      * 生成注入 bash 的 rcfile：先设窗口尺寸、source 用户 ~/.bashrc（保留其环境），
-     * 再 append 一个 PROMPT_COMMAND 钩子，在每轮提示符前经自定义 OSC 回显 $PWD。
+     * 再 append 一个 PROMPT_COMMAND 钩子，在每轮提示符前经自定义 OSC 回显 $PWD，
+     * **最后一行把自己删掉**（见下）。
+     *
+     * ⚠️ 自删是必需的，不是优化：这个临时文件的用处只在「bash 启动时读一次」，
+     * 但它的生命周期原先挂在 shell 进程 / 应用的 finally 上 —— 凡是不执行 finally 的退出路径
+     * （终端关闭 → SIGHUP 直接终止进程；SIGKILL）都会把它永久留在 /tmp（实测关一次终端 +1）。
+     * 由 bash 读完即删之后，文件寿命只有毫秒级，**任何**退出路径都不可能残留。
+     * 安全性：`unlink` 只摘掉目录项，bash 此时已持有该 fd，仍能继续读到 EOF —— 且这行是最后
+     * 一行，执行到它时后续已无内容可读（实测：bash 照常起、提示符正常、命令正常执行）。
      */
-    private function buildIntegrationRc(int $rows, int $cols): string
+    private function buildIntegrationRc(int $rows, int $cols, string $rcPath): string
     {
         $rc = sprintf("stty rows %d cols %d 2>/dev/null\n", $rows, $cols);
         $home = getenv('HOME');
@@ -150,6 +157,7 @@ final class PtyProcess
         }
         $rc .= '__vicetui_cwd() { printf \'\033]777;vicetui;cwd=%s\007\' "$PWD"; }' . "\n";
         $rc .= 'PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__vicetui_cwd"' . "\n";
+        $rc .= 'command rm -f -- ' . escapeshellarg($rcPath) . "\n";
         return $rc;
     }
 

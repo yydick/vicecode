@@ -102,8 +102,12 @@ function bashRcfileCount(): int
 }
 
 /**
- * 场景 B 的编排：起应用 → 焦点切到终端 → F2 进交互 pty → **等到 pty rc 文件真的出现**
- * （shell 起来的直接证据）→ 创建标记文件 + 发一个按键触发崩溃 → 收输出。
+ * 场景 B 的编排：起应用 → 焦点切到终端 → F2 进交互 pty → **等到交互 shell 真的起来**
+ * → 创建标记文件 + 发一个按键触发崩溃 → 收输出。
+ *
+ * 「shell 起来了」的判据用 `bash --rcfile` **进程数增加**，不用 rc 临时文件是否出现：
+ * 自 D9 起 rc 由 bash 读完即自删（`PtyProcess::buildIntegrationRc`），文件只在毫秒级窗口内
+ * 存在，靠 30ms 轮询去看它会偶发看不到（假阴性）。
  *
  * @return array{0:int,1:string,2:bool,3:int,4:int} [exit, 输出并集, shell 是否真的起来, rcBefore, rcAfter]
  */
@@ -111,6 +115,7 @@ function runCrashWhilePtyAlive(string $script, string $cfg, string $marker): arr
 {
     $rcGlob = sys_get_temp_dir() . '/vicetui_rc_*';
     $rcBefore = count((array) glob($rcGlob));
+    $bashBefore = bashRcfileCount();
     @unlink($marker);
 
     $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
@@ -146,8 +151,8 @@ function runCrashWhilePtyAlive(string $script, string $cfg, string $marker): arr
         } elseif ($sent === 1 && $elapsed > 1.3) {
             fwrite($pipes[0], "\x1bOQ");
             $sent = 2;
-        } elseif ($sent === 2 && count((array) glob($rcGlob)) > $rcBefore) {
-            // shell 真的起来了（rc 文件出现）→ 造崩溃：标记文件 + 一个无害按键触发 handle()
+        } elseif ($sent === 2 && bashRcfileCount() > $bashBefore) {
+            // shell 真的起来了（`bash --rcfile` 进程出现）→ 造崩溃：标记文件 + 一个无害按键触发 handle()
             $shellStarted = true;
             file_put_contents($marker, '1');
             fwrite($pipes[0], "\t");
@@ -236,7 +241,9 @@ function runInPty(string $script, array $envExtra, bool $sendQuit = false): arra
     // STDOUT/STDERR 时，$pipes[1] 一次就读到 "OUTERR"，$pipes[2] 读到 false）。
     // 所以两个管道是在抢同一份数据，先读的拿走。断言必须看两者的并集，
     // 只查 $out 会随机漏掉尾部（表现为"还原序列时有时无"）。
-    return [$code, $out . $err, ''];
+    // [2] 返回 $err 本身（此前恒返回空串 —— 场景 A 的断言查它，等于永假分支，
+    // 见下方 BUGFIXES D8/T4 的说明）。
+    return [$code, $out . $err, $err];
 }
 
 $crash = makeCrashingEntry($root);
@@ -248,8 +255,15 @@ register_shutdown_function(static function () use ($crash): void {
 echo "== 崩溃路径（注入 throw）==\n";
 [$code, $out, $err] = runInPty($crash, ['VICECODE_CONFIG' => $cfgFile]);
 check($code !== 0, '崩溃时进程非 0 退出（实际 ' . $code . '）');
-check(str_contains($err, 'crash injected') || str_contains($out, 'Uncaught'),
-    '异常被顶层捕获并报错（不是静默死掉）');
+// ⚠️ 断言只读 $out（stdout+stderr 的并集），不看 $err：pty 三描述符共用同一 pty，输出会
+// 随机落在任一路上（历史上这里写的是 `$err`，而 runInPty 的 [2] 恒为空串 → 该分支永假，
+// 这条断言其实一直靠 `$out` 里含 "Uncaught" 才「通过」；改用 reportFatal 后打不出
+// "Uncaught"，假断言才暴露 —— 见 BUGFIXES T4）。
+check(str_contains($out, 'crash injected'), '异常被顶层捕获并报错（不是静默死掉）');
+check(str_contains($out, 'ViceCode 异常退出'), '走 reportFatal 的人话提示');
+check(!str_contains($out, 'Fatal error') && !str_contains($out, 'Uncaught'),
+    '不喷 PHP Fatal / Uncaught 堆栈（协程内异常必须被接住）');
+check($code === 1, '异常退出码恰为 1（PHP Fatal 会是 255）—— 实际 ' . $code);
 // 核心断言：还原序列必须在崩溃后仍然发出
 check(str_contains($out, "\x1b[?1049l"), '崩溃后仍发出 ESC[?1049l（退出 alternate screen）');
 check(str_contains($out, "\x1b[?25h"), '崩溃后仍发出 ESC[?25h（显示光标）');
@@ -277,9 +291,14 @@ usleep(300000);   // 让孤儿进程（若真漏了）完成 reparent 再数
 $orphAfter = bashRcfileCount();
 // ★ 正向锚点：先证明「shell 真的起来了」，否则下面那条阴性断言是空转（feedback §1.3）
 check($shellUp, 'F2 后交互 shell 真的起来了（看到 bash --rcfile 的临时文件出现）');
-check($codeB !== 0, '崩溃时进程非 0 退出（实际 ' . $codeB . '）');
-check(str_contains($outB, 'crash injected while pty alive') || str_contains($outB, 'Uncaught'),
+// 收紧为「恰为 1」：挂住时这里会得到 -1（proc_terminate 之前进程还活着），而旧的
+// `!== 0` 判据把挂住也算通过。挂住的根因见 BUGFIXES D8：协程内异常被 catch 后，
+// Coroutine\run() 仍在等读键协程结束，必须由 start() 的 catch 置 $app->quit 才能返回。
+check($codeB === 1, '崩溃时进程恰为 1 退出（挂住会得到 -1）—— 实际 ' . $codeB);
+check(str_contains($outB, 'crash injected while pty alive'),
     '异常被顶层捕获并报错（不是静默死掉）');
+check(!str_contains($outB, 'Fatal error') && !str_contains($outB, 'Uncaught'),
+    '场景 B 同样不喷 PHP Fatal / Uncaught 堆栈');
 check(str_contains($outB, "\x1b[?1049l") && str_contains($outB, "\x1b[?25h"),
     '崩溃后仍发出终端还原序列');
 // 核心断言（本场景独有）：异常退出路径也必须收掉 pty 子进程留下的 rc 临时文件。

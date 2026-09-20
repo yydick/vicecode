@@ -104,6 +104,17 @@ function restoreTerminal(Terminal $term): void
 }
 
 /**
+ * 致命错误的统一出口：翻译成人类可读的一行（终端还原已由 start() 的 finally 保证），
+ * 而不是把一堆 PHP 堆栈喷在用户的屏幕上。
+ */
+function reportFatal(Throwable $e): void
+{
+    fwrite(STDERR, "\nViceCode 异常退出：" . $e->getMessage() . "\n");
+    fwrite(STDERR, '  ' . $e->getFile() . ':' . $e->getLine() . "\n");
+    exit(1);
+}
+
+/**
  * 解析启动参数（纯函数，便于单测）。返回 [openFile, chdirTo]：
  *  - 首个非选项位置参数：目录 → chdirTo=realpath；可读文件 → openFile；'.' → 两者皆 null（当前目录）。
  *  - 无匹配参数 → 两者皆 null。
@@ -177,6 +188,13 @@ function start(bool $sw, array $argv): void
     // Coroutine\defer 重复调用也无害。
     try {
         startMain($app, $term, $sw);
+    } catch (Throwable $e) {
+        // 异常退出时也要**让读键协程停下来**：Swoole\Coroutine\run() 必须等容器内所有子协程
+        // 结束才会返回 —— 协程还挂在 `while (!$app->quit)` 里的话，异常就永远报告不出去。
+        // 实测（tests/pty_crash.php 场景 B：交互 shell 活着时崩溃）表现为进程挂住、只能被
+        // SIGKILL 收掉。置位后照常上抛，由顶层 reportFatal 统一报告；回收交给下面的 finally。
+        $app->quit = true;
+        throw $e;
     } finally {
         $app->saveConfig();       // R7：退出前把偏好落盘（~/.vicerc），内部容错不抛
         // 资源回收兜底（与终端还原同理，必须覆盖**所有**退出路径）：正常退出由 Lifecycle 的
@@ -336,18 +354,40 @@ $useSwoole = (getenv('TUI_USE_SWOOLE') ?: '1') === '1'
 // 仅当本文件被直接执行（而非被测试 require）时才启动 TUI；
 // 守卫让 tests/cli_dir.php 能 require 本文件调用 resolveStartArg 而不误进界面。
 if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
-    try {
-        if ($useSwoole) {
-            Swoole\Runtime::enableCoroutine(
-                SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO & ~SWOOLE_HOOK_FILE & ~SWOOLE_HOOK_PROC
-            );
-            Swoole\Coroutine\run(static fn() => start(true, $argv));
-        } else {
-            start(false, $argv);
+    // 交互式终端前置检查：非 tty 的 stdin（重定向 / 管道 / `</dev/null`）下，php-tui 取
+    // raw mode 必然失败 —— vendor SttyRawMode::enable() 靠 `stty -g` 探测，非 tty 时直接抛
+    // RuntimeException('Could not get stty settings')。在这里、**协程之外**快速失败，用户
+    // 看到的是一句人话，而不是「PHP Fatal error + 堆栈 + exit 255」。
+    if (!stream_isatty(STDIN)) {
+        reportFatal(new RuntimeException(
+            '需要交互式终端：stdin 不是 TTY（请勿重定向或管道输入 stdin）'
+        ));
+    }
+
+    if ($useSwoole) {
+        Swoole\Runtime::enableCoroutine(
+            SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO & ~SWOOLE_HOOK_FILE & ~SWOOLE_HOOK_PROC
+        );
+        // ⚠️ try/catch 必须放在**协程闭包内部**：Swoole\Coroutine\run() 内部抛出的异常
+        // 不会传播给调用者 —— 实测把 catch 挂在 run() 外面根本接不住，异常直接变成
+        // 「PHP Fatal error: Uncaught ...」并 exit 255（顺带绕过 reportFatal 的友好提示）。
+        // 故在协程内捕获、把异常带出来，再由协程外统一报告。
+        $fatal = null;
+        Swoole\Coroutine\run(static function () use ($argv, &$fatal): void {
+            try {
+                start(true, $argv);
+            } catch (Throwable $e) {
+                $fatal = $e;
+            }
+        });
+        if ($fatal !== null) {
+            reportFatal($fatal);
         }
-    } catch (Throwable $e) {
-        fwrite(STDERR, "\nViceCode 异常退出：" . $e->getMessage() . "\n");
-        fwrite(STDERR, '  ' . $e->getFile() . ':' . $e->getLine() . "\n");
-        exit(1);
+    } else {
+        try {
+            start(false, $argv);
+        } catch (Throwable $e) {
+            reportFatal($e);
+        }
     }
 }
