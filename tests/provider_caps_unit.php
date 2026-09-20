@@ -118,6 +118,16 @@ check($real->spec('deepseek')?->supportsTools() === true, '内置配置：deepse
 check($real->spec('openai', 'gpt-4o')?->supports(ProviderSpec::VISION) === true,
     '内置配置：gpt-4o 声明了 vision');
 
+// 内置 anthropic：显式声明协议（不靠默认值），端点按 Anthropic 惯例拼 /v1/messages，
+// max_tokens 有值（Anthropic 必填，漏了会 400）——这三条是内置条目最容易写错的地方。
+$anth = $real->spec('anthropic');
+check($anth !== null, '内置配置：存在 anthropic provider（装好即用，不必等用户自己写）');
+check($anth?->protocol === 'anthropic', '内置配置：anthropic 显式声明 protocol=anthropic（不是靠默认 openai）');
+check(str_ends_with((string) $anth?->chatUrl(), '/v1/messages'), '内置配置：端点拼成 /v1/messages（实际 ' . (string) $anth?->chatUrl() . '）');
+check(!str_contains((string) $anth?->chatUrl(), 'chat/completions'), '内置配置：不落回 OpenAI 的 chat/completions');
+check(is_int($anth?->maxTokens) && ($anth?->maxTokens ?? 0) > 0, '内置配置：max_tokens 为正（Anthropic 必填）');
+check($anth?->supportsTools() === true, '内置配置：anthropic 默认带 tools（Agent 工具可用）');
+
 // ═══════════ 2) 行为开关（端到端）═══════════
 echo "== 行为开关：只有声明 tools 的模型，请求里才带 tools ==\n";
 

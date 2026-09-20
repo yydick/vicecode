@@ -268,6 +268,31 @@ declare(strict_types=1);
  * 保存后即时生效（Ctrl+S），无需重启；语法写错会提示并沿用上一份可用配置。
  * 改完回 AI 面板按 Ctrl+P 切 provider、Ctrl+N 切模型，确认新配置认到了。
  *
+ * ── 协议：OpenAI 兼容 与 Anthropic 二选一（可选，默认 openai）──────────────
+ *
+ * **不写 `protocol` 就是 OpenAI 兼容协议**（老配置零迁移）。要接 Anthropic Messages API
+ * 就写 `'protocol' => 'anthropic'`——两条协议**不是一回事**，差异由应用内部处理：
+ *
+ *   · 鉴权头     x-api-key（而非 Authorization: Bearer）+ 必需头 anthropic-version
+ *   · 端点       <base_url>/v1/messages（而非 <base_url>/chat/completions）
+ *   · max_tokens **必填**（缺了直接 400）→ 用 provider 的 `max_tokens` 声明，默认 4096
+ *   · system     是**顶层参数**（Messages API 没有 system 角色；内部 system 消息会自动提上去）
+ *   · 工具形状   {name, description, input_schema}（而非 {type:'function', function:{…}}）
+ *   · 流式结束   是 message_stop 事件（**没有 `data: [DONE]`**）
+ *
+ * 内置已有一条 `anthropic`（只认 `ANTHROPIC_API_KEY`），通常直接用即可；下面是要改时的写法。
+ * ⚠️ **模型 ID 必须逐字符准确**（点号/日期后缀写错 = `model not found`）：4.6 代及更新用
+ * 无日期格式（`claude-sonnet-4-6`），4.5 代及更早需要完整日期后缀（`claude-haiku-4-5-20251001`）。
+ * 以官方 `GET /v1/models` 的当前列表为准。
+ *
+ *   'anthropic' => [                                   // 覆盖内置那条（只写想改的字段）
+ *       'protocol'   => 'anthropic',
+ *       'base_url'   => 'https://my-gateway.internal', // 自建网关/代理；结尾不要带 /v1
+ *       'max_tokens' => 8192,                          // 必填项，按模型上限调
+ *       'models'     => ['claude-sonnet-4-6' => ['tools']],  // models 是整表覆盖
+ *       'model'      => 'claude-sonnet-4-6',
+ *   ],
+ *
  * ── 模型策略（可选，见下面例子）──────────────────────────────────────────
  *
  * 把「这次要干什么」映射到一个具体模型，用于快速换档：

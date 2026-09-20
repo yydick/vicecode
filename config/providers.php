@@ -7,9 +7,20 @@ declare(strict_types=1);
  * 设计要点：
  *  - **不存 key**：只存「从哪个环境变量读」，key 永远留在环境里，不入库、不落盘。
  *  - base_url 有默认值，同时允许用环境变量覆盖（自建网关/代理/兼容端点都靠它）。
- *  - 这里列出的都是 **OpenAI 兼容协议** 的服务商，共用 `OpenAiCompatProvider`。
- *    Claude 的 SSE 事件名不同（content_block_delta），若以后要接得单开一个 provider 类，
- *    不要往这里塞。
+ *  - `protocol` 决定走哪套协议：**不写 = `openai`**（OpenAI 兼容，`<base>/chat/completions`）；
+ *    写 `'anthropic'` 走 Anthropic Messages API（`<base>/v1/messages`，见文件末尾那条）。
+ *    刻意**不按 base_url 或 id 猜**：代理/镜像站的域名与 id 都不可靠，猜错的表现是
+ *    「请求发出去了但端点拒绝」，比多写一行配置难查得多。
+ *
+ * ── 两条协议的差异（用不到 Anthropic 可跳过）──────────────────────────────
+ *
+ * Anthropic 的 Messages API 与 OpenAI 兼容协议**不是同一个协议**，差异不止端点路径：
+ *  - 鉴权头是 `x-api-key`（不是 `Authorization: Bearer`），且 `anthropic-version` 是**必需**头；
+ *  - `max_tokens` **必填**（缺了直接 400），故 provider 上可用 `max_tokens` 声明（默认 4096）；
+ *  - **没有 `system` 角色**，系统提示是顶层 `system` 参数（本应用会自动把内部 system 消息提上去）；
+ *  - 工具定义形状是 `{name, description, input_schema}`（不是 `{type:'function',function:{…}}`）；
+ *  - 流式事件名不同（`content_block_delta` 等），且**结束是 `message_stop`、没有 `[DONE]`**。
+ * 这些都已在 `AnthropicProvider` / `AnthropicSseParser` 里处理，配置侧只需写 `protocol`。
  *
  * 环境变量约定：
  *  - `{PREFIX}_API_KEY`   —— 必填，缺失时 AI 面板给出提示而不是静默失败
@@ -112,5 +123,30 @@ return [
         ],
         'model'    => 'deepseek-chat',
         'capabilities' => ['tools'],
+    ],
+
+    // ── Anthropic Messages API（非 OpenAI 兼容协议，见文件顶部说明）────────────
+    // ⚠️ 模型 ID **必须逐字符准确**（多一个点号、少一段日期后缀都是 `model not found`）：
+    //    · `claude-*-4-6` 及更新的代次用**无日期**格式；
+    //    · 4.5 代及更早的模型需要**完整日期后缀**。
+    //    模型 ID 会随服务商上下线变化，**请以官方 `GET /v1/models` 或控制台的当前列表为准**，
+    //    下面这几条按自己账号实际可用的改。
+    'anthropic' => [
+        'label'      => 'Anthropic',
+        'protocol'   => 'anthropic',          // 决定协议与端点：POST <base_url>/v1/messages
+        'key_env'    => 'ANTHROPIC_API_KEY',
+        'url_env'    => 'ANTHROPIC_BASE_URL', // 可指向自建网关/代理
+        'base_url'   => 'https://api.anthropic.com',
+        'max_tokens' => 4096,                 // Anthropic 必填（缺了 400）；可按模型上限调大
+        'models'     => [
+            'claude-opus-4-8'            => ['tools'],
+            'claude-sonnet-4-6'          => ['tools'],
+            // 4.5 代的 ID 带日期后缀，缩写会 404
+            'claude-haiku-4-5-20251001'  => ['tools'],
+        ],
+        'model'        => 'claude-sonnet-4-6',
+        'capabilities' => ['tools'],
+        // 可选：写上 `cost` 后，折扣时段功能就能在闲时把 Anthropic 的档位也算进候选（见顶部说明）
+        // 'cost' => 3,
     ],
 ];

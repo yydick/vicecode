@@ -6,11 +6,17 @@
  * （chunk 边界与 `data:` 行边界完全无关、稍不留神就被缓冲成一大块）。
  * 用假数据源验证出来的解析器，到真服务商那里照样可能一次性返回。
  *
- * 两个端点：
+ * 三个端点：
  *  - GET  /sse?n=8&delay=150                 —— 传输层探针用（只看分块行为）
  *  - POST /v1/chat/completions               —— **仿 OpenAI 的假端点**，端到端验证用
  *     参数：n（token 数）/ delay（间隔 ms）/ reply（自定义回复，用 | 分词）
  *           status（强制返回该 HTTP 状态码，如 401）/ noauth（不校验 Authorization）
+ *  - POST /v1/messages                       —— **仿 Anthropic Messages API 的假端点**
+ *     同样的开关语义，但事件名是 Anthropic 形态（message_start / content_block_delta /
+ *     message_stop 等，**没有 `[DONE]`**）。
+ *
+ * ⚠️ 两条协议的 frame 函数是分开的（`sseFrame` / `anthropicFrame`）：OpenAI 端点仍依赖
+ * `sseFrame` 的形状，改它会连带弄坏既有测试。
  *
  * 用法：php -S 127.0.0.1:<port> examples/sse_server.php
  */
@@ -30,6 +36,50 @@ function sseFrame(array $choice): void
 {
     echo 'data: ' . json_encode(['choices' => [$choice]], JSON_UNESCAPED_UNICODE) . "\n\n";
     flush();
+}
+
+/**
+ * 发一个 Anthropic 形态的 SSE 事件。
+ *
+ * 官方是 `event: <类型>` + `data: <json>` 两行，这里**照官方发两行**（而不是偷懒只发 data）：
+ * 客户端解析器刻意只认 `data:` 行、类型从 data 里的 `"type"` 读，所以两行都发能验证
+ * 「`event:` 行的存在不会干扰解析」；反过来只发 data 行也能工作（兼容网关常见）。
+ */
+function anthropicEvent(array $payload): void
+{
+    echo 'event: ' . ($payload['type'] ?? 'unknown') . "\n";
+    echo 'data: ' . json_encode($payload, JSON_UNESCAPED_UNICODE) . "\n\n";
+    flush();
+}
+
+/**
+ * 走完 Anthropic 流的一轮：content_block_start(text) → 正文分片 → content_block_stop
+ * → message_delta(stop_reason) → message_stop。
+ * @param string[] $tokens 正文分片
+ */
+function anthropicTextStream(array $tokens, int $delayMs, string $stopReason = 'end_turn'): void
+{
+    anthropicEvent(['type' => 'message_start', 'message' => [
+        'id' => 'msg_mock', 'type' => 'message', 'role' => 'assistant',
+        'content' => [], 'model' => 'mock', 'stop_reason' => null, 'stop_sequence' => null,
+        'usage' => ['input_tokens' => 1, 'output_tokens' => 1],
+    ]]);
+    usleep($delayMs * 1000);
+    anthropicEvent(['type' => 'ping']);
+    anthropicEvent(['type' => 'content_block_start', 'index' => 0,
+        'content_block' => ['type' => 'text', 'text' => '']]);
+    usleep($delayMs * 1000);
+    foreach ($tokens as $t) {
+        anthropicEvent(['type' => 'content_block_delta', 'index' => 0,
+            'delta' => ['type' => 'text_delta', 'text' => $t]]);
+        usleep($delayMs * 1000);
+    }
+    anthropicEvent(['type' => 'content_block_stop', 'index' => 0]);
+    anthropicEvent(['type' => 'message_delta',
+        'delta' => ['stop_reason' => $stopReason, 'stop_sequence' => null],
+        'usage' => ['output_tokens' => 1]]);
+    // ⚠️ 官方**不发** `data: [DONE]`，结束就是 message_stop
+    anthropicEvent(['type' => 'message_stop']);
 }
 
 $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
@@ -205,6 +255,180 @@ if ($uri === '/v1/chat/completions' && $method === 'POST') {
     sseFrame(['delta' => [], 'index' => 0, 'finish_reason' => 'stop']);
     echo "data: [DONE]\n\n";
     flush();
+    return;
+}
+
+// ── POST /v1/messages：仿 Anthropic Messages API 假端点 ────────────────
+// 与 OpenAI 端点的开关**同名同义**（便于同一个测试骨架套两条协议），差异只在
+// ① 鉴权头是 `x-api-key` 而非 `Authorization: Bearer`；
+// ② 事件形态是 Anthropic 的；③ 请求体必填 `max_tokens`（这里顺带校验，缺失就 400，
+//    好让「忘了带 max_tokens」这个真实约束能被端到端测出来）。
+if ($uri === '/v1/messages' && $method === 'POST') {
+    $wantAuth = !isset($_GET['noauth']) && getenv('MOCK_NOAUTH') !== '1';
+    $key = (string) ($_SERVER['HTTP_X_API_KEY'] ?? '');
+    if ($wantAuth && $key === '') {
+        http_response_code(401);
+        header('Content-Type: application/json');
+        echo json_encode(['type' => 'error', 'error' => [
+            'type' => 'authentication_error', 'message' => 'missing x-api-key header']]);
+        return;
+    }
+    // `anthropic-version` 是必需头（缺了官方直接 400）—— 顺带断言它真的被带上了
+    if ($wantAuth && (string) ($_SERVER['HTTP_ANTHROPIC_VERSION'] ?? '') === '') {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        echo json_encode(['type' => 'error', 'error' => [
+            'type' => 'invalid_request_error', 'message' => 'missing anthropic-version header']]);
+        return;
+    }
+
+    $force = (int) ($_GET['status'] ?: (getenv('MOCK_STATUS') ?: 0));
+    if ($force > 0) {
+        http_response_code($force);
+        header('Content-Type: application/json');
+        echo json_encode(['type' => 'error', 'error' => [
+            'type' => 'forced', 'message' => 'forced status ' . $force]]);
+        return;
+    }
+
+    $raw = (string) file_get_contents('php://input');
+    $req = json_decode($raw, true);
+    if (!is_array($req)) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        echo json_encode(['type' => 'error', 'error' => [
+            'type' => 'invalid_request_error', 'message' => 'invalid json body']]);
+        return;
+    }
+    // max_tokens 必填（Anthropic 的真实约束）
+    if (!isset($req['max_tokens']) || !is_int($req['max_tokens']) || $req['max_tokens'] <= 0) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        echo json_encode(['type' => 'error', 'error' => [
+            'type' => 'invalid_request_error', 'message' => 'max_tokens: required']]);
+        return;
+    }
+
+    header('Content-Type: text/event-stream');
+    header('Cache-Control: no-cache');
+    header('X-Accel-Buffering: no');
+    disableBuffering();
+
+    $logFile = getenv('MOCK_LOG_FILE');
+    if (is_string($logFile) && $logFile !== '') {
+        @file_put_contents($logFile, (is_string($req['model'] ?? null) ? $req['model'] : '(none)') . "\n", FILE_APPEND);
+    }
+    // MOCK_BODY_FILE=/path：把**完整请求体**逐行（JSON 单行）追加。
+    // 与 MOCK_LOG_FILE 的分工：那个只记"打到了哪个模型"（断言调用序列），这个用来断言
+    // "请求里到底带了什么"（如压缩请求有没有把旧历史带上——见 docs/BUGFIXES.md T6）。
+    // ⚠️ 断言"模型收到了什么"必须看**发出去的请求体**，只看回复文案会被"假数据源不看输入"骗过。
+    $bodyFile = getenv('MOCK_BODY_FILE');
+    if (is_string($bodyFile) && $bodyFile !== '') {
+        @file_put_contents($bodyFile, json_encode($req, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND);
+    }
+
+    // MOCK_ECHO_MODEL=1：只回一行 `[model=<请求体里的 model>]`（与 OpenAI 端点同义）
+    if (getenv('MOCK_ECHO_MODEL') === '1') {
+        $m = is_string($req['model'] ?? null) ? $req['model'] : '(none)';
+        anthropicTextStream(['[model=' . $m . ']'], $delayMs);
+        return;
+    }
+    // MOCK_ECHO_TOOLS=1：只回一行 `[tools=1]` / `[tools=0]`
+    if (getenv('MOCK_ECHO_TOOLS') === '1') {
+        $has = isset($req['tools']) && is_array($req['tools']) && $req['tools'] !== [];
+        anthropicTextStream(['[tools=' . ($has ? '1' : '0') . ']'], $delayMs);
+        return;
+    }
+    // MOCK_ECHO_SYSTEM=1：把顶层 system 参数回显出来（验证 system 真的在顶层而不是消息里）
+    if (getenv('MOCK_ECHO_SYSTEM') === '1') {
+        $s = is_string($req['system'] ?? null) ? $req['system'] : '(none)';
+        anthropicTextStream(['[system=' . $s . ']'], $delayMs);
+        return;
+    }
+
+    // MOCK_TOOLS=1：首轮回 tool_use，收到 tool_result 后回最终文本（Agent loop 正常往返）
+    // MOCK_TOOLS=2：永远回 tool_use（测 maxSteps 上限）
+    $toolsMode = getenv('MOCK_TOOLS') ?: '0';
+    $wantTools = $toolsMode === '1' || $toolsMode === '2';
+    $alwaysTools = $toolsMode === '2';
+    // 工具结果在 Anthropic 里是 user 消息的 content 块（不是独立 role:tool 消息）
+    $hasToolResult = false;
+    foreach ((array) ($req['messages'] ?? []) as $m) {
+        if (!is_array($m) || !is_array($m['content'] ?? null)) {
+            continue;
+        }
+        foreach ($m['content'] as $blk) {
+            if (is_array($blk) && ($blk['type'] ?? null) === 'tool_result') {
+                $hasToolResult = true;
+                break 2;
+            }
+        }
+    }
+
+    anthropicEvent(['type' => 'message_start', 'message' => [
+        'id' => 'msg_mock', 'type' => 'message', 'role' => 'assistant',
+        'content' => [], 'model' => is_string($req['model'] ?? null) ? $req['model'] : 'mock',
+        'stop_reason' => null, 'stop_sequence' => null,
+        'usage' => ['input_tokens' => 1, 'output_tokens' => 1],
+    ]]);
+    usleep($delayMs * 1000);
+
+    if ($wantTools && ($alwaysTools || !$hasToolResult)) {
+        // 工具块：content_block_start 带 id/name（inputs 从空对象开始），
+        // 参数走 input_json_delta 分片（**故意拆成 2 片**，专测分片累积）
+        anthropicEvent(['type' => 'content_block_start', 'index' => 0, 'content_block' => [
+            'type' => 'tool_use', 'id' => 'toolu_mock_1', 'name' => 'read_file', 'input' => (object) []]]);
+        usleep($delayMs * 1000);
+        anthropicEvent(['type' => 'content_block_delta', 'index' => 0, 'delta' => [
+            'type' => 'input_json_delta', 'partial_json' => '{"pa']]);
+        usleep($delayMs * 1000);
+        anthropicEvent(['type' => 'content_block_delta', 'index' => 0, 'delta' => [
+            'type' => 'input_json_delta', 'partial_json' => 'th":"src/Foo.php"}']]);
+        usleep($delayMs * 1000);
+        anthropicEvent(['type' => 'content_block_stop', 'index' => 0]);
+        // 第二个工具块（index=1），验证多工具按 index 归并
+        anthropicEvent(['type' => 'content_block_start', 'index' => 1, 'content_block' => [
+            'type' => 'tool_use', 'id' => 'toolu_mock_2', 'name' => 'list_files', 'input' => (object) []]]);
+        usleep($delayMs * 1000);
+        anthropicEvent(['type' => 'content_block_delta', 'index' => 1, 'delta' => [
+            'type' => 'input_json_delta', 'partial_json' => '{"path":"src"}']]);
+        usleep($delayMs * 1000);
+        anthropicEvent(['type' => 'content_block_stop', 'index' => 1]);
+        anthropicEvent(['type' => 'message_delta',
+            'delta' => ['stop_reason' => 'tool_use', 'stop_sequence' => null],
+            'usage' => ['output_tokens' => 1]]);
+        anthropicEvent(['type' => 'message_stop']);
+        return;
+    }
+
+    // MOCK_SUMMARY=1：**按输入判断**——请求里带了我们那条压缩指令的特征串才回摘要文本。
+    // ⚠️ 早期 OpenAI 端点的 MOCK_SUMMARY 是无条件回的，结果掩盖了「压缩请求根本没带历史」的
+    // 真 bug（见 docs/BUGFIXES.md T6）。新端点不再重复这个错误：不看输入的假数据源
+    // 会让整条链路的断言失去意义。
+    if (getenv('MOCK_SUMMARY') === '1') {
+        $all = json_encode($req['messages'] ?? [], JSON_UNESCAPED_UNICODE) ?: '';
+        $isCompact = str_contains($all, 'COMPACT') || str_contains($all, '待压缩');
+        $tokens = $isCompact
+            ? ['摘要：', '用户问了', ' mock 问题，', '已回答。']
+            : ['tok1 ', 'tok2 ', 'tok3 '];
+        anthropicTextStream($tokens, $delayMs);
+        return;
+    }
+
+    // 默认回复：tok1..tokN / reply=a|b|c / MOCK_REPLY
+    $replyParam = $_GET['reply'] ?? null;
+    if (!is_string($replyParam) || $replyParam === '') {
+        $replyParam = getenv('MOCK_REPLY') ?: null;
+    }
+    if (is_string($replyParam) && $replyParam !== '') {
+        $tokens = explode('|', $replyParam);
+    } else {
+        $tokens = [];
+        for ($i = 1; $i <= max(1, $n); $i++) {
+            $tokens[] = sprintf('tok%d ', $i);
+        }
+    }
+    anthropicTextStream($tokens, $delayMs);
     return;
 }
 

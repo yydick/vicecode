@@ -168,6 +168,7 @@ return [
     'ai.compact_started' => 'Compacting conversation history…',
     'ai.compact_failed' => 'Compact failed, history kept',
     'ai.compact_done' => 'Compact done ({before} → {after} messages)',
+    'ai.compact_instruction' => "Summarize the conversation history below into a concise digest that can serve as background for later turns.\nKeep: the user's intent and constraints, conclusions and decisions reached, file paths and key code locations, and anything unfinished. Drop: pleasantries and repetition. Output only the digest, do not restate this instruction.\n\n===== CONVERSATION HISTORY TO COMPACT =====\n{history}",
     'help.e_ai_explain' => 'AI explain code (in editor)',
     'ai.error'           => 'AI request failed: {msg}',
     'ai.http_error'      => 'HTTP {code}',

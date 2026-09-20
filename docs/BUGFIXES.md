@@ -535,6 +535,65 @@
   **凡是给同一个模板传了参数，就要回头确认那个闭包收不收 `$params`** —— 这类"多传参数被吞"
   的 bug 没有报错、没有日志，只有把**渲染结果**拿来断言才抓得到。
 
+#### T6. 上下文压缩的摘要请求是**空请求**：没带历史、也没带指令，会静默覆盖真实历史 `[本轮]`
+- **现象**（推断 → 证伪 → 修）：超阈值自动压缩或手动 `compactNow` 之后，历史被一条
+  `[历史摘要] …` 顶掉，但那条"摘要"与旧对话**毫无关系**。真实端点上表现为**静默的数据损失**。
+- **根因**：`ChatModel::beginCompact()` 把历史挪进 `$preCompact` 后执行 `$this->messages = []`，
+  随即 `startRequest()` —— 而 `startRequest()`（`:710`）只做一件事：追加
+  `['role' => 'assistant', 'content' => '']`。于是发出去的请求体是
+  `{"model":"…","stream":true,"messages":[{"role":"assistant","content":""}]}`：
+  **既没有旧历史，也没有"请总结"的指令**。`beginCompact()` 的注释写着"当前历史换成『摘要指令』
+  单条消息"，但那条指令**从未被构造过**（全文搜索 `总结`/`Summarize` 无命中）。
+  真实端点上这等于让模型**续写一个空的 assistant 消息**，续写文本被 `finishCompact()` 当成摘要
+  写入 `[历史摘要] …`，`$preCompact` 随后被丢弃。
+- **为什么长期没暴露**：mock 端点的 `MOCK_SUMMARY=1` **无条件**回固定文案（`examples/sse_server.php:145`），
+  **完全不看请求体**；`tests/ai_compact_unit.php:135` 只断言回复里含 `摘要：`。
+  即"假数据源不看输入，于是任何输入都能通过"。
+- **证伪证据**（探针记请求体，不是读代码推断）：压缩请求的 `messages` 条数 = **1**，
+  唯一一条是 `role=assistant, content=""`。修复后同一探针显示压缩请求是 `role=user`、
+  正文含旧历史特征串与指令。
+- **修复**：`beginCompact()` 构造真正的单条 user 消息 —— 指令（i18n `ai.compact_instruction`）
+  + 旧历史文本化（新类 `ConversationTranscript::render()`，纯静态函数、可直测）。
+- **防回归**：新增断言**必须看请求体**（mock 现在也按输入判断），而不是只看回复文案 ——
+  否则假数据源不看输入的坑会原样复现。
+- **教训**：**"假数据源不看输入"会让整条链路的断言失去意义**。凡是断言"模型收到了什么"，
+  就必须让假端点**依赖输入**，或（更好）直接断言**发出去的请求体**。
+
+#### T7. 压缩摘要请求带着完整的 tools 定义（纯文本任务却给了模型调工具的机会）`[本轮]`
+- **现象**（写 Anthropic 端到端时对请求体做断言才看见）：摘要请求的 `tools` 键非空（实测 2 个，
+  与普通对话请求完全一样）。摘要是一段纯文本，带工具定义既是白烧 token，又给了模型
+  「回一个 `tool_use` 当摘要」的机会 —— 那个 `tool_use` 会被 `finishCompact()` 当成摘要写进
+  `[历史摘要] …`，然后 `$preCompact` 被丢弃，后果与 T6 同级。
+- **根因**：`ChatModel::startRequest()` 里 `$tools = $spec->supportsTools() ? AiTools::toolDefs() : null;`
+  —— 只看**模型能力**，不看**这次请求是不是摘要**。`beginCompact()` 虽然置了 `$this->compacting = true`，
+  但这个标志在 `startRequest()` 里从未被读过。
+- **为什么长期没暴露**：T6 的探针只看 `messages` 条数与内容，从不看还有哪些键；
+  旧 mock 的 `MOCK_SUMMARY` 也不看 `tools` 有没有——又一个"断言挑了个看不到这个 bug 的字段"。
+- **修复**：`$tools = (!$this->compacting && $spec->supportsTools()) ? … : null;`。
+- **防回归**：`tests/anthropic_e2e_unit.php` 第 3 节断言摘要请求 `!array_key_exists('tools', $body)`。
+  反向注入（去掉 `!$this->compacting`）已验证该断言会 FAIL。
+- **教训**：**同一段"组请求"的代码被两种语义共用时（对话 vs 摘要），要逐字段问"这个字段对这次请求成立吗"**，
+  而不是只看"模型支持不支持"。
+
+#### T8. 尾部空 assistant 占位符被当成真实内容发出去（Anthropic 下会 400）`[本轮]`
+- **现象**（推断）：Anthropic provider 原样保留内部占位符后，请求以
+  `{"role":"assistant","content":""}` 结尾。Anthropic 的 `text` 块**最小长度是 1**，
+  真实端点上极可能直接 400；即便被接受，也把一个纯内部实现细节泄露到了协议层。
+- **根因**：`ChatModel::startRequest()` 每次都在末尾追加 `['role'=>'assistant','content'=>'']`
+  （好让流式 delta 有地方落，这是**内部约定**）。OpenAI 兼容端点对"尾部预填充 assistant"是宽容的
+  （既有实现一直这么发、没出过问题），于是这个约定被当成了协议的一部分。协议转换时（`toMessages`）
+  没有把它识别为占位符。
+- **为什么长期没暴露**：OpenAI 路径宽容 → 一直绿；mock 端点也不校验"末尾 assistant 是否为空"。
+  即**上游的宽容掩盖了协议层的不干净**。
+- **修复**：`AnthropicProvider::toMessages()` 丢掉「`role=assistant` 且 `content === ''` 且**没有
+  `tool_calls`**」的消息；丢掉后请求正好以 user 结尾（官方期望的"生成下一轮"形状）。
+  **带 `tool_calls` 的空 assistant 不算占位符**，必须保留（否则 `tool_use`/`tool_result` 成对约束被破）。
+- **防回归**：`tests/anthropic_unit.php` 三条断言 —— 空占位符被丢 + 请求以 user 结尾 +
+  wire 上没有空 `content`；另有两条**反面对照**（带 tool_calls 的空 assistant 保留、
+  有正文的 assistant 保留）。
+- **教训**：**"上游宽容"不等于"我们发对了"**。换协议时要重新审一遍**每一处内部约定**
+  （占位符、私有键、空值），它们往往没写在任何接口文档里，只在原实现的容忍范围内活着。
+
 ## 四、已知 vendor 补丁
 
 ### `php-tui/term` — `EventParser::advance()` 空行冲刷

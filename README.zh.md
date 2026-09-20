@@ -164,9 +164,10 @@ TUI_USE_SWOOLE=0 php bin/vicecode.php   # 强制回退到纯 php-tui/term 阻塞
 
 ## AI 助手（V2）
 
-右侧 AI 面板已接入工作台：OpenAI 与 DeepSeek 兼容端点（配置在 `config/providers.php`，key 走环境变量），经 `curl` 子进程流式输出，UI 全程不阻塞。
+右侧 AI 面板已接入工作台：OpenAI / DeepSeek 兼容端点，以及 **Claude 原生（Anthropic Messages API）**（配置在 `config/providers.php`，key 走环境变量），经 `curl` 子进程流式输出，UI 全程不阻塞。
 
-- **模型能力声明**：`config/providers.php` 里按模型声明能力（`tools` 函数调用 / `reasoning` 推理 / `vision` 识图 / `audio` 语音；也接受自定义名字），provider 级可给默认值，**不写则默认支持 `tools`**（老配置零迁移）。当前**只有 `tools` 影响行为**：只有声明了它的模型，请求里才会带 OpenAI `tools` 协议——纯推理模型（`deepseek-reasoner` 已预声明为 `['reasoning']`）因此不会因为带工具被服务商拒掉整轮请求。当前模型的能力显示在 AI 面板空态提示里，缺少 `tools` 时状态栏 AI 段会带「无工具」标记。
+- **协议显式声明**：每个 provider 写 `protocol` —— `'openai'`（默认，兼容 OpenAI / DeepSeek / 自建网关等 `/chat/completions` 端点）或 `'anthropic'`（Claude 原生，`POST /v1/messages`，`x-api-key` + `anthropic-version` 头，`system` 走顶层参数，`max_tokens` 必填、可用 provider 级 `max_tokens` 配，默认 4096）。不写即 `openai`，老配置零迁移。内置已带一条 `anthropic`（模型 `claude-opus-4-8` / `claude-sonnet-4-6` / `claude-haiku-4-5-20251001`，key 取 `ANTHROPIC_API_KEY`）；两种协议下**工具调用（Agent loop）都完整可用**（`tool_use`/`tool_result` 往返）。
+- **模型能力声明**：`config/providers.php` 里按模型声明能力（`tools` 函数调用 / `reasoning` 推理 / `vision` 识图 / `audio` 语音；也接受自定义名字），provider 级可给默认值，**不写则默认支持 `tools`**（老配置零迁移）。当前**只有 `tools` 影响行为**：只有声明了它的模型，请求里才会带工具定义——纯推理模型（`deepseek-reasoner` 已预声明为 `['reasoning']`）因此不会因为带工具被服务商拒掉整轮请求。当前模型的能力显示在 AI 面板空态提示里，缺少 `tools` 时状态栏 AI 段会带「无工具」标记。
 - **用户级模型配置（免改仓库）**：菜单「AI → 编辑模型配置…」在**内置编辑器**里打开 `~/.vicecode.providers.php`（不存在时先生成带注释的模板）。格式与 `config/providers.php` 一致，**按 id 逐字段覆盖、新 id 追加**（`models` 整体覆盖）；所以「只想把 `openai` 指向自建网关」只写一个 id + 要改的字段即可。保存（`Ctrl+S`）即热重载，当前 provider/model 会保留；文件语法写错时沿用上一份可用配置并在状态栏提示。
 - **模型策略（多档位切换）**：同一份配置里的 `@strategies` 段把「这次要干什么」映射到具体模型（如 `plan` → 推理模型、`grind` → 便宜模型）。AI 面板按 `Ctrl+R` 循环切换，或从菜单/命令面板直接选一条；状态栏常显当前档位。可以给策略写 `requires` 声明能力要求（如 `['tools']`）——**切换时若目标模型不具备该能力会拒绝并提示**，避免"降级到便宜模型"把 Agent 工具**静默**废掉。写错 provider/model 同样拒绝（不会静默回退到别的模型）。手动切 provider/模型会自动脱离策略，状态栏不会显示错的档位。
 - **按任务类型自动选档**：策略可声明 `kinds`（如 `['unittest', 'refactor']`），请求带上该类型时自动用这一档。类型只有两个来源、都不靠猜：**快捷动作**（explain/comment/refactor/unittest），以及输入框的**指令前缀** `/plan 帮我把这块重构一下`（前缀不发给模型；未知类型会拒绝发送并列出已知类型；字面量斜杠写 `//`）。**人工优先**：手动选档（`Ctrl+R`/菜单/手切 provider）会钉住、自动暂停，`Ctrl+R` 的循环里有一档「自动」可切回——状态栏用 `策略=计划·自动` / `策略=计划` 明确标出"现在听谁的"，钉住时收到带类型的请求还会明说「自动选档未生效」。

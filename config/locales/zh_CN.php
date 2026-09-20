@@ -160,6 +160,7 @@ return [
     'ai.compact_started' => '正在压缩对话历史…',
     'ai.compact_failed' => '压缩失败，已保留原对话',
     'ai.compact_done' => '对话已压缩（{before} → {after} 条）',
+    'ai.compact_instruction' => "请把下面这段对话历史压缩成一份简明的中文摘要，供后续对话作为背景使用。\n要求：保留用户的意图与约束、已达成的结论与决定、涉及的文件路径与关键代码位置、未完成的事项；舍弃寒暄与重复内容。只输出摘要正文，不要复述本指令。\n\n===== 待压缩的对话历史 =====\n{history}",
     'help.e_ai_explain' => 'AI 解释代码（编辑器内）',
     'ai.error'           => 'AI 请求失败：{msg}',
     'ai.http_error'      => 'HTTP {code}',

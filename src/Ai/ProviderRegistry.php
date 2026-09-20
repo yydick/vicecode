@@ -59,6 +59,22 @@ final class ProviderRegistry
      */
     public const OFFPEAK_KEY = 'off_peak';
 
+    /**
+     * provider 级字段：**协议**（`ProviderSpec::PROTOCOL_*`）。
+     *
+     * 这是硬事实、不是推断：**不写 = `openai`**（老配置零迁移），写别的串也按 `openai` 处理
+     * （保证前向兼容）——只有在配置里显式写了 `'anthropic'` 才走 Anthropic Messages API。
+     * 刻意**不按 base_url 或 id 猜**：代理/自建网关/镜像站的域名与 id 都不可靠，
+     * 猜错的表现是「请求发出去了但端点拒绝」，比要用户多写一行配置难查得多。
+     */
+    public const PROTOCOL_KEY = 'protocol';
+
+    /**
+     * provider 级字段：**输出上限**。Anthropic 的 `max_tokens` 是必填（缺了 400），
+     * 故给一个默认值；OpenAI 兼容侧本就不发这个字段，配了也不影响其行为。
+     */
+    public const MAX_TOKENS_KEY = 'max_tokens';
+
     /** @var array<string,array<string,mixed>> */
     private array $config;
 
@@ -370,7 +386,40 @@ final class ProviderRegistry
             model: $chosen,
             keyEnv: $keyEnv,
             capabilities: $capsOf[$chosen] ?? $defaultCaps,
+            protocol: self::parseProtocol($c[self::PROTOCOL_KEY] ?? null),
+            maxTokens: self::parseMaxTokens($c[self::MAX_TOKENS_KEY] ?? null),
         );
+    }
+
+    /**
+     * 规范化协议标识：只认 `anthropic`，其余（未声明 / 非字符串 / 拼错的串）一律 `openai`。
+     *
+     * 刻意**不做白名单报错**：老配置根本没这个字段，用户的第一个 Anthropic 条目可能把
+     * `protocol` 写成 `Anthropic`、`claude` 等；这些情况下退回默认协议 + 端点仍是
+     * `/chat/completions`，报错信息会指向端点而不是配置项，反而更好定位。
+     * 大小写不敏感，`Anthropic` / `ANTHROPIC` 都接受（配置是人手写的）。
+     */
+    private static function parseProtocol(mixed $raw): string
+    {
+        return is_string($raw) && strtolower(trim($raw)) === ProviderSpec::PROTOCOL_ANTHROPIC
+            ? ProviderSpec::PROTOCOL_ANTHROPIC
+            : ProviderSpec::PROTOCOL_OPENAI;
+    }
+
+    /**
+     * 输出上限：只接受**正整数**（字符串数字也接受，配置是人手写的）；
+     * 0 / 负数 / 非数字 / 未声明 → 用默认值。上限本身不设人为阈值，由服务商决定。
+     */
+    private static function parseMaxTokens(mixed $raw): int
+    {
+        if (is_int($raw)) {
+            return $raw > 0 ? $raw : ProviderSpec::DEFAULT_MAX_TOKENS;
+        }
+        if (is_string($raw) && preg_match('/^\d+$/', trim($raw)) === 1) {
+            $n = (int) trim($raw);
+            return $n > 0 ? $n : ProviderSpec::DEFAULT_MAX_TOKENS;
+        }
+        return ProviderSpec::DEFAULT_MAX_TOKENS;
     }
 
     /**

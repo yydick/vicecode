@@ -12,6 +12,22 @@
 
 > 本轮主题：**AI V2** —— 把 AI 从「孤岛聊天框」接进工作台：代码上下文、只读工具 Agent loop、上下文压缩、对话持久化与 Markdown 渲染。
 
+### 新增（Claude 原生 Provider：Anthropic Messages API）
+
+- **协议抽象**：新增 `App\Ai\ProviderInterface`（`buildCommand` / `httpStatus` / `metaFile` / `cleanup`）与共用的 curl+SSE 传输 trait `CurlSseTransport`（**安全关键代码不复制两份**：key 走 `-H @文件` 不进 argv、body 走 `--data-binary @文件` 避开 ARG_MAX、0600 临时文件、`-D` dump 取状态码）。`OpenAiCompatProvider` 行为零变更。
+- **provider 级 `protocol` 显式声明**：`'protocol' => 'openai'`（默认，老配置零迁移）或 `'anthropic'`。未写即 openai；写了不认识的值也退回 openai（不静默变成另一种协议）。端点按协议拼：Anthropic 为 `<base>/v1/messages`（base 已带 `/v1` 时去重）。
+- **Anthropic 协议实现**：`x-api-key` + **必需的 `anthropic-version: 2023-06-01`** 头；`system` 作为**顶层参数**（Messages API 没有 system 角色）；`max_tokens` **必填**（provider 级 `max_tokens` 可配，默认 4096）。
+- **工具完整往返**：`tools` 转 `{type:'custom', name, description, input_schema}` 形状；assistant 的 `tool_calls` 转 `tool_use` 内容块（`input` 序列化为**对象**，空参数是 `{}` 而非 `[]`）；连续 `role:tool` 合并为**同一条 user 的多个 `tool_result` 块**（用 `tool_use_id` 关联）。**内部消息形状（OpenAI 语义）保持不变**——协议转换只发生在 provider 出口，存档 / 渲染 / 复制三处零改动。
+- **`AnthropicSseParser`**：`content_block_delta`（`text_delta` 与 `input_json_delta` 按 `index` 归并到对应工具块）、`message_delta.stop_reason` → finish、**以 `message_stop` 判定结束**（Anthropic **不发** `data: [DONE]`）、`ping` 忽略、`error` 事件映射为错误。与 `SseParser` 同契约，`ChatModel` 侧零改动。
+- **内置一条 `anthropic`**：模型 `claude-opus-4-8` / `claude-sonnet-4-6` / `claude-haiku-4-5-20251001`，key 取 `ANTHROPIC_API_KEY`、base 可用 `ANTHROPIC_BASE_URL` 覆盖；`ConfigStore::providersTemplate()` 同步补 `protocol` / `max_tokens` 写法说明。
+
+### 修复
+
+- **压缩摘要请求是空请求**（`BUGFIXES` T6）：`beginCompact()` 原先只把历史挪走就 `startRequest()`，发出去的是 `{"role":"assistant","content":""}` —— 既没历史也没指令，真实端点上等于让模型续写空回复、续写文本被当摘要**覆盖整段真实历史**。改为构造真正的单条 user 消息（i18n 指令 + `ConversationTranscript` 文本化的历史）。新增 `ConversationTranscript`（角色前缀、工具调用/结果可读化、按字符截断）与 `ai.compact_instruction` 文案（中英两包）。
+- **压缩请求不再带 tools**（`BUGFIXES` T7）：摘要是一段纯文本，带工具定义白烧 token、还给了模型"回 `tool_use` 当摘要"的机会（后果与 T6 同级）。
+- **Anthropic 请求丢掉尾部空 assistant 占位符**（`BUGFIXES` T8）：那个空 assistant 是内部占位符（让流式 delta 有地方落），OpenAI 容忍、但 Anthropic 的 text 块**最小长度 1**，原样发会 400。丢掉后请求正好以 user 结尾。带 `tool_calls` 的空 assistant 不算占位符、照常保留。
+- **mock 端点新增 `MOCK_BODY_FILE`**：记**完整请求体**（`MOCK_LOG_FILE` 只记模型名，不足以断言"请求里到底带了什么"）；`/v1/messages` 的 `MOCK_SUMMARY` **按输入判断**（这一条 T6 已修，此处补齐 Anthropic 端点）。
+
 ### 新增（折扣时段 + 成本档自动切档）
 
 - **服务商折扣时段**：provider 级可写 `off_peak` 声明闲时窗口（`days` 三字母缩写或 `*`、`from`/`to` 用 `HH:MM`、`tz` 用 `±HH:MM` 偏移；`from > to` = 跨天、`from === to` = 全天；`days` 指**窗口开始那天**）。解析与判定是纯函数 `App\Ai\OffPeak`（坏条目只丢自己），因此能用**固定时刻**直接单测，无需 sleep 到某个钟点。

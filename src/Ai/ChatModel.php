@@ -38,9 +38,21 @@ final class ChatModel
 
     private CommandRunner $runner;
 
-    private OpenAiCompatProvider $provider;
+    /**
+     * 当前协议对应的传输实现。
+     *
+     * ⚠️ 刻意**不在构造时定死**：provider 可在运行中被切换（`Ctrl+P`）或热重载
+     * （用户级配置保存即生效，见 `reloadProviders()`），而 `reloadProviders()` 只换 registry、
+     * 不重建 ChatModel。所以这里按 `spec()->protocol` **延迟挑选**，缓存在 `$providers` 里。
+     */
+    private ProviderInterface $provider;
 
-    private ?SseParser $parser = null;
+    /** @var array<string,ProviderInterface> protocol => 实现（同一门协议复用同一个实例，
+     *   它们的临时文件生命周期本就是「一次请求一轮」，实例复用与 OpenAiCompatProvider 的既有行为一致） */
+    private array $providers = [];
+
+    /** 当前协议对应的 SSE 解析器（字段类型用联合：两个解析器同契约但无共同父类型） */
+    private SseParser|AnthropicSseParser|null $parser = null;
 
     /** 末条 assistant 的 finish_reason（'stop' / 'tool_calls' / …） */
     private ?string $finishReason = null;
@@ -120,7 +132,9 @@ final class ChatModel
         ?\Closure $now = null,
     ) {
         $this->runner = new CommandRunner();
-        $this->provider = new OpenAiCompatProvider();
+        // 默认实现先放着（真正用哪个由 currentProvider() 按 spec 的协议决定）；
+        // 这样「还没配 provider」的路径上 $this->provider 也有个合法值，cleanup() 不会炸。
+        $this->provider = $this->providers[ProviderSpec::PROTOCOL_OPENAI] = new OpenAiCompatProvider();
         $this->registry ??= new ProviderRegistry();
         $this->tools = $tools ?? new AiTools();
         $this->toolAutoRun = ConfigStore::aiToolAutoRun();
@@ -637,13 +651,27 @@ final class ChatModel
     }
 
     /**
-     * 起摘要请求：当前历史换成「摘要指令」单条消息走同一条 curl 管线。
+     * 起摘要请求：当前历史换成「摘要指令 + 待压缩历史」**单条用户消息**走同一条 curl 管线。
+     *
      * 原历史暂存 preCompact（失败降级恢复）；deferredUser 为 null 表示手动压缩。
+     *
+     * ⚠️ 这里**必须把历史喂进请求**（历史文本化见 ConversationTranscript）：早先的实现
+     * 只是 `$this->messages = []` 然后就 startRequest()，而 startRequest() 只会追加一条
+     * **空的 assistant 消息** —— 发出去的是 `{"messages":[{"role":"assistant","content":""}]}`，
+     * 既没有旧历史也没有指令。真实端点上这等于让模型续写一个空回复，续写结果会被当成摘要
+     * **覆盖掉整段真实历史**（静默的数据损失）。mock 端点无条件回固定文案，所以单测全绿也掩盖了它。
+     *
+     * 这也是为什么摘要请求**不带 tools**：它只要一段文本。
      */
     private function beginCompact(): void
     {
         $this->preCompact = $this->messages;
-        $this->messages = [];
+        $this->messages = [[
+            'role'    => 'user',
+            'content' => $this->shell->t('ai.compact_instruction', [
+                'history' => ConversationTranscript::render($this->messages),
+            ]),
+        ]];
         $this->compacting = true;
         $this->shell->setMessage($this->shell->t('ai.compact_started'));
         if (!$this->startRequest()) {
@@ -704,7 +732,8 @@ final class ChatModel
 
         $this->error = null;
         $this->stderr = '';
-        $this->parser = new SseParser();
+        // 协议决定用哪个解析器（`message_stop` vs `[DONE]` 的结束条件不同）
+        $this->parser = $spec->isAnthropic() ? new AnthropicSseParser() : new SseParser();
         $this->toolAcc = [];
         $this->finishReason = null;
         $this->messages[] = ['role' => 'assistant', 'content' => ''];
@@ -712,17 +741,40 @@ final class ChatModel
         // 历史 + 本次，整段发出去就是多轮上下文。
         // 工具定义只在「当前模型声明了 tools 能力」时才带上（见 config/providers.php 的能力说明）：
         // 纯推理类模型拿到 tools 常被服务商整轮拒掉，宁可不发。
-        $tools = $spec->supportsTools() ? AiTools::toolDefs() : null;
-        $cmd = $this->provider->buildCommand($spec, $this->messages, OpenAiCompatProvider::DEFAULT_TIMEOUT, $tools);
+        //
+        // ⚠️ 压缩摘要请求**一律不带 tools**：它要的是一段纯文本摘要，带上工具定义既是白烧 token，
+        // 又给了模型"回一个 tool_use 当摘要"的机会（那会污染摘要区）。`compacting` 在
+        // beginCompact() 里已置位，此处据此关掉。
+        $tools = (!$this->compacting && $spec->supportsTools()) ? AiTools::toolDefs() : null;
+        $provider = $this->providerFor($spec);
+        $cmd = $provider->buildCommand($spec, $this->messages, ProviderInterface::DEFAULT_TIMEOUT, $tools);
         if (!$this->runner->start($cmd, null)) {
             $this->streaming = false;
             $this->error = $this->shell->t('ai.error', ['msg' => 'spawn failed']);
             $this->shell->setMessage($this->error);
-            $this->provider->cleanup();
+            $provider->cleanup();
             return false;
         }
         $this->streaming = true;
         return true;
+    }
+
+    /**
+     * 取当前 spec 协议对应的传输实现（按需创建并缓存）。
+     *
+     * 顺带把 `$this->provider` 指向它 —— 所有 cleanup()/httpStatus() 调用点都走这个字段，
+     * 保证「清掉的一定是本次请求用的那个实例的临时文件」。
+     */
+    private function providerFor(ProviderSpec $spec): ProviderInterface
+    {
+        $protocol = $spec->isAnthropic() ? ProviderSpec::PROTOCOL_ANTHROPIC : ProviderSpec::PROTOCOL_OPENAI;
+        if (!isset($this->providers[$protocol])) {
+            $this->providers[$protocol] = $protocol === ProviderSpec::PROTOCOL_ANTHROPIC
+                ? new AnthropicProvider()
+                : new OpenAiCompatProvider();
+        }
+        $this->provider = $this->providers[$protocol];
+        return $this->provider;
     }
 
     /**
