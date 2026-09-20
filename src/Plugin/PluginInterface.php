@@ -13,7 +13,8 @@ use App\App;
  * 以兼容产品版（AOT 编译的核心二进制不编入插件，插件由内嵌 Zend 运行时解释）。
  *
  * 插件文件本身写普通 PHP 即可，不受 AOT 编码规范约束（全局声明 / 禁 Closure::bind /
- * 文件级禁 require 等只管「编入二进制的核心源码」，见 project_plugin.md）。
+ * 文件级禁 require 等只管「编入二进制的核心源码」，见 docs/AOT_INCOMPATIBILITY_REPORT.md
+ * 与 docs/plugins.md §6「加载机制与容错」）。
  *
  * 可选配置能力（VSCode 式「插件声明默认 + 用户配置覆盖」）：
  *  - configDefaults(): array —— 返回本插件默认配置（键 => 默认值）；

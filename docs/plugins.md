@@ -543,6 +543,11 @@ public function statusSegments(\App\App $app): array
 - **不要把插件写进 `composer.json` 的 autoload**；
 - 插件里引用核心类型时直接用全限定名（如 `\App\Plugin\StatusSegment`）即可，核心类已由应用自身加载。
 
+> 根因是 **AOT 兼容**：composer autoload 依赖 `Closure::bind`，而产品版要把核心编成二进制。
+> 核心源码受哪些约束、本仓库为此改了什么，见
+> [AOT_INCOMPATIBILITY_REPORT.md](AOT_INCOMPATIBILITY_REPORT.md)。
+> **本文档描述的插件不受那些约束**——插件由内嵌 Zend 运行时解释，不编入二进制。
+
 ---
 
 ## 7. 测试与验收

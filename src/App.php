@@ -199,7 +199,7 @@ class App
     /**
      * **全部**已加载的插件（V1：运行时动态加载，目录扫描 plugins 下各子目录的 plugin.json + 运行时 require）。
      * 由 PluginLoader 在构造末尾填充；插件文件不在 composer autoload 内，
-     * 产品版由内嵌 Zend 运行时解释（见 project_plugin.md）。
+     * 产品版由内嵌 Zend 运行时解释（见 docs/plugins.md §6「加载机制与容错」）。
      * 含被用户禁用（`<id>.enabled=false`）的插件——插件页/侧栏要列出它们才能再打开。
      * @var list<\App\Plugin\PluginInterface>
      */

@@ -21,7 +21,8 @@ final class PtyProcess
      * 0=master输入 1=master输出(含stderr)。
      * 声明为 mixed 而非 array：proc_open 的 $pipes 引用参数回填的是 stream resource，
      * AOT（TypePHP）严格类型检查会拒绝把 resource 赋给 array 属性
-     * （见 docs/AOT_INCOMPATIBILITY_REPORT.md ②）。标准 PHP 下 array 也接受 resource 元素，
+     * （见 docs/AOT_INCOMPATIBILITY_REPORT.md ②「resource 不能赋给 array 类型属性」）。
+     * 标准 PHP 下 array 也接受 resource 元素，
      * 故改 mixed 不改变运行时行为；仅为 AOT 编译兼容。
      * @var array<int, resource>
      */
