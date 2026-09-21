@@ -76,10 +76,11 @@ $drain = static function ($pipes, string &$out, float $seconds, ?callable $until
 $startApp = static function (string $tag, array $extraEnv = [], ?string $cfg = null) use ($root, $drain): array {
     $cfg ??= vc_isolate_config($tag);
     $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
+    // 固定语言：存活标记提示走 i18n，不钉住的话断言会随开发机的 APP_LOCALE 飘
     $proc = proc_open([PHP_BINARY, $root . '/bin/vicecode.php'], $descs, $pipes, $root,
-        ['VICECODE_CONFIG' => $cfg] + $extraEnv);
+        ['VICECODE_CONFIG' => $cfg, 'APP_LOCALE' => 'zh_CN'] + $extraEnv);
     $out = '';
-    $drain($pipes, $out, 10.0, static fn(string $s): bool => str_contains($s, "\e[?1049h"));
+    $drain($pipes, $out, 15.0, static fn(string $s): bool => str_contains($s, "\e[?1049h"));
     // ⚠️ `?1049h` 是 flush 出来的，此后应用还要建 Display / 起读键协程，期间若有
     // termios 变更会把 pty 的待读输入冲掉 —— 实测这段窗口里发按键会**丢键**
     // （Ctrl+Q 无反应、必须 SIGKILL 收场）。等它静下来再发。
@@ -99,7 +100,7 @@ $startApp = static function (string $tag, array $extraEnv = [], ?string $cfg = n
  *
  * @return array proc_get_status() 的原始状态（running=true 表示是我们强杀的）
  */
-$reap = static function ($proc, float $wait = 5.0): array {
+$reap = static function ($proc, float $wait = 10.0): array {
     $end = microtime(true) + $wait;
     while (true) {
         $st = proc_get_status($proc);
@@ -144,7 +145,8 @@ foreach ($cases as [$name, $signo]) {
     // 收尾后重发信号 → 进程应「真的被该信号终止」（termsig），而不是靠 exit(128+n) 假装
     check(($st['signaled'] ?? false) === true && ($st['termsig'] ?? 0) === $signo,
         "{$name}：进程确实被该信号终止（signaled=" . var_export($st['signaled'] ?? null, true)
-        . " termsig=" . var_export($st['termsig'] ?? null, true) . '）');
+        . " termsig=" . var_export($st['termsig'] ?? null, true) . '）'
+        . (($st['running'] ?? false) ? ' ← 等待期内没退出，被本用例 SIGKILL' : ''));
     // 异常结束 → 存活标记必须留着，下次启动才能提示「上次没正常退出」
     check(is_file(dirname($cfg) . '/.vicecode_alive'), "{$name}：存活标记残留（下次启动会提示）");
 
@@ -164,7 +166,8 @@ check(str_contains($out, "\e[?1000l") && str_contains($out, "\e[?1049l") && str_
     '非 Swoole：终端已还原（?1000l / ?1049l / ?25h）');
 check(($st['signaled'] ?? false) === true && ($st['termsig'] ?? 0) === SIGTERM,
     '非 Swoole：进程被 SIGTERM 终止（signaled=' . var_export($st['signaled'] ?? null, true)
-    . ' termsig=' . var_export($st['termsig'] ?? null, true) . '）');
+    . ' termsig=' . var_export($st['termsig'] ?? null, true) . '）'
+    . (($st['running'] ?? false) ? ' ← 等待期内没退出，被本用例 SIGKILL' : ''));
 @unlink(dirname($cfg) . '/.vicecode_fatal.log');
 
 echo "\n== 残留标记 → 下次启动必须提示 ==\n";
@@ -183,6 +186,18 @@ $logPath = $dir . '/.vicecode_fatal.log';
 $logTxt = is_file($logPath) ? (string) file_get_contents($logPath) : '';
 check(str_contains($logTxt, '上次会话未正常结束'),
     '上次异常结束 → 本次启动往日志写了 WARN —— 内容 ' . var_export(trim($logTxt), true));
+
+// 提示必须落在**普通屏**上（首个 `?1049h` 之前）：写进备用屏的话，退出时被弹栈冲掉，
+// 用户根本看不到 —— 那这条提示就等于没做。这两条断言就是钉这一点。
+// 文案取自 `app.stale_exit` 的 zh_CN 值（本用例已把子进程 APP_LOCALE 钉成 zh_CN）。
+$notice = '上次会话未正常结束';
+$posNotice = strpos($out, $notice);
+$posAlt = strpos($out, "\e[?1049h");
+check($posNotice !== false, '存活标记的提示确实打出来了（pty 流里能找到）');
+check($posNotice !== false && $posAlt !== false && $posNotice < $posAlt,
+    '提示写在**进入备用屏之前**（普通屏），退出后仍可见 —— pos=' . var_export($posNotice, true)
+    . ' vs ?1049h@' . var_export($posAlt, true));
+
 $marker = json_decode((string) @file_get_contents($dir . '/.vicecode_alive'), true);
 check(is_array($marker) && ($marker['pid'] ?? 0) !== 4194304,
     '本次启动把自己写进标记（覆盖掉旧的）—— 实际 ' . json_encode($marker));
@@ -205,6 +220,8 @@ check(($st['exitcode'] ?? null) === 0, '正常退出退出码为 0（实际 '
     . var_export($st['exitcode'] ?? null, true) . '）');
 check(!is_file($alivePath), '正常退出**清掉**了存活标记（否则下次启动会误报）');
 check(!is_file(dirname($cfg) . '/.vicecode_fatal.log'), '正常退出不产生致命日志');
+// 反面对照：没有残留标记时**不该**出现那条提示（否则上面对照组的断言可能只是恒真）
+check(!str_contains($out, '上次会话未正常结束'), '正常启动**不**出现「上次未正常结束」提示');
 
 echo $failed ? "\n信号还原 FAIL\n" : "\n信号还原 PASS\n";
 exit($failed ? 1 : 0);
