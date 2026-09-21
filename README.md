@@ -114,6 +114,8 @@ TUI_USE_SWOOLE=0 php bin/vicecode.php   # force fallback to the pure php-tui/ter
 
 For the Editor (`Enter` newline, `Ctrl+S` save, `Ctrl+W` close, `Ctrl+Tab` switch tab, etc.), Explorer (single-click to open a file, double-click a directory to expand/collapse, click the leading triangle to expand/collapse), and GIT / Search panel usage, see the in-app `?` help page.
 
+**Editor multi-cursor (edit several lines at once)**: `Alt+↑` / `Alt+↓` adds a cursor on the line above/below, or `Alt+click` adds one where you click (at most one cursor per line). Typing, backspace, Delete, Enter and `Tab`/`Shift+Tab` indentation then apply to **all** cursors; `Esc` collapses back to a single cursor (in that state `Esc` will not quit). The status bar shows `N cursors` in its `file=` segment. Auto-pairing and paste do **not** participate with multiple cursors (they act on the main cursor only) — for auto-pairing because "should this pair here?" can differ per position, so one keystroke producing different results would be unpredictable. `Alt+click` adds a cursor and does **not** start a selection (hold `Alt`, otherwise it is a normal drag-copy).
+
 ## Terminal panel
 
 The Terminal panel has two modes, toggled with **F2**:
@@ -165,6 +167,7 @@ The right-hand AI panel is wired into the workspace: OpenAI- / DeepSeek-compatib
 - **Route by task type**: a strategy may declare `kinds` (e.g. `['unittest', 'refactor']`) and is then picked automatically for matching requests. Task types come from exactly two places, neither guessed: **quick actions** (explain/comment/refactor/unittest) and an **input prefix** such as `/plan rework this module` (the prefix is never sent to the model; an unknown type refuses to send and lists the known ones; `//` escapes a literal slash). **Manual wins**: picking a tier by hand (`Ctrl+R`, the menu, or switching provider) *pins* it and pauses auto-routing, while `Ctrl+R` includes an "auto" stop to hand control back — the status bar spells out who is in charge (`strategy=plan·auto` vs `strategy=plan`), and a typed task type is reported as ignored instead of silently doing nothing.
 
 - **Code context**: mention files with `@path/in/project` in the input — each reference is expanded into a syntax-highlighted fenced block before sending (paths are validated against the project root: `../`, absolute paths, root-escaping symlinks and binaries are rejected; per-file cap `ai.attachMaxBytes`, default 64 KB, truncated with a note). The menu *AI → Attach editor selection / Attach current file* injects context too.
+- **Tab completion & indentation**: type `@` and a candidate list of project paths pops up (directories carry a trailing slash, prefix-filtered) — `Tab` accepts, `Shift+Tab` selects the previous one, `Esc` dismisses. With no candidates, `Tab` indents by 4 spaces in the AI input and the editor, and `Shift+Tab` outdents; single-line inputs (search / commit) and the other panels keep `Tab` for focus cycling (reverse with `Shift+Tab`). Plugins can serve candidates too via `completions()` (same key, same popup) — that is the landing point for AI autocomplete.
 - **Read-only tools (Agent loop)**: the model may call `list_files` / `read_file` inside the project. Calls run locally and the loop continues until the model answers or `ai.maxSteps` (default 8) is reached. In-stream you see the call line (`→ name(args)`) and a one-line result summary (`⚙ name(path) ✓`) — file contents are never dumped into the chat. Tool results are summarized on click-copy. Set `ai.toolAutoRun: false` to approve each call with `y` / `n` (`Esc` cancels).
 - **Context compaction**: when the estimated token count exceeds `ai.compactThreshold` (default 24000), the oldest history is summarized automatically (keeping the most recent `ai.compactKeepRecent`, default 6 messages) before the real request; compaction never splits a tool_call/result pair and falls back to "no compaction" on failure. Trigger manually via *AI → Compact conversation now*.
 - **Conversation persistence** (on by default): every finished exchange is saved to `~/.vicecode_ai` (`0600`) and restored on the next launch; `Ctrl+L` clears the chat and the archive together. Disable with `ai.persist: false`.
@@ -176,6 +179,12 @@ All keys and behaviors are documented in the in-app `?` help page.
 ## Configuration & Language
 
 - Config is persisted to `~/.vicerc` (JSON: layout / theme / language, `persistSession`, and the `ai` section — `persist` / `toolAutoRun` / `maxSteps` / `compactThreshold` / `compactKeepRecent` / `attachMaxBytes`) and auto-saved on exit. On save, ViceCode **merges** with the existing file so hand-edited keys (like `persistSession`) are preserved.
+- The `editor` section controls editor behaviour. Right now it only holds auto-pairing:
+  ```json
+  { "editor": { "autoPairs": ["()", "[]", "{}", "\"\"", "''"] } }
+  ```
+  Each entry is an `open` + `close` pair. **That list is the default** — it deliberately omits `<>`, because in PHP `<` is an operator and auto-closing `if ($a < $b)` into `<>` is pure noise; add it yourself if you want it. Writing `[]` **disables** auto-pairing. Save `~/.vicerc` from inside the editor and the change takes effect.
+  Behaviour: typing an opening symbol inserts its closing one and leaves the cursor in between; typing a closing symbol that already sits to the right **skips over** it instead of duplicating; backspace inside an empty pair deletes **both**; typing an opening symbol with a selection **wraps** the selection; quotes are **not** paired when they follow a letter/digit/underscore (`don't`, `it's`).
 - Override the config path with the `VICECODE_CONFIG` env var (used for test isolation to avoid polluting the home directory).
 - UI language is switched via `APP_LOCALE`, default `zh_CN`, `en` also available; missing keys fall back to English.
 

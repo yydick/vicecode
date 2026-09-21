@@ -846,7 +846,7 @@ final class TerminalPanel
 
         return Line::fromSpans(
             Span::styled($prompt, $promptStyle),
-            ...SpanClip::clip($spans, $focused, $this->pos, $scrollLeft, $textW)
+            ...SpanClip::clip($spans, $focused ? [$this->pos] : [], $scrollLeft, $textW)
         );
     }
 

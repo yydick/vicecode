@@ -102,6 +102,37 @@ function bashRcfileCount(): int
 }
 
 /**
+ * 生成一份「**不可捕获的致命错误**发生在终端已就绪之后」的入口副本（场景 C）。
+ *
+ * 为什么单独一个场景：场景 A/B 注入的都是 `throw`（Throwable），能被 `start()` 的
+ * try/catch/finally 接住 → 终端照常还原。但 PHP 的**致命错误**（E_ERROR /
+ * E_USER_ERROR / 内存耗尽）**不会执行 finally** —— 实测：内存耗尽与未捕获 Error 下
+ * finally 都不跑，而 `register_shutdown_function` 会跑。
+ * 于是这类死亡会把终端留在 raw + alternate screen + **鼠标上报开着**：用户回到 shell 后
+ * 每动一下鼠标就被灌进 `ESC[<b;x;yM`（`ESC [ <` 被终端当控制序列吃掉，只剩数字
+ * → `-bash: 35: command not found`）。这是用户实测报上来的现象。
+ *
+ * 注入点放在 `start()` 里终端已进入 raw/备用屏/鼠标**之后**，否则测不到"烂摊子"。
+ */
+function makeFatalEntry(string $root): string
+{
+    $src = (string) file_get_contents($root . '/bin/vicecode.php');
+    $anchor = "    \$term->flush();\n\n    // ⚠️ 从这里到函数结束";
+    if (!str_contains($src, $anchor)) {
+        throw new RuntimeException('找不到注入点（终端已就绪之后），bin/vicecode.php 结构变了');
+    }
+    $inject = "    \$term->flush();\n"
+        . "    trigger_error('fatal injected by pty_crash', E_USER_ERROR);\n\n"
+        . "    // ⚠️ 从这里到函数结束";
+    $out = str_replace($anchor, $inject, $src);
+    $dir = $root . '/.vicecode_fatal_' . getmypid();
+    @mkdir($dir);
+    $path = $dir . '/vicecode.php';
+    file_put_contents($path, $out);
+    return $path;
+}
+
+/**
  * 场景 B 的编排：起应用 → 焦点切到终端 → F2 进交互 pty → **等到交互 shell 真的起来**
  * → 创建标记文件 + 发一个按键触发崩溃 → 收输出。
  *
@@ -314,5 +345,34 @@ check($orphAfter <= $orphBefore,
 @unlink($crashB);
 @rmdir(dirname($crash));
 @rmdir(dirname($crashB));
+
+echo "== 场景 C：**不可捕获的致命错误**也必须还原终端 ==\n";
+$crashC = makeFatalEntry($root);
+register_shutdown_function(static function () use ($crashC): void {
+    @unlink($crashC);
+    @rmdir(dirname($crashC));
+});
+[$codeC, $outC, $errC] = runInPty($crashC, ['VICECODE_CONFIG' => $cfgFile]);
+// 正向锚点：先证明致命错误真的发生了，否则下面的断言是空转（feedback §1.3）
+check(str_contains($outC, 'fatal injected'), '注入的致命错误确实发生（正向锚点）');
+check($codeC !== 0, '致命错误时进程非 0 退出（实际 ' . $codeC . '）');
+// ★ 核心三条：致命错误下 finally 不执行，必须靠 register_shutdown_function 兜底
+check(str_contains($outC, "\x1b[?1000l"),
+    '致命错误后仍关闭鼠标捕获 ESC[?1000l（否则鼠标上报会灌进用户的 shell）');
+check(str_contains($outC, "\x1b[?1049l"), '致命错误后仍退出 alternate screen ESC[?1049l');
+check(str_contains($outC, "\x1b[?25h"), '致命错误后仍显示光标 ESC[?25h');
+// 还原序列同样只应出现一次（shutdown 兜底不能与 finally 重复发）
+$restoreCountC = preg_match_all('/\x1b\[\?1049l/', $outC);
+check($restoreCountC === 1, '致命错误路径的还原序列也只发一次（实际 ' . $restoreCountC . ' 次）');
+// 致命错误必须**落盘**：还原终端只能止血，用户还得知道"为什么死"。
+// 原本那行 `PHP Fatal error:` 是打在 alternate screen 上的，还原后就被冲掉了 —— 用户实测
+// 报这个 bug 时，正是因为没有这行日志，只能看到终端乱掉。日志落在配置同目录，测试隔离时自动清理。
+$fatalLog = dirname($cfgFile) . '/.vicecode_fatal.log';
+check(is_file($fatalLog) && str_contains((string) file_get_contents($fatalLog), 'fatal injected'),
+    '致命错误被写入日志（下次不必靠猜）—— ' . $fatalLog);
+check(str_contains($outC, '若终端仍不正常'), '致命错误后打印了终端自救提示（reset / stty sane）');
+@unlink($crashC);
+@rmdir(dirname($crashC));
+
 echo $failed ? "\nR3 崩溃还原 FAIL\n" : "\nR3 崩溃还原 PASS\n";
 exit($failed ? 1 : 0);

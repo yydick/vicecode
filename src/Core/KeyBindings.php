@@ -36,7 +36,9 @@ final class KeyBindings
         return [
             self::group('help.group_global', [
                 ['Ctrl+Q', 'help.g_quit'],
-                ['Tab', 'help.g_focus'],
+                ['Tab', 'help.g_tab'],
+                ['Shift+Tab', 'help.g_tab_back'],
+                ['Alt+↑ / Alt+↓', 'help.g_add_cursor'],
                 ['Esc', 'help.g_esc'],
                 ['q', 'help.g_q'],
                 [self::HELP_KEY, 'help.g_help'],

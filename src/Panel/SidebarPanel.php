@@ -544,6 +544,20 @@ final class SidebarPanel
     }
 
     /** Search tab 各可点击元素的屏幕坐标（渲染与命中测试共用，保证一致） */
+    /** 当前 tab 的**输入行**矩形（Tab 补全浮层要贴在这一行上）；非输入类 tab 返回 null。 */
+    public function inputRowArea(Area $sb): ?Area
+    {
+        if ($this->tabIndex === 2) {
+            $r = $this->searchRects($sb);
+            return Area::fromScalars($r['innerX'], $r['inputY'], max(1, $r['innerW']), 1);
+        }
+        if ($this->tabIndex === 1) {
+            $r = $this->gitRects($sb);
+            return Area::fromScalars($r['innerX'], $r['inputY'], max(1, $r['innerW']), 1);
+        }
+        return null;
+    }
+
     private function searchRects(Area $sb): array
     {
         $innerX = $sb->position->x + 1;
@@ -572,6 +586,10 @@ final class SidebarPanel
         $row = $pos->y;
 
         if ($row === $r['inputY']) {
+            // ⚠️ 必须自己聚焦：App::handleClick 在侧栏 onClick 返回 true 后会**提前 return**，
+            // 不会再走 focus()。少了这一句，从编辑器/终端点进搜索框时焦点还在原面板，
+            // 键入的字符会落到那边，搜索框一个字都收不到（注释里写的"聚焦"原本并没有做）。
+            $this->shell->focus('sidebar');
             $s->editingQuery = true;
             return true;
         }
@@ -817,7 +835,10 @@ final class SidebarPanel
         }
 
         if ($row === $r['inputY']) {
-            return true; // 输入框默认聚焦，点击即聚焦
+            // ⚠️ 与 searchClick 同一个坑：App::handleClick 在侧栏 onClick 返回 true 后提前 return，
+            // 不会聚焦侧栏。「输入框默认聚焦」只在焦点本来就在侧栏时成立 —— 从编辑器点过来就不成立了。
+            $this->shell->focus('sidebar');
+            return true;
         }
 
         if ($row === $r['commitY']) {

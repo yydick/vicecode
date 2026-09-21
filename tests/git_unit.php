@@ -181,6 +181,24 @@ $app2->git->commitMsg = '';
 $app2->handle(CodedKeyEvent::new(KeyCode::Enter, 0), $vp);
 check(str_contains($app2->message, '提交信息'), '空消息 Enter 提交被拒（提示）');
 
+// a2) 点提交信息输入框必须把焦点交给侧栏
+// 上面用的都是「焦点本来就在侧栏」的路径。用户从编辑器/终端点进提交框时焦点还在原面板，
+// 而 App::handleClick 在侧栏 onClick 返回 true 后**提前 return**（不聚焦），gitClick 的
+// 输入框分支又写着「输入框默认聚焦，点击即聚焦」——那个假设在别的面板聚焦时不成立，
+// 于是键入的字符落到原焦点面板，提交框一个字都收不到。
+$appG = new App();
+$appG->sidebar->tabIndex = 1;
+$appG->focus('editor');                 // 模拟「刚从编辑器过来」
+$sbG = $appG->areas($vp)['sidebar'];
+$msgRow = $sbG->position->y + 1 + 2 + 2;   // 上边框 + tab/分隔偏移 + GIT_INPUT_ROW
+$msgCol = $sbG->position->x + 3;
+$appG->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $msgCol, $msgRow, 0), $vp);
+check($appG->focusPanel() === 'sidebar',
+    '点提交信息输入框后焦点在侧栏（实际 ' . $appG->focusPanel() . '）');
+$appG->handle(CharKeyEvent::new('f', 0), $vp);
+check($appG->git->commitMsg === 'f',
+    '点提交框后键入进提交框（实际 ' . var_export($appG->git->commitMsg, true) . '）');
+
 // b) 鼠标点 Commit ▾ 展开下拉；菜单含四项
 $sb = $app2->areas($vp)['sidebar'];
 $arrowCol = $sb->position->x + 1 + max(0, ($sb->width - 2) - 1);

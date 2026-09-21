@@ -18,6 +18,7 @@ declare(strict_types=1);
 require __DIR__ . '/../vendor/autoload.php';
 
 use App\App;
+use App\Core\ConfigStore;
 use PhpTui\Term\Terminal;
 use PhpTui\Term\Actions;
 use PhpTui\Term\Event;
@@ -115,6 +116,52 @@ function reportFatal(Throwable $e): void
 }
 
 /**
+ * 退出收尾：**正常退出、未捕获异常、致命错误**三条路径共用同一件事，且只做一次。
+ *
+ * ⚠️ 为什么不能只靠 `start()` 的 finally：PHP 的**致命错误**（`E_ERROR` /
+ * `E_CORE_ERROR` / `E_COMPILE_ERROR` / `E_USER_ERROR` / 内存耗尽）**不会执行 finally**
+ * —— 实测（两行脚本即可复现）：内存耗尽与未捕获 Error 下 finally 都不跑，
+ * 而 `register_shutdown_function` 都跑。
+ *
+ * 少了这层兜底，进程一死于致命错误，终端就留在 raw mode + alternate screen
+ * + **鼠标上报开着**：用户回到 shell 后每动一下鼠标，终端就往 tty 灌
+ * `ESC[<b;x;yM`（`ESC [ <` 被终端当控制序列吃掉，只剩数字）
+ * → 显示成 `-bash: 35: command not found`。这是用户实测报上来的现象。
+ *
+ * `run()` 幂等：第二次调用直接返回。**这条必须守住**——当年 `Coroutine\defer` 与
+ * finally 各还原一次，还原序列发两遍，才把 defer 撤掉的（见 startMain 的注释）。
+ */
+final class Shutdown
+{
+    /** @var null|\Closure():void 由 start() 注册：落盘偏好 + 回收资源 + 还原终端 */
+    private static ?\Closure $cleanup = null;
+
+    private static bool $ran = false;
+
+    public static function register(\Closure $cleanup): void
+    {
+        self::$cleanup = $cleanup;
+    }
+
+    public static function run(): void
+    {
+        if (self::$ran) {
+            return;
+        }
+        self::$ran = true;   // 先置位：cleanup 自身若再抛错也不会重入
+        if (self::$cleanup !== null) {
+            (self::$cleanup)();
+        }
+    }
+
+    /** 致命错误日志路径：与配置同目录（`VICECODE_CONFIG` 的 dirname），测试隔离时自动落进临时目录 */
+    public static function fatalLogPath(): string
+    {
+        return dirname(ConfigStore::path()) . '/.vicecode_fatal.log';
+    }
+}
+
+/**
  * 解析启动参数（纯函数，便于单测）。返回 [openFile, chdirTo]：
  *  - 首个非选项位置参数：目录 → chdirTo=realpath；可读文件 → openFile；'.' → 两者皆 null（当前目录）。
  *  - 无匹配参数 → 两者皆 null。
@@ -172,7 +219,27 @@ function start(bool $sw, array $argv): void
 
     // ── 进入终端（终端动作仍走 php-tui/term）──
     $term = Terminal::new();
+
+    // ⚠️ 收尾闭包必须在**终端被改动之前**就注册好，否则「raw mode 已生效、收尾还没挂上」
+    // 那个窗口里的致命错误依然会把终端留在 raw mode（`register_shutdown_function` 是在
+    // 顶层注册的，但它跑的时候只能调用这里注册进来的闭包）。
+    //
+    // `$terminalTouched` 用来精确界定"有没有东西要还原"：raw mode 一生效就置位，
+    // 因为在它之前退出的话根本无需还原（disableRawMode 还原的是一份尚未被改动的 stty 设置）。
+    $terminalTouched = false;
+    Shutdown::register(static function () use ($app, $term, &$terminalTouched): void {
+        $app->saveConfig();       // R7：退出前把偏好落盘（~/.vicerc），内部容错不抛
+        // 资源回收兜底（与终端还原同理，必须覆盖**所有**退出路径）：正常退出由 Lifecycle 的
+        // 关闭闭包做，但未捕获异常/致命错误等路径只走到这里——不在这里收，pty/shell 子进程就只靠
+        // 内核在 pty 主端关闭时发 SIGHUP 兜底，bash `--rcfile` 的临时文件也不会被删。幂等。
+        $app->shutdownResources();
+        if ($terminalTouched) {
+            restoreTerminal($term);
+        }
+    });
+
     $term->enableRawMode();
+    $terminalTouched = true;   // 从这里起，终端有任何改动都需要还原
     $term->queue(
         Actions::alternateScreenEnable(),
         Actions::enableMouseCapture(),
@@ -184,8 +251,11 @@ function start(bool $sw, array $argv): void
     // ⚠️ 从这里到函数结束**任何**退出路径都要还原终端：
     // 少了 finally 的话，一个未捕获异常就会把终端留在 raw mode + alternate screen
     // （无回显、无光标，用户的 shell 直接废掉）—— 这正是 M0 早期"花屏"的根因。
-    // restoreTerminal 是幂等的（只是发几段转义序列），与 Swoole 分支的
-    // Coroutine\defer 重复调用也无害。
+    //
+    // 但 finally **覆盖不到致命错误**（PHP 的 E_ERROR / 内存耗尽不走 finally），
+    // 所以同一份收尾同时注册给 Shutdown（由顶层 register_shutdown_function 兜底）。
+    // 两边共用同一个闭包 + Shutdown::run() 的幂等标志，保证**只做一次**。
+
     try {
         startMain($app, $term, $sw);
     } catch (Throwable $e) {
@@ -196,12 +266,9 @@ function start(bool $sw, array $argv): void
         $app->quit = true;
         throw $e;
     } finally {
-        $app->saveConfig();       // R7：退出前把偏好落盘（~/.vicerc），内部容错不抛
-        // 资源回收兜底（与终端还原同理，必须覆盖**所有**退出路径）：正常退出由 Lifecycle 的
-        // 关闭闭包做，但未捕获异常等路径只走到这里——不在这里收，pty/shell 子进程就只靠内核
-        // 在 pty 主端关闭时发 SIGHUP 兜底，bash `--rcfile` 的临时文件也不会被删。幂等。
-        $app->shutdownResources();
-        restoreTerminal($term);
+        // 与致命错误路径共用（幂等）：正常/异常退出在这里收尾，
+        // 致命错误则由 register_shutdown_function 再兜一次。
+        Shutdown::run();
     }
 }
 
@@ -354,6 +421,39 @@ $useSwoole = (getenv('TUI_USE_SWOOLE') ?: '1') === '1'
 // 仅当本文件被直接执行（而非被测试 require）时才启动 TUI；
 // 守卫让 tests/cli_dir.php 能 require 本文件调用 resolveStartArg 而不误进界面。
 if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
+    // 致命错误兜底：必须在**进入终端之前**注册 —— 终端一旦被置成 raw/备用屏/鼠标捕获，
+    // 任何一条不经过 finally 的死亡（E_ERROR、E_USER_ERROR、内存耗尽…）都会把它留在那儿。
+    // 详见 Shutdown 的类注释与 tests/pty_crash.php 场景 C。
+    register_shutdown_function(static function (): void {
+        $e = error_get_last();
+        $isFatal = $e !== null && in_array(
+            $e['type'],
+            [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR],
+            true
+        );
+        // 先收尾（还原终端），再谈日志：日志要落在已经还原好的屏幕上。
+        Shutdown::run();
+        if (!$isFatal) {
+            return;
+        }
+        // 致命错误信息原本会打在 alternate screen 上，还原后会被冲掉看不清 —— 所以另外落盘。
+        // 这也是「用户只看到终端乱掉、却不知道原因」时唯一的线索来源。
+        $line = sprintf(
+            "[%s] %s: %s @ %s:%d\n",
+            date('c'),
+            $e['type'] === E_USER_ERROR ? 'E_USER_ERROR' : 'FATAL',
+            $e['message'],
+            $e['file'],
+            $e['line']
+        );
+        $log = Shutdown::fatalLogPath();
+        @file_put_contents($log, $line, FILE_APPEND);
+        fwrite(STDERR, "\nViceCode 致命错误（终端已尝试还原）：{$e['message']}\n");
+        fwrite(STDERR, "  {$e['file']}:{$e['line']}\n");
+        fwrite(STDERR, "  日志：{$log}\n");
+        fwrite(STDERR, "  若终端仍不正常（鼠标乱码 / 无回显）：reset 或 stty sane\n");
+    });
+
     // 交互式终端前置检查：非 tty 的 stdin（重定向 / 管道 / `</dev/null`）下，php-tui 取
     // raw mode 必然失败 —— vendor SttyRawMode::enable() 靠 `stty -g` 探测，非 tty 时直接抛
     // RuntimeException('Could not get stty settings')。在这里、**协程之外**快速失败，用户

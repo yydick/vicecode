@@ -47,6 +47,40 @@
 - **修复**：argv 解析跳过 `$argv[0]`。
 - **防回归**：`tests/cli_dir.php`。
 
+#### A5. 编辑器回车无效 + 点侧栏搜索框/提交框打字不进去（三处，用户实测报障） `[本轮]`
+- **现象**（用户实测，一次报了两个）：① 编辑器里按回车**毫无反应**；② 搜索窗口"无法输入搜索内容"。
+  顺着 ② 复查又发现 ③：点 GIT 提交信息框同样打不进字。
+- **根因（三类，前两类都是老坑重演）**：
+  - **① 编辑器**：`EditorPanel::onKey` 里**没有 `KeyCode::Enter` 分支**。`onChar` 里那条
+    `"\r"` 分支在真实终端**永远不会走到**（终端发的是 `CodedKeyEvent(Enter)`）——
+    这与 A2（AI 面板回车发不出去）是**同一个坑**，当年只修了 AI 输入框，编辑器漏了。
+    为什么长期没暴露：`tests/m1_smoke.php` 只测了 `CharKeyEvent("\r")`（直接调 Buffer 的那几条更测不到），
+    编辑器键盘路径**从没走过 `App::handle` + `CodedKeyEvent(Enter)`**。
+  - **②③ 侧栏两个输入框**：`App::handleClick` 在侧栏 `onClick()` 返回 true 后**提前 return**，
+    **不会再调 `focus()`**。而 `SidebarPanel` 的 tab 行与目录树分支**都自己调了 `focus('sidebar')`**，
+    唯独 `searchClick` 与 `gitClick` 的输入框分支漏了 —— 它们只置内部状态就返回：
+    `searchClick` 只 `$s->editingQuery = true`；`gitClick` 更直接，注释写着
+    「输入框默认聚焦，点击即聚焦」——那个假设**只在焦点本来就在侧栏时成立**。
+    于是从编辑器/终端点进搜索框或提交框再打字，字符会落到**原焦点面板**（搜索框一个字都收不到）。
+    ⚠️ 两个方法的**文档注释都声称会聚焦**（`searchClick` 写着"输入框行：聚焦并转回编辑查询语义"），
+    代码里却没有 —— 注释与实现不一致，和 T6 是同一种"注释说了、代码没做"。
+  - 为什么长期没暴露：`tests/search_unit.php` 直接 `$app->sidebar->tabIndex = 2`
+    （**绕过了点击路径**），且该文件里所有交互断言都基于「默认焦点就是 sidebar」；
+    `tests/pty_search.php` 是**点 tab 行**进的搜索（那条分支恰好有聚焦），所以一直是绿的。
+    即"测试用了一条不会经过这个 bug 的入口"。
+- **修复**：
+  - `EditorPanel::onKey` 补 `KeyCode::Enter` → `insertNewline()` + `followBoth($buf, $textW)`。
+    ⚠️ 用**本方法算出的 `$textW`**，不是 `onChar` 依赖的 `$this->lastTextW` ——
+    后者只在渲染过才有值，键盘先于首帧到达时会是 0。
+  - `searchClick` / `gitClick` 的输入框分支补 `$this->shell->focus('sidebar')`。
+- **防回归**（三条都是**先写红再修**，即每条的"可失败"由修复前实测证明）：
+  `tests/m1_smoke.php`（`CodedKeyEvent(Enter)` 插入新行 + 光标下移）、
+  `tests/search_unit.php`（`focus('editor')` → 点输入框 → 断言焦点在侧栏 + 键入进 query）、
+  `tests/git_unit.php`（同款，断言键入进 commitMsg）。
+- **教训**：**"这个面板的回车/字符我修过了"必须按面板逐个确认** —— A2 修的是 AI 输入框，
+  编辑器与侧栏两个输入框当时都没查。同理，**点出来的输入框要自己聚焦**：
+  父级的 `handleClick` 一旦提前 return，就别指望有人替你 `focus()`。
+
 ---
 
 ### B. 渲染与布局
@@ -318,6 +352,50 @@
   发 SIGHUP → 断言仍不残留；带两条正向锚点（应用起来了 / shell 起来了 / SIGHUP 真的送到了），
   并自行清理它制造的那条孤儿 bash（真实场景由内核一起收走，本用例只给应用发信号）。
   **反向验证**：把自删行注释掉 → 两条核心断言都 FAIL（`vicetui_rc_*：0 → 1`），正是用户报的现象。
+
+#### D10. **不可捕获的致命错误**下终端不还原 → 鼠标上报灌进用户的 shell `[本轮]`
+- **现象**（用户实测上报）：跑完 `php bin/vicecode.php <大目录>` 后回到 shell，**每动一下鼠标**
+  就有一串 `35;57;39M35;57;38M…` 被 shell 当命令读，刷出成片的 `-bash: 35: command not found`。
+  用户的第一反应是「OOM 了么？」
+- **先证伪 OOM**（结论：不是 OOM，三条独立证据）：
+  1. `dmesg` 里 OOM-kill 记录 **0 条**（内核没杀过进程）；
+  2. 用那个目录（626MB / 18854 个文件）启动并退出，**峰值 RSS 仅 43.8 MB**，
+     而 `memory_limit=2048M`，差 46 倍；
+  3. 连续渲染 4000 帧，`gc_status()` 显示自动 GC 正常触发（runs 0→4），
+     内存**锯齿波动、峰值稳定在 7.6 MB**，不增长。
+     附带纠正一个中途的误判：单看 `memory_get_usage()` 会得到「每帧 +3232 字节」，
+     但那 1200 个循环 `gc_collect_cycles()` 一收就回到起点以下 —— 是**可回收的循环垃圾**，
+     不是泄漏。**判内存问题必须看自动 GC 下的长跑曲线，不能只看累计差值。**
+- **根因**：`bin/vicecode.php` 的终端还原（离开备用屏 / 关鼠标 / 显示光标）**只挂在
+  `start()` 的 `finally`** 上。而 PHP 的**致命错误**（`E_ERROR` / `E_PARSE` /
+  `E_CORE_ERROR` / `E_COMPILE_ERROR` / `E_USER_ERROR` / 内存耗尽）**不执行 `finally`**。
+  实测（两行脚本即可复现）：内存耗尽与未捕获 `Error` 下 `finally` 都不跑，
+  而 `register_shutdown_function` **都跑**。
+  于是进程一死于致命错误，终端就留在 raw mode + alternate screen + **鼠标上报开着**；
+  备用屏还开着并不妨碍 bash 打印提示符，所以用户看到的是「正常提示符 + 鼠标乱码」。
+  （`ESC [ <` 被终端当控制序列吃掉，只剩 `b;x;yM` 的数字部分显示出来 —— 这就是那串乱码的真身。）
+- **修复**：把收尾（落盘偏好 + 回收资源 + 还原终端）抽成**一份**闭包，`Shutdown::register()`
+  注册进去，由 `finally` 与顶层 `register_shutdown_function` **两条路径共用**，
+  `Shutdown::run()` 幂等（第二次直接返回）—— 幂等这条必须守住，否则就是 D3 重演（还原序列发两遍）。
+  - **注册时机比想象中要紧**：第一版把注册放在 `$term->flush()` 之后，结果场景 C 直接红 ——
+    「raw mode 已生效、收尾还没挂上」那个窗口里的致命错误依然留烂摊子。
+    改为**在 `enableRawMode()` 之前注册**，并用 `$terminalTouched` 标志精确界定「有没有东西要还原」
+    （未动过终端时退出不需要还原，`disableRawMode()` 也不该去还原一份没改过的 stty 设置）。
+  - 顺手补上**致命错误落盘**（`<配置目录>/.vicecode_fatal.log`）+ 一句自救提示
+    （`reset` / `stty sane`）：还原终端只能止血，用户还得知道"为什么死"。
+    原先那行 `PHP Fatal error:` 打在 alternate screen 上，一还原就被冲掉 ——
+    用户报这个 bug 时，正是因为没有这行日志，只能看到终端乱掉。
+- **防回归**：`tests/pty_crash.php` **场景 C**（注入 `E_USER_ERROR`，与内存耗尽同类：
+  都不可被 try/catch 捕获、都不走 finally）断言致命错误后**仍**发出
+  `?1049l` / `?1000l` / `?25h`，并且**只发一次**，以及日志落盘 + 自救提示。
+  三条**反向注入**都实测可 FAIL 并入账：
+  ① 去掉落盘 → 日志断言红；② 让还原在 finally 里再发一遍 → 「只发一次」断言红（实际 2 次）；
+  ③ 拿掉 shutdown 兜底 → 场景 C 三条还原断言全红（实际 0 次）。
+- **教训**：**`finally` ≠ "所有退出路径"**。PHP 里这是三类性质不同的退出：
+  正常返回 / 可捕获异常（`finally` 管）、致命错误（只有 shutdown 函数管）、
+  **信号终止**（SIGTERM/SIGHUP 需装信号处理器，**SIGKILL 谁都管不了**）。
+  本项目已经在 D6→D7→D9→D10 上连着踩了四次「又发现一条没枚举到的退出路径」，
+  所以判据应当是「**这条路径能不能被覆盖**」而不是「我已经枚举完了几条」。
 
 ---
 

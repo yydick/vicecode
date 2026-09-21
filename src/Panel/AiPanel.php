@@ -6,6 +6,7 @@ namespace App\Panel;
 use App\Ai\ChatModel;
 use App\Ai\MarkdownFormatter;
 use App\App;
+use App\Core\CompletionState;
 use App\Core\KeyInput;
 use App\Text\DisplayWidth;
 use PhpTui\Tui\Display\Area;
@@ -734,6 +735,47 @@ final class AiPanel
             return;
         }
         $this->input .= $text;
+        $this->histIdx = -1;
+    }
+
+    /**
+     * 缩进（Tab）：末尾追加 `CompletionState::INDENT_SPACES` 个空格。
+     *
+     * 这个输入框**没有光标位**（只能末尾编辑），所以"在光标处缩进"就是"在末尾追加"。
+     * 手打多行 prompt 或粘贴代码后用得上。
+     */
+    public function insertIndent(): void
+    {
+        $this->input .= str_repeat(' ', CompletionState::INDENT_SPACES);
+        $this->histIdx = -1;
+    }
+
+    /**
+     * 反向缩进（Shift+Tab）：末尾最多删 `INDENT_SPACES` 个**连续空格**。
+     *
+     * 只在末尾确实是一段空格时才动作 —— 否则会把用户刚打进去的字吃掉。
+     * @return bool 是否真的改了（没改则上层不必重绘、也不吞这个键）
+     */
+    public function outdentTail(): bool
+    {
+        $len = mb_strlen($this->input);
+        $n = 0;
+        while ($n < CompletionState::INDENT_SPACES && $n < $len
+            && mb_substr($this->input, $len - $n - 1, 1) === ' ') {
+            $n++;
+        }
+        if ($n === 0) {
+            return false;
+        }
+        $this->input = mb_substr($this->input, 0, $len - $n);
+        $this->histIdx = -1;
+        return true;
+    }
+
+    /** 补全接受：把末尾从 $start 起的那段替换成 $insert（无光标位，故只可能替换到末尾）。 */
+    public function replaceTail(int $start, string $insert): void
+    {
+        $this->input = mb_substr($this->input, 0, max(0, $start)) . $insert;
         $this->histIdx = -1;
     }
 

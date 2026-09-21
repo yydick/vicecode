@@ -109,6 +109,48 @@ final class ConfigStore
         return $v === true || $v === 1 || $v === '1';
     }
 
+    // ── 编辑器配置（.vicerc 的 "editor" 段；缺失/类型不对一律走默认值）──────
+
+    /**
+     * 自动配对的默认集。
+     *
+     * **刻意不含 `<>`**：PHP 里 `<` 是运算符，`if ($a < $b)` 会被自动补成 `if ($a <> $b)`，
+     * 干扰远大于收益。想要的人自己往 `editor.autoPairs` 里加（配置模板里有注释示例）。
+     */
+    private const DEFAULT_AUTO_PAIRS = ['()', '[]', '{}', '""', "''"];
+
+    /** 读 editor 段（顶层键 "editor"），非数组返回空 */
+    private static function editorSection(): array
+    {
+        $v = self::load()['editor'] ?? [];
+        return is_array($v) ? $v : [];
+    }
+
+    /**
+     * 编辑器的自动配对符号（`.vicerc` 的 `editor.autoPairs`），每项是「左符号+右符号」两个字符。
+     *
+     * - **缺省**（没写这个键）= 默认集 `() [] {} "" ''`；
+     * - **显式写 `[]`** = 关闭自动配对（与"没写"区分开，这样才能真的关掉）；
+     * - **脏条目直接丢掉**（不是字符串 / 长度不等于 2 / 重复）：配置写错不该让整个功能失效，
+     *   更不该因为一条坏数据就崩在按键路径上。
+     *
+     * @return list<string>
+     */
+    public static function editorAutoPairs(): array
+    {
+        $v = self::editorSection()['autoPairs'] ?? null;
+        if (!is_array($v)) {
+            return self::DEFAULT_AUTO_PAIRS;
+        }
+        $out = [];
+        foreach ($v as $p) {
+            if (is_string($p) && mb_strlen($p) === 2 && !in_array($p, $out, true)) {
+                $out[] = $p;
+            }
+        }
+        return $out;
+    }
+
     // ── AI V2 配置（.vicerc 的 "ai" 段；缺失/类型不对一律走默认值）──────
 
     /** 读 ai 段（顶层键 "ai"），非数组返回空 */

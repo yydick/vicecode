@@ -199,6 +199,15 @@ $app2->handle(CodedKeyEvent::new(KeyCode::Home, 0), $vp);
 $app2->handle(CodedKeyEvent::new(KeyCode::Left, 0), $vp);
 check($app2->buffer->cursorCol === 0, 'Home+Left 不越界（cursorCol=0）');
 
+// 回车换行必须走 **CodedKeyEvent(Enter)**：真实终端发的就是它，而 onChar 里挂的 "\r"
+// 在真实终端**永远不会到**（`BUGFIXES` A2 是同一个坑，那次修的是 AI 输入框）。
+// 只测 CharKeyEvent("\r") 的话 headless 全绿、真实终端按回车毫无反应。
+$linesBefore = count($app2->buffer->lines);
+$app2->handle(CodedKeyEvent::new(KeyCode::Enter, 0), $vp);
+check(count($app2->buffer->lines) === $linesBefore + 1,
+    '编辑器按回车（CodedKeyEvent）插入新行（实际行数 ' . $linesBefore . ' → ' . count($app2->buffer->lines) . '）');
+check($app2->buffer->cursorRow === 1, '回车后光标下移到第 2 行（实际 cursorRow=' . $app2->buffer->cursorRow . '）');
+
 // 超大文件保护
 $big = vc_tmp_file('m1big');
 file_put_contents($big, str_repeat('x', 6_000_000));

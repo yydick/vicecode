@@ -12,6 +12,28 @@
 
 > 本轮主题：**AI V2** —— 把 AI 从「孤岛聊天框」接进工作台：代码上下文、只读工具 Agent loop、上下文压缩、对话持久化与 Markdown 渲染。
 
+### 新增（编辑器多光标：多行同时编辑）
+
+- **Alt+↑ / Alt+↓** 在上/下一行加一个编辑光标，**Alt+点击**在点击处加一个；此后打字、退格、Delete、Enter、Tab/Shift+Tab 缩进都**同时作用于所有光标**；**Esc** 取消多光标回到单光标（单光标时 Esc 仍是原来的全局退出语义）。状态栏在 `文件=` 段追加「N 个光标」，否则用户不知道自己处于多光标态、也就想不到用 Esc 收掉。
+- **每行最多一个光标**（刻意简化）：同行多光标会让 Enter/退格在**同一行内**分裂出复杂的行列位移，而本功能的用途是"在多行上同时改"。Alt+点击落在已有光标的行不新增；Alt+↑/↓ 到顶/到底时**什么都不做**（不把主光标挪走，否则会跑到已有光标的行上形成歧义态）。
+- **多光标下明确不参与**的两项：**自动配对**（不同位置"该不该配对"可能不同，一次输入产生不同结果无法预期）、**粘贴**（只在主光标处插）。两条都写进了测试的反面对照。
+- 实现要点：`Buffer` 加 `extraCursors`（主光标仍是标量，单光标路径与改造前完全一致、零额外开销）；扇出 `editsAtEachCursor()` 按 (行,列) **降序**逐个复用既有单光标原语，行数变化用 **`count($lines)` 的差值**补偿已处理光标（⚠️ 不能取"光标自己的行号变化"——`delete()` 在行尾会并掉下一行但光标行号不变）；渲染侧 `SpanClip::clip` 的签名由「单布尔 + 单列」改为**光标列数组**。
+- 顺带确认了一个前提（本轮最大的技术风险）：**Alt+方向键在真实终端可用**（xterm 的 `;N` 修饰位，`ESC[1;3A` → `KeyModifiers::ALT`），**Alt+点击也可用**（`MouseEvent::$modifiers` 来自 SGR 按钮码的 `bit8`，不需要改 vendor）。这与项目里「Alt+**字母**不可用」的旧结论不矛盾：字母键没有承载修饰位的位置。
+
+### 新增（编辑器：符号自动配对，可配置）
+
+- **自动配对**：编辑器里打左符号自动补右并把光标夹在中间。`.vicerc` 的 `editor.autoPairs` 配置列表（每项「左+右」两个字符）；**默认集 `() [] {} "" ''`，刻意不含 `<>`**（PHP 里 `<` 是运算符，自动补 `>` 会干扰比较运算；想要自己加，README 与配置说明里有示例）；显式写 `[]` 即关闭（与"没写"区分开，否则没法真的关掉）；脏条目（非字符串 / 长度不等于 2 / 重复）逐条丢掉而不是整体失效。在编辑器里保存 `~/.vicerc` 即生效（缓存随保存失效）。
+- **四个行为细节**（用户逐条确认）：① 右侧已经是同一个右符号时**跳过**而不是重复插（`()` 中间再打 `)` 不会变成 `())`）；② 光标夹在空对中间时退格**一次删两个**；③ 有选区时打左符号**包裹选中内容**（多行选区也支持）；④ 引号紧跟字母/数字/下划线之后**不配对**（`don't` / `it's`）。
+- 实现：决策抽成纯函数 `App\Editor\AutoPair::plan()`（`SKIP` / `PAIR` / `PLAIN` 三种结局，可直接单测每条规则）；`Buffer` 新增 `insertPair()` 与 `replaceLineRange()`（后者跨行，供选中包裹用）；选中包裹的屏幕→buffer 坐标映射与 `getTextRect()` 共用同一套原语，避免"包出来的范围与复制到的不一样"。
+
+### 新增（Tab 补全 / 缩进机制，含插件扩展点）
+
+- **Tab 在输入上下文里重定义为「补全 / 缩进」**：有候选时 `Tab` 接受、`Shift+Tab` 选上一个候选、`Esc` 只关候选（不再顺带退出程序）；无候选时 `Tab` 在**多行上下文**（AI 输入框 / 编辑器）插 4 空格缩进、`Shift+Tab` 反向缩进（编辑器删行首、AI 输入框删末尾）。**单行输入（搜索框 / GIT 提交框）与其它面板不吞 Tab**，仍是切焦点 —— 单行没有"行"可缩进，这样键盘切面板的能力也不丢。编辑器没打开文件（无可缩进处）时同样落回切焦点。`Shift+Tab` 此前**全项目零处理**（被静默吞掉），现在在非输入上下文用作**反向切焦点**，与 `Tab` 对称。
+- **`@文件` 路径补全（AI 输入框）**：输入 `@` 即弹出项目内路径候选，支持前缀过滤、目录带尾斜杠（便于继续往里补）；路径安全复用 `AiTools::resolve()`（realpath + 根前缀校验），`../` 与出根 symlink 一律不会出现在候选里。候选浮层复用 `DropdownOverlay` 的**透明叠加**机制贴在被补全的那一行上（AI 输入框贴其上沿、编辑器贴光标行、侧栏贴输入行），底层输入框仍看得见。
+- **插件扩展点 `completions()`（V1.2，可选能力）**：插件为 `ai_input` / `editor` / `search` / `commit` 四个上下文提供候选（`list<CompletionItem>`，含 `label` / `insert` / `detail`）。**按键由核心独占、插件只提供数据** —— 插件拿不到按键，因此不可能把全局键玩坏，也不必关心候选怎么画（与既有「声明数据 + 核心渲染」同一取向）。内建的 `@文件` 补全与插件候选走**同一条路**，所以这个扩展点是被真实功能用着的，不是预留接口。插件 provider 抛异常或返回脏类型时只跳过它自己（每次按键都会重算，插件 bug 不该让打字废掉）；启用/禁用沿用同一套「整体重建、只遍历启用子集」链路，`Space` 一关候选即消失。
+- **核心不判触发符**：`@` 只是内建文件补全自己的约定，`$prefix` 会把光标前那段非空白 token 原样交给 provider，插件可以认任何前缀（例如 AI 输入框已有的 `/plan` 指令前缀）。
+- 文档：`docs/plugins.md` 新增 §3.12（含参数表与两个约束：同步调用、失败只影响自己）并更新 §9；`README` 中英补一段；帮助页新增 `Tab` / `Shift+Tab` 两条说明（原 `help.g_focus` 停用）。
+
 ### 新增（Claude 原生 Provider：Anthropic Messages API）
 
 - **协议抽象**：新增 `App\Ai\ProviderInterface`（`buildCommand` / `httpStatus` / `metaFile` / `cleanup`）与共用的 curl+SSE 传输 trait `CurlSseTransport`（**安全关键代码不复制两份**：key 走 `-H @文件` 不进 argv、body 走 `--data-binary @文件` 避开 ARG_MAX、0600 临时文件、`-D` dump 取状态码）。`OpenAiCompatProvider` 行为零变更。
@@ -69,8 +91,10 @@
 
 ### 修复（交互终端）
 
+- **编辑器按回车没反应 + 点侧栏搜索框/提交框打字不进去**（用户实测报障，一次三个）：① `EditorPanel::onKey` 缺 `KeyCode::Enter`，而 `onChar` 里那条 `"\r"` 在真实终端**永远不会走到**（终端发 `CodedKeyEvent(Enter)`）—— 与当年「AI 面板回车发不出去」同一个坑，那次只修了 AI 输入框；② `SidebarPanel::searchClick`/`gitClick` 点到输入框只置内部状态、**不调 `focus('sidebar')`**，而 `App::handleClick` 在侧栏 `onClick()` 返回 true 后会提前 return 不再聚焦，于是从编辑器点进搜索框/提交框再打字，字符落到原焦点面板（两个方法的注释都写着会聚焦，代码里没有）。三条防回归断言都**先写红再修**。（`BUGFIXES` A5）
 - **每开一次交互终端，`/tmp` 里就永久多一个 `vicetui_rc_*`**：bash 的 `--rcfile` 集成脚本用临时文件承载，而 `TerminalPanel::pollPty()` 在 shell 退出（Ctrl+D / `exit`）时直接 `$this->pty = null` 丢掉实例、不调 `shutdown()`；`PtyProcess::shutdown()` 开头的「进程句柄已回收就 `return`」也**提前跳过**了文件清理。两条路径叠加 → 一次 shell 会话漏一个文件，应用退出也不会回收（本机实测攒了 33 个）。新增 `TerminalPanel::dropPty()`（先 `shutdown()` 再置空）并在四处丢弃点统一调用；`PtyProcess` 把 rc 文件清理抽成 `cleanupRcFile()`，早退分支也调用。（`BUGFIXES` D6）
 - **交互 shell 还活着时异常退出 → 留下活着的孤儿 shell**：子进程回收原先只挂在 `Lifecycle::quit()` 的关闭闭包上，而只有正常退出会经过它；未捕获异常等路径走到 `bin/vicecode.php` 的 `start()` finally，那里只做了 `saveConfig + restoreTerminal`。实测每次异常退出漏 **1 个活着的 bash**（被 reparent 到 init、一直占着 pty，且**忽略 SIGTERM**、只有 SIGKILL 能收）外加一个 rc 文件。新增 `App::shutdownResources()`（幂等）并在 finally 里兜底，与 Lifecycle 路径重复调用无害。（`BUGFIXES` D7）
+- **不可捕获的致命错误下终端不还原 → 鼠标上报灌进 shell**：跑完 `vicecode <目录>` 回到 shell 后，每动一下鼠标就刷出一片 `-bash: 35: command not found`（终端把 SGR 鼠标上报 `ESC[<b;x;yM` 灌给了 bash，`ESC [ <` 被当控制序列吃掉、只剩数字）。根因：终端还原（离开备用屏 / 关鼠标 / 显示光标）**只挂在 `finally`** 上，而 PHP 的**致命错误**（`E_ERROR` / `E_USER_ERROR` / 内存耗尽）**不执行 `finally`**（实测；`register_shutdown_function` 则会执行）。现在收尾抽成一份闭包，由 `finally` 与顶层 `register_shutdown_function` 两条路径共用且幂等（还原序列仍只发一次）；注册时机提前到 `enableRawMode()` **之前**，堵住「raw mode 已生效、收尾还没挂上」的窗口。顺带把致命错误**落盘**到 `<配置目录>/.vicecode_fatal.log` 并打印一句自救提示（`reset` / `stty sane`）——原先那行 `PHP Fatal error:` 打在备用屏上、一还原就被冲掉，用户只能看到终端乱掉却不知原因。（`BUGFIXES` D10）
 
 ### 修复（启动入口 / 异常退出）
 
@@ -115,6 +139,11 @@
 
 ### 测试
 
+- 新增 `tests/multicursor_unit.php`（headless：加光标规则 / 打字各自右移 / 退格含跨行合并的行号补偿 / Enter 每行插行且补偿正确 / Tab 缩进 / Esc 两条路径 + 单光标反面对照 / 多格 REVERSED 渲染 / Alt+点击全链路且不产生选区（带"不带 Alt 会复制"的反面对照）/ 自动配对与粘贴不参与）。**六条反向注入全部实测可 FAIL**：扇出改升序、去掉行数 delta 补偿、`SpanClip` 只反显第一列、删掉 Esc 分支、Alt+点击不判修饰键、去掉扇出的按行去重。
+  - 其中「`SpanClip` 只反显第一列」第一次注入**没变红** —— 因为「每行最多一个光标」的不变量让整屏永远不会出现同一行两格，整屏断言**根本观察不到**它。补了一条**直接调 `SpanClip::clip`** 的原语级断言才覆盖住。教训：断言要挑一个"退化后真的会变"的观察面。
+- 新增真实 pty 探针 `tests/probe_alt_arrows.php`：写 xterm 序列 `ESC[1;3B`（Alt+↓）→ 打一个字符 → 断言**两行同时被改**（`xAaa`/`xBbb` 同现）→ Esc 后再打一个字符**只改一行**（反向可失败）。headless 单测跳过「终端字节 → 解析器」这一段，这条补上了。
+- 新增 `tests/autopair_unit.php`（headless：`editor.autoPairs` 配置解析（缺省/显式关闭/脏条目/自定义 `<>`/类型不对）+ `AutoPair::plan()` 每条规则 + 编辑器里的真实效果（打左补右、打右跳过、空对退格成对删、词后引号不配对、选中包裹））。**六条反向注入全部实测可 FAIL**：plan 恒返回 PLAIN、去掉"引号别跟在词后"、去掉 SKIP 分支、去掉退格成对删、去掉选中包裹、显式 `[]` 也回退默认集。
+- 新增 `tests/completion_unit.php`（headless：`@文件` 触发/前缀过滤/接受写回、编辑器 Tab 缩进与 Shift+Tab 反向缩进、**口径 3 的回归**（单行输入 Tab 仍切焦点）、候选浮层真的画在屏幕上且底层不被抹白、插件 `completions()` 候选与「禁用后消失」）。**六条反向注入全部实测可 FAIL**：编辑器 Tab 不消费 → 缩进断言红；去掉「刚接受过」的一次性抑制 → 「接受后候选关闭」红（补全后的 token 仍匹配前缀，候选会立刻弹回）；插件 provider 不注册 → 插件三条红；搜索框也消费 Tab → 口径 3 回归红；`@` 补全不按前缀过滤 → 过滤断言红；**测试里删掉 `addWidgetRenderer(DropdownOverlay::renderer())` → 浮层断言红**（证明浮层确实来自覆盖层，且渲染器漏注册会静默不画）。渲染断言用 `src/` 的子目录名当锚点（侧栏树默认折叠，该串只可能来自浮层）—— 根目录名同时也在侧栏树里，拿它做阴性断言会永远恒假。
 - 新增 `tests/pty_rc_cleanup.php`（真实 pty：交互 shell 启动后 rc 临时文件**已自删**；再发 SIGHUP 断言仍不残留；含三条正向锚点并自行清理孤儿 shell）。**注入验证**：注释掉自删行后两条核心断言都 FAIL（`vicetui_rc_*：0 → 1`）—— 正是用户报的现象原样复现。
 - 新增 `tests/pty_notty.php`：**非 tty 的 stdin**（`['file','/dev/null','r']` + stdout/stderr 走管道）跑 `bin/vicecode.php`，两个底座分支各 6 条断言（退出码**恰为 1** / 人话提示 / 不喷 `Fatal error`·`Uncaught`·`Stack trace` / **不进 alternate screen**）。这条路径此前**从未被覆盖**（所有跑 bin 的测试都用 `['pty']`）。三组注入验证见 `BUGFIXES` D8。
 - `tests/pty_crash.php` 断言收紧并修掉一处**假断言**（`BUGFIXES` T4）：`runInPty()` 第 3 个返回值原先恒为空串，场景 A 却拿它做判断（永假分支，一直靠 `$out` 含 `"Uncaught"` 蒙过）；现改为读 `$out` 并查 `crash injected`，两处崩溃场景都收紧为「exit **恰为 1**」+「不含 `Fatal error`/`Uncaught`」。

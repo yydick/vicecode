@@ -27,6 +27,19 @@ use App\App;
  *  - panels(): array —— 返回本插件提供的面板列表（list<PluginPanel>）。
  *    核心在装载期一次性收集进「插件面板」浮层（PluginPanelHost），内部用 tab 切换，
  *    不改动六面板布局（见 docs/plugins.md §3.10）。未实现则无面板。
+ *
+ * 可选补全能力（V1.2，可选）：
+ *  - completions(string $context, string $text, int $cursor, string $prefix): array
+ *    —— 返回本插件在该输入上下文下的补全候选（list<CompletionItem>），未实现则无候选。
+ *    上下文取值：`ai_input` / `editor` / `search` / `commit`（见 App\Core\CompletionState）。
+ *
+ *    ⚠️ **按键由核心独占，插件只提供数据**：Tab/Shift+Tab 的语义是核心定的
+ *    （有候选 → Tab 接受、Shift+Tab 上一个候选；无候选 → 缩进），插件拿不到也不该拿按键。
+ *    这样插件不可能把全局键玩坏，也不必关心候选怎么画 —— 与既有能力（声明数据 + 核心渲染）一致。
+ *
+ *    ⚠️ **同步调用**：核心在**每次按键之后**重算一次候选，实现必须快。
+ *    将来若要接 AI 自动补全这类慢查询，需要给 provider 补「pending/流式」语义（尚未设计）。
+ *    本能力也是「插件将来接 AI 补全与提示」的落点（见 docs/plugins.md §3.12）。
  */
 interface PluginInterface
 {

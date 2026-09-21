@@ -20,9 +20,10 @@ final class SpanClip
      * 把整行 Span 列表裁剪到水平视口 [scrollLeft, scrollLeft+textW)，并叠加光标反显。
      *
      * @param array<int,array{0:string,1:Style}> $lineSpans
+     * @param list<int> $cursorCols 本行需要反显的**字素下标**（多光标时可能不止一个；空数组=本行无光标）
      * @return array<int,Span>
      */
-    public static function clip(array $lineSpans, bool $cursorHere, int $curCol, int $scrollLeft, int $textW): array
+    public static function clip(array $lineSpans, array $cursorCols, int $scrollLeft, int $textW): array
     {
         // 展开为字素列表 [g, Style]
         $gs = [];
@@ -31,8 +32,8 @@ final class SpanClip
                 $gs[] = [$g, $st];
             }
         }
-        // 光标反显
-        if ($cursorHere) {
+        // 光标反显（多光标：本行每个光标各反显一格）
+        foreach (array_values(array_unique($cursorCols)) as $curCol) {
             if ($curCol >= 0 && $curCol < count($gs)) {
                 [$g, $st] = $gs[$curCol];
                 // 必须 clone：Style::addModifier() 是原地修改并返回 $this，
@@ -40,8 +41,11 @@ final class SpanClip
                 // 直接 addModifier 会把整行（甚至其它行）一起反显。
                 $gs[$curCol] = [$g === '' ? ' ' : $g, (clone $st)->addModifier(Modifier::REVERSED)];
             } else {
-                // 光标在行尾（无字素）：补一个反显空格
+                // 光标在行尾（无字素）：补一个反显空格。
+                // ⚠️ 多个行尾光标只会补一个空格 —— 行尾本来就只有一列可显示，
+                // 这与"每行最多一个光标"的不变量一致（见 Buffer::$extraCursors 的说明）。
                 $gs[] = [' ', Style::default()->addModifier(Modifier::REVERSED)];
+                break;
             }
         }
         // 按显示宽度裁剪到视口。

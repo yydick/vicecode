@@ -3,9 +3,11 @@ declare(strict_types=1);
 
 namespace App\Panel;
 
+use App\Core\CompletionState;
 use App\Core\ConfigStore;
 use App\Core\KeyInput;
 use App\App;
+use App\Editor\AutoPair;
 use App\Editor\Buffer;
 use App\Editor\Highlighter;
 use App\Text\DisplayWidth;
@@ -57,6 +59,12 @@ final class EditorPanel
      * 一旦发生光标移动/点击/输入/打开文件，复位为 false 恢复「光标跟随」。
      */
     private bool $scrollPinned = false;
+
+    /** 自动配对设置（懒加载缓存；保存 .vicerc 时失效） */
+    private ?AutoPair $autoPairConf = null;
+
+    /** 最近一次渲染用的编辑器矩形（选中包裹要把屏幕选区折回 buffer 坐标，只有渲染期才知道内边距） */
+    private ?Area $lastEditorArea = null;
 
     /**
      * 横向滚动边界指示：左侧（scrollLeft>0）是否还有隐藏内容、右侧是否还有。
@@ -111,6 +119,7 @@ final class EditorPanel
         $this->tabRects = [];
         $this->hLeft = false;
         $this->hRight = false;
+        $this->lastEditorArea = $editor;   // 供选中包裹把屏幕选区折回 buffer 坐标
 
         $inner = $editor->inner(new Margin(1, 1));
         $W = max(0, $inner->width);
@@ -195,8 +204,7 @@ final class EditorPanel
             }
             $contentSpans = SpanClip::clip(
                 $lineSpans,
-                $li === $buf->cursorRow && $focused,
-                $buf->cursorCol,
+                $focused ? $buf->cursorColsOnLine($li) : [],
                 $buf->scrollLeft,
                 $textW
             );
@@ -374,10 +382,15 @@ final class EditorPanel
 
         switch ($e->code) {
             case KeyCode::Up:
-                $buf->moveUp();
-                return true;
             case KeyCode::Down:
-                $buf->moveDown();
+                // Alt+↑/↓ = 在上面/下面**加一个编辑光标**（多行同时编辑）。
+                // ⚠️ **一律消费**（哪怕越界加不上）：越界时"什么都不做"比"顺手把主光标挪走"可预期得多
+                // —— 后者会让主光标跑到已有光标的行上，出现"一行两个光标"的歧义态。
+                if (($e->modifiers & KeyModifiers::ALT) !== 0) {
+                    $buf->addCursorRelative($e->code === KeyCode::Up ? -1 : 1);
+                    return true;
+                }
+                $e->code === KeyCode::Up ? $buf->moveUp() : $buf->moveDown();
                 return true;
             case KeyCode::Left:
                 $this->scrollPinned = false;
@@ -406,11 +419,34 @@ final class EditorPanel
                 $buf->pageDown($page);
                 return true;
             case KeyCode::Backspace:
-                $buf->backspace();
+                $this->backspaceEdit();
                 return true;
             case KeyCode::Delete:
-                $buf->delete();
+                if ($buf->hasMultipleCursors()) {
+                    $buf->editsAtEachCursor(static fn () => $buf->delete());
+                    $this->followBoth($buf, $textW);
+                } else {
+                    $buf->delete();
+                }
                 return true;
+            case KeyCode::Enter:
+                // ⚠️ 真实终端的回车是 **CodedKeyEvent(Enter)**，不是 CharKeyEvent("\r")。
+                // onChar 里那条 "\r" 分支只在「直接喂字符事件」的调用方下才会走到，
+                // 真实终端**永远不会**。少了这条，编辑器里按回车毫无反应（`BUGFIXES` A2 同款坑，
+                // 那次修的是 AI 输入框；本处用 EditorPanel 自己的 `$textW` 而不是 onChar 依赖的
+                // `$this->lastTextW` —— 后者只有渲染过才有值，键盘先于首帧到达时会是 0）。
+                $this->scrollPinned = false;
+                $buf->editsAtEachCursor(static fn () => $buf->insertNewline());
+                $this->followBoth($buf, $textW);
+                return true;
+            case KeyCode::Esc:
+                // 多光标时 Esc **只取消多光标**（不退出程序）——否则想收掉多余光标就只能退出应用。
+                // 单光标时不消费，维持原语义（交给 App 走全局退出流程）。
+                if ($buf->hasMultipleCursors()) {
+                    $buf->collapseCursors();
+                    return true;
+                }
+                return false;
             default:
                 return false;
         }
@@ -423,6 +459,18 @@ final class EditorPanel
             return false;
         }
         $this->scrollPinned = false; // 输入即光标移动，恢复「光标跟随」
+        // Esc 取消多光标走**两条路径**：本项目对"单独按 Esc"一直是双路处理的
+        // （`BUGFIXES` A3 修"退不出捕获态"时用的就是 `CharKeyEvent("\x1b")` + `CodedKeyEvent(Esc)` 双路，
+        //  App 的 PTY 捕获分支与全局分支也都这么兜）。
+        // 实测记录：本机真实 pty 里孤立 ESC 走的是 **Coded** 那条（去掉本分支后
+        // `tests/probe_alt_arrows.php` 依然通过），所以这条是给"不认孤立 ESC、把它当普通字符"的终端兜底。
+        if ($e->char === "\x1b") {
+            if ($buf->hasMultipleCursors()) {
+                $buf->collapseCursors();
+                return true;
+            }
+            return false;
+        }
         // Ctrl+W 关闭当前 buffer（dirty 时弹确认）
         if (($e->modifiers & KeyModifiers::CONTROL) && strtolower($e->char) === 'w') {
             $this->shell->requestClose((string) $buf->path);
@@ -434,24 +482,233 @@ final class EditorPanel
             return true;
         }
         if ($e->char === "\r" || $e->char === "\n") {
-            $buf->insertNewline();
+            $buf->editsAtEachCursor(static fn () => $buf->insertNewline());
             $this->followBoth($buf, $this->lastTextW);
             return true;
         }
         if ($e->char === "\x7f" || $e->char === "\x08") {
-            $buf->backspace();
-            $this->followBoth($buf, $this->lastTextW);
+            $this->backspaceEdit();
             return true;
         }
         if (KeyInput::isPrintable($e->char) && !($e->modifiers & KeyModifiers::CONTROL)) {
-            $buf->insertChar($e->char);
+            if ($this->handleAutoPair($e->char)) {
+                $this->followBoth($buf, $this->lastTextW);
+                return true;
+            }
+            $buf->editsAtEachCursor(static fn () => $buf->insertChar($e->char));
             $this->followBoth($buf, $this->lastTextW);
             return true;
         }
         return false;
     }
 
+    // ── 自动配对（可配置，见 .vicerc 的 editor.autoPairs）────────
+
+    /**
+     * 自动配对设置（懒加载 + 缓存）。
+     *
+     * 缓存理由：这段逻辑在**每次按键**上，而 `ConfigStore::load()` 每次都要读一遍配置文件。
+     * 配置改了想立刻生效：在应用内保存 `.vicerc`（`save()` 里会失效本缓存）。
+     */
+    private function autoPair(): AutoPair
+    {
+        return $this->autoPairConf ??= new AutoPair(ConfigStore::editorAutoPairs());
+    }
+
+    /** 失效自动配对缓存（`save()` 存的是 `.vicerc` 时调用） */
+    public function reloadEditorConfig(): void
+    {
+        $this->autoPairConf = null;
+    }
+
+    /**
+     * 字符输入时的自动配对处置。返回 true = 这次输入已被处理（调用方不要再普通插入）。
+     *
+     * 三种结局都由 {@see AutoPair::plan()} 决定：跳过已有右符号 / 打左补右 / 选中包裹；
+     * 不适用则返回 false，交给普通插入。
+     */
+    private function handleAutoPair(string $ch): bool
+    {
+        $buf = $this->shell->buffer;
+        if ($buf === null || $buf->readOnly) {
+            return false;
+        }
+        // 多光标下**不做**自动配对：不同位置"该不该配对"可能不同（引号词后规则、右侧是否已有右符号），
+        // 一次输入在不同光标处产生不同结果会让用户完全无法预期。这一条写进了 README 与 CHANGELOG。
+        if ($buf->hasMultipleCursors()) {
+            return false;
+        }
+        $ap = $this->autoPair();
+        if ($ap->isEmpty()) {
+            return false;
+        }
+        $line = $buf->currentLine();
+        $col = $buf->cursorCol;
+        $before = $col > 0 ? mb_substr($line, $col - 1, 1) : '';
+        $after = mb_substr($line, $col, 1);
+        $plan = $ap->plan($ch, $before, $after);
+
+        // 选中包裹：有选区且这次是"打左补右"的左符号 → 把选中内容包起来
+        $pair = $ap->openPair($ch);
+        if ($plan === AutoPair::PAIR && $pair !== null && $this->wrapSelectionWith($pair)) {
+            return true;
+        }
+        if ($plan === AutoPair::SKIP) {
+            // 右边就是同一个右符号：光标跳过它，不重复插（`()` 中间再打 `)` 不会变成 `())`）
+            $buf->moveRight();
+            return true;
+        }
+        if ($plan === AutoPair::PAIR && $pair !== null) {
+            $buf->insertPair($ch, mb_substr($pair, 1, 1));
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 退格：优先「成对删」（光标正好夹在一个空对中间时一次删两个），否则普通退格。
+     * 两条退格路径（`CharKeyEvent "\x7f"` 与 `CodedKeyEvent(Backspace)`）共用这里，避免只改一条。
+     */
+    private function backspaceEdit(): void
+    {
+        $buf = $this->shell->buffer;
+        if ($buf === null) {
+            return;
+        }
+        // 多光标：每个光标各删一格（跨行合并由 Buffer::editsAtEachCursor 的行号补偿兜住）。
+        // 自动配对的"成对删"不参与 —— 与 handleAutoPair 同一条理由。
+        if ($buf->hasMultipleCursors()) {
+            $buf->editsAtEachCursor(static fn () => $buf->backspace());
+            $this->followBoth($buf, $this->lastTextW);
+            return;
+        }
+        $ap = $this->autoPair();
+        $line = $buf->currentLine();
+        $col = $buf->cursorCol;
+        $before = $col > 0 ? mb_substr($line, $col - 1, 1) : '';
+        $after = mb_substr($line, $col, 1);
+        if (!$ap->isEmpty() && $ap->emptyPairAt($before, $after)) {
+            $buf->backspace();
+            $buf->delete();     // 光标此时停在右符号上，delete 收掉它
+        } else {
+            $buf->backspace();
+        }
+        $this->followBoth($buf, $this->lastTextW);
+    }
+
+    /**
+     * 用 `$pair` 包裹当前选中的内容。返回是否处理了。
+     *
+     * 选区是 `setSelection()` 注入的**屏幕坐标**矩形，这里按与 `getTextRect()` **同一套**
+     * 映射折成 buffer 的行/字符下标 —— 两处映射必须一致，否则包出来的范围会和"复制到的"
+     * 不一样（复制走 getTextRect）。
+     */
+    private function wrapSelectionWith(string $pair): bool
+    {
+        $buf = $this->shell->buffer;
+        $area = $this->lastEditorArea;
+        if ($buf === null || $area === null || $this->sel === null) {
+            return false;
+        }
+        [$li0, $ch0, $li1, $ch1] = $this->selToCharRange($area, $buf, $this->sel);
+        if ($li0 === $li1 && $ch0 === $ch1) {
+            return false;   // 空选区：不包裹，退回普通插入
+        }
+        $inner = $this->rangeText($buf, $li0, $ch0, $li1, $ch1);
+        $buf->replaceLineRange($li0, $ch0, $li1, $ch1, mb_substr($pair, 0, 1) . $inner . mb_substr($pair, 1, 1));
+        $this->sel = null;   // 包完清掉高亮，免得它继续框住已经移位的内容
+        return true;
+    }
+
+    /** 屏幕矩形 → buffer 的 [行0, 字符0, 行1, 字符1]（左下/右上角折算，夹进 buffer 范围） */
+    private function selToCharRange(Area $editor, Buffer $buf, array $sel): array
+    {
+        [$r0, $c0, $r1, $c1] = $sel;
+        $inner = $editor->inner(new Margin(1, 1));
+        $contentTop = $inner->position->y + ($this->hasTabs() ? 1 : 0);
+        $gutterW = min(max(0, $inner->width), $buf->maxLineNoWidth + 1);
+        $textX0 = $inner->position->x + $gutterW;
+        $last = max(0, count($buf->lines) - 1);
+
+        $lineAt = static fn (int $row): int => max(0, min(($row - $contentTop) + $buf->scrollTop, $last));
+        $charAt = static fn (int $li, int $col): int
+            => DisplayWidth::mbDispToCharIndex($buf->lines[$li] ?? '', max(0, $col - $textX0));
+
+        $li0 = $lineAt($r0);
+        $li1 = $lineAt($r1);
+        return [$li0, $charAt($li0, $c0), $li1, $charAt($li1, $c1 + 1)];
+    }
+
+    /** 取 buffer 坐标下 `[li0:ch0, li1:ch1]` 的文本（跨行用 \n 连接） */
+    private function rangeText(Buffer $buf, int $li0, int $ch0, int $li1, int $ch1): string
+    {
+        if ($li0 === $li1) {
+            return mb_substr($buf->lines[$li0] ?? '', $ch0, max(0, $ch1 - $ch0));
+        }
+        $out = [mb_substr($buf->lines[$li0] ?? '', $ch0)];
+        for ($li = $li0 + 1; $li < $li1; $li++) {
+            $out[] = $buf->lines[$li] ?? '';
+        }
+        $out[] = mb_substr($buf->lines[$li1] ?? '', 0, $ch1);
+        return implode("\n", $out);
+    }
+
+    /**
+     * 光标所在那一行的屏幕矩形（Tab 补全浮层的锚点）。
+     *
+     * 与 `render()` 共用同一套内边距与 tab 栏偏移 —— 浮层要贴在**光标行**上，
+     * 错一行就会让人以为候选属于上一行。光标行不在可视区内（或没有 buffer）返回 null。
+     */
+    public function cursorRowArea(Area $editor): ?Area
+    {
+        $buf = $this->shell->buffer;
+        if ($buf === null) {
+            return null;
+        }
+        $inner = $editor->inner(new Margin(1, 1));
+        $tabH = $this->hasTabs() ? 1 : 0;
+        $rows = max(0, $inner->height - $tabH);
+        $rel = $buf->cursorRow - $buf->scrollTop;
+        if ($rel < 0 || $rel >= $rows) {
+            return null;
+        }
+        return Area::fromScalars($inner->position->x, $inner->position->y + $tabH + $rel, max(1, $inner->width), 1);
+    }
+
     // ── Buffer 操作 ──────────────────────────────────
+
+    /**
+     * Tab / Shift+Tab 的缩进与反向缩进（由 App 按焦点分发进来）。
+     *
+     * 为什么不直接在 App 里改 Buffer：光标跟随（`followBoth`）与 `scrollPinned` 是
+     * 编辑器自己的渲染状态，绕过去会导致缩进后视口不跟手（与 onChar 里插字符是同一件事）。
+     *
+     * @param bool $outdent true = 反向缩进（Shift+Tab）
+     * @return bool 是否真的改了内容（没改则不必重绘，也交回给上层继续处理该键）
+     */
+    public function indent(bool $outdent): bool
+    {
+        $buf = $this->shell->buffer;
+        if ($buf === null || $buf->readOnly) {
+            return false;   // 只读 buffer（如 git diff 视图）不参与缩进
+        }
+        $this->scrollPinned = false;
+        if ($outdent) {
+            $changed = false;
+            $buf->editsAtEachCursor(static function () use ($buf, &$changed): void {
+                if ($buf->outdentLine(CompletionState::INDENT_SPACES)) {
+                    $changed = true;   // 只要有一个光标真的缩进了就算改动过
+                }
+            });
+            if (!$changed) {
+                return false;   // 所有光标的行首都没空白 → 交回上层（与单光标语义一致）
+            }
+        } else {
+            $buf->editsAtEachCursor(static fn () => $buf->insertText(str_repeat(' ', CompletionState::INDENT_SPACES)));
+        }
+        $this->followBoth($buf, $this->lastTextW);
+        return true;
+    }
 
     public function openFile(string $path): void
     {
@@ -548,6 +805,10 @@ final class EditorPanel
             $this->shell->reloadProviders();
             return;
         }
+        // 保存的是主配置文件（.vicerc）→ 让启动期读入、之后被缓存的编辑器设置（自动配对）立刻生效
+        if ($ok && $path === ConfigStore::path()) {
+            $this->reloadEditorConfig();
+        }
         $this->shell->setMessage($ok
             ? $this->shell->t('editor.saved')
             : $this->shell->t('editor.save_failed', ['msg' => (error_get_last()['message'] ?? 'unknown')]));
@@ -560,25 +821,50 @@ final class EditorPanel
         if ($buf === null || $buf->readOnly) {
             return;
         }
+        [$row, $col] = $this->clickToBufferPos($pos, $editor, $buf);
+        $buf->cursorRow = $row;
+        $buf->cursorCol = $col;
+    }
+
+    /**
+     * Alt+点击：在点击处**加一个编辑光标**（多行同时编辑）。
+     *
+     * 不动主光标、也**不产生选区** —— 选区那一步由 App 在记锚点之前拦掉（否则松手会当成拖选去复制）。
+     * 换算复用 {@see self::clickToBufferPos()}，与普通点击同一套映射，避免两个落点差一格。
+     *
+     * @return bool 是否真的加了（落在主光标行或已有光标的行 → false，不新增）
+     */
+    public function addCursorAtClick(Position $pos, Area $editor): bool
+    {
+        $buf = $this->shell->buffer;
+        if ($buf === null || $buf->readOnly) {
+            return false;
+        }
+        [$row, $col] = $this->clickToBufferPos($pos, $editor, $buf);
+        return $buf->addCursorAt($row, $col);
+    }
+
+    /**
+     * 鼠标点击位置 → buffer 的 [行, 字符列]。
+     *
+     * 行：面板内行号 - tab 栏高度 + `scrollTop`（点在可视区外夹到最近有效行）；
+     * 列：鼠标列是**显示列**，要减去行号槽宽、加上 `scrollLeft` 再换算成字符下标
+     * （CJK 占 2 列，直接当字符索引会错位）。
+     *
+     * @return array{0:int,1:int}
+     */
+    private function clickToBufferPos(Position $pos, Area $editor, \App\Editor\Buffer $buf): array
+    {
         $inner = $editor->inner(new Margin(1, 1));
-        $W = max(0, $inner->width);
-        $gutterW = min($W, $buf->maxLineNoWidth + 1);
+        $gutterW = min(max(0, $inner->width), $buf->maxLineNoWidth + 1);
 
         $row = ($pos->y - $inner->position->y - ($this->hasTabs() ? 1 : 0)) + $buf->scrollTop;
         $total = count($buf->lines);
-        if ($row < 0 || $row >= $total) {
-            // 点在可视行之外：夹到最近的有效行
-            $row = max(0, min($total - 1, $row));
-        }
-        $buf->cursorRow = $row;
+        $row = max(0, min($total - 1, $row));
 
-        // 鼠标列是「显示列」：先换算成绝对显示列，再转成字符索引（CJK 占 2 列，
-        // 不能直接当字符索引，否则点汉字列会错位）。
-        $absDisp = ($pos->x - $inner->position->x - $gutterW) + $buf->scrollLeft;
-        if ($absDisp < 0) {
-            $absDisp = 0;
-        }
-        $buf->cursorCol = DisplayWidth::mbDispToCharIndex($buf->lines[$row] ?? '', $absDisp);
+        $absDisp = max(0, ($pos->x - $inner->position->x - $gutterW) + $buf->scrollLeft);
+        $col = DisplayWidth::mbDispToCharIndex($buf->lines[$row] ?? '', $absDisp);
+        return [$row, $col];
     }
 
     /**

@@ -5,6 +5,8 @@ namespace App;
 
 use Throwable;
 use App\Core\Config;
+use App\Core\CompletionItem;
+use App\Core\CompletionState;
 use App\Core\KeyBindings;
 use App\Core\KeyInput;
 use App\Core\Lifecycle;
@@ -15,6 +17,7 @@ use App\Core\ConfigStore;
 use App\Core\Theme;
 use App\Editor\Buffer;
 use App\Ai\ChatModel;
+use App\Ai\FileCompletion;
 use App\Git\GitModel;
 use App\I18n\Translator;
 use App\Panel\AiPanel;
@@ -35,6 +38,7 @@ use App\Search\SearchModel;
 use App\Terminal\KeyToPty;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
+use App\Widget\CompletionOverlay;
 use PhpTui\Term\Event\CharKeyEvent;
 use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\Event\FunctionKeyEvent;
@@ -169,6 +173,23 @@ class App
     /** 粘贴目标面板（tty 异步读取时暂存，响应回来即插入该面板）；null=无进行中的粘贴 */
     private ?string $pasteTarget = null;
 
+    /**
+     * Tab 补全状态（候选 / 选中项 / 被补全前缀的起点）+ 候选来源注册表。
+     *
+     * 内建一个 `@文件` 路径 provider；插件（可选能力 `completions()`）在
+     * `rebuildPluginRegistrations()` 里追加、禁用即重建成不含它的表。
+     */
+    private CompletionState $completion;
+
+    /**
+     * 「刚接受过一次补全」的一次性抑制标志。
+     *
+     * 接受之后输入末尾仍是被补全的那个 token（`@README.md`），而它**依然满足前缀匹配** ——
+     * 于是本次按键末尾的 `syncCompletion()` 会立刻把候选又弹回来，刚关掉就重现，像没生效。
+     * 抑制一次即可：用户再敲一个字前缀就变了，该弹自然会弹。
+     */
+    private bool $completionJustAccepted = false;
+
     /** 帮助页覆盖层（M6 R2）：全屏居中，打开期间独占键盘 */
     public HelpPanel $help;
 
@@ -240,6 +261,10 @@ class App
 
     public function __construct()
     {
+        // Tab 补全：先建状态机 + 登记内建 provider（插件 provider 在下面 rebuildPluginRegistrations 里追加）
+        $this->completion = new CompletionState();
+        $this->registerBuiltinCompletions();
+
         // R7：从 ~/.vicerc 加载持久化偏好。优先级 env > 配置文件 > 默认；
         // 配置文件缺失/损坏时 ConfigStore::load 返回空数组，下面全部走默认分支。
         $locDir = __DIR__ . '/../config/locales';
@@ -312,6 +337,19 @@ class App
         $this->emitPluginEvent('app.ready');
     }
 
+    /**
+     * 组装**内建**的补全 provider。
+     *
+     * 与插件 provider 分开写在两处，是因为生命周期不同：内建的在构造期注册一次就固定，
+     * 插件的随 `rebuildPluginRegistrations()` 重建（启用/禁用、Ctrl+S 热重载）。
+     * 两者都只是 `CompletionState` 里的一张回调表，核心不区分来源。
+     */
+    private function registerBuiltinCompletions(): void
+    {
+        $files = new FileCompletion();
+        $this->completion->addProvider([$files, 'provide']);
+    }
+
     /** 插件声明的默认配置；未实现 configDefaults() 返回空数组。@return array<string,mixed> */
     private function pluginDefaults(\App\Plugin\PluginInterface $p): array
     {
@@ -369,6 +407,41 @@ class App
         $this->pluginMenuSnapshot = [];
         $this->registerPluginCommands();     // 内含 rebuildPluginMenuSnapshot()
         $this->collectPluginPanels();
+        $this->rebuildCompletionProviders();
+    }
+
+    /**
+     * 重建补全 provider 表 = **内建 + 当前启用的插件**。
+     *
+     * 与其它插件注册表同一条纪律：整体重建（不是增量增删）、只遍历启用子集 ——
+     * 于是「禁用某插件」在下一次重建后自然不再贡献候选，不需要额外清理逻辑。
+     *
+     * 每个插件 provider 都包了 try/catch：候选是**每次按键**都要重算的，
+     * 插件抛异常不该让编辑器废掉（与 Loader「单个插件失败只跳过它」同一取向）。
+     * 顺带过滤掉非 CompletionItem 的返回值 —— 插件是外部代码，返回脏类型不该变成 TypeError 崩掉。
+     */
+    private function rebuildCompletionProviders(): void
+    {
+        $this->completion->resetProviders();
+        $this->registerBuiltinCompletions();
+        foreach ($this->plugins as $p) {
+            if (!method_exists($p, 'completions')) {
+                continue;
+            }
+            $this->completion->addProvider(
+                static function (string $ctx, string $text, int $cursor, string $prefix) use ($p): array {
+                    try {
+                        $items = $p->completions($ctx, $text, $cursor, $prefix);
+                    } catch (Throwable) {
+                        return [];
+                    }
+                    if (!is_array($items)) {
+                        return [];
+                    }
+                    return array_values(array_filter($items, static fn ($i): bool => $i instanceof CompletionItem));
+                }
+            );
+        }
     }
 
     /**
@@ -1011,6 +1084,22 @@ class App
         if ($this->panelHost->isOpen()) {
             $overlays[] = $this->panelHost->widget($vp->width, $vp->height);
         }
+        // Tab 补全候选：贴在正在输入的那一行上（透明的局部覆盖，底层输入框仍看得见）。
+        // 放在最后 = 压在最上层：模态浮层打开时它已被 syncCompletion() 关掉，不会互相打架。
+        if ($this->completion->isActive()) {
+            $anchor = $this->completionAnchor($this->areas($vp));
+            $widget = $anchor === null ? null : CompletionOverlay::widget(
+                $this->completion->items(),
+                $this->completion->selected(),
+                $anchor,
+                $vp->width,
+                $vp->height,
+                $this->theme,
+            );
+            if ($widget !== null) {
+                $overlays[] = $widget;
+            }
+        }
         if ($overlays === []) {
             return $base;
         }
@@ -1337,7 +1426,20 @@ class App
         }
     }
 
+    /**
+     * 事件入口：先按既有逻辑分发，再**统一重算一次补全候选**。
+     *
+     * 为什么收口成一次调用：输入可能被很多条路径改动（字符追加、退格、粘贴、发送后清空…），
+     * 逐条去挂 `syncCompletion()` 一定会漏掉一条。放在入口末尾则「任何按键之后候选都跟得上」，
+     * 且顺序天然正确 —— 先让按键生效，再据此算前缀。
+     */
     public function handle(\PhpTui\Term\Event $event, Area $vp): void
+    {
+        $this->handleEvent($event, $vp);
+        $this->syncCompletion();
+    }
+
+    private function handleEvent(\PhpTui\Term\Event $event, Area $vp): void
     {
         // 未保存确认进行中：拦截所有输入，只响应 y/n/Esc（及 Ctrl+Q 视为确认）
         if ($this->confirm !== null) {
@@ -1723,9 +1825,22 @@ class App
             if ($this->tryStartDrag($e, $a)) {
                 return;
             }
+            $pos = new Position($e->column, $e->row);
+            // Alt+点击（编辑器内容区）= 加一个编辑光标（多行同时编辑）。
+            // ⚠️ 必须在下面「记选区锚点」**之前** return：否则松手时会被当成拖选去复制到剪贴板，
+            // 加光标的同时还多出一个选区（两种语义撞在一起）。
+            if (($e->modifiers & KeyModifiers::ALT) !== 0
+                && isset($a['editor'])
+                && $this->editor->isSelectableAt($pos, $a['editor'])) {
+                $this->select = null;
+                if (!$this->editor->addCursorAtClick($pos, $a['editor'])) {
+                    // 落在主光标行 / 已有光标的行 → 不新增，退回普通点击（移动主光标、聚焦）
+                    $this->handleClick($e, $a);
+                }
+                return;
+            }
             // 文本选择锚点：在编辑器内容区 / 终端区内按下左键即记锚点；随后若发生 Drag
             // 则拉出选区，Up 时复制。纯点击（无 Drag）在 finishSelect 里清掉，不影响聚焦。
-            $pos = new Position($e->column, $e->row);
             if (isset($a['editor']) && $this->editor->isSelectableAt($pos, $a['editor'])) {
                 $this->select = ['panel' => 'editor', 'aRow' => $e->row, 'aCol' => $e->column, 'bRow' => $e->row, 'bCol' => $e->column];
             } elseif (isset($a['terminal']) && $a['terminal']->containsPosition($pos)) {
@@ -2135,6 +2250,200 @@ class App
         }
     }
 
+    /**
+     * Tab 补全状态（供渲染与测试读取）。
+     *
+     * provider 的登记**不**从这里做：内建的在构造期 `registerBuiltinCompletions()`，
+     * 插件的随 `rebuildPluginRegistrations()` 重建 —— 两条生命周期不同，别混。
+     */
+    public function completion(): CompletionState
+    {
+        return $this->completion;
+    }
+
+    /**
+     * 按当前焦点算出补全上下文；空串 = 这里没有补全语义（浮层应关闭）。
+     *
+     * 只有这四处有输入：AI 输入框 / 编辑器 / 侧栏 SEARCH 的查询框 / 侧栏 GIT 的提交信息框。
+     */
+    private function completionContext(): string
+    {
+        $f = $this->focusPanel();
+        if ($f === 'ai_input') {
+            return 'ai_input';
+        }
+        if ($f === 'editor') {
+            return $this->buffer === null ? '' : 'editor';
+        }
+        if ($f === 'sidebar') {
+            if ($this->sidebar->tabIndex === 2) {
+                return 'search';
+            }
+            if ($this->sidebar->tabIndex === 1) {
+                return 'commit';
+            }
+        }
+        return '';
+    }
+
+    /** 有模态浮层/确认框打开时不该弹候选（它们独占键盘，底下还在弹候选会分不清谁在响应） */
+    private function completionModalOpen(): bool
+    {
+        return $this->confirm !== null
+            || $this->menuBar->isOpen()
+            || $this->help->isOpen()
+            || $this->help->isAboutOpen()
+            || $this->pluginsPanel->isOpen()
+            || $this->palette->isOpen()
+            || $this->panelHost->isOpen();
+    }
+
+    /**
+     * 当前上下文的文本与光标（**字符**下标）。
+     *
+     * AI 输入框 / 搜索框 / 提交框都**没有光标位**（只能末尾追加），故光标一律按末尾算 ——
+     * 这也意味着补全只对「末尾那个 `@token`」生效（见本文件顶部 Tab 机制的说明）。
+     *
+     * @return array{0:string,1:int}
+     */
+    private function completionInput(string $ctx): array
+    {
+        switch ($ctx) {
+            case 'ai_input':
+                $t = $this->ai->input();
+                return [$t, mb_strlen($t)];
+            case 'editor':
+                $b = $this->buffer;
+                return $b === null ? ['', 0] : [$b->currentLine(), $b->cursorCol];
+            case 'search':
+                $t = $this->search->query;
+                return [$t, mb_strlen($t)];
+            case 'commit':
+                $t = $this->git->commitMsg;
+                return [$t, mb_strlen($t)];
+        }
+        return ['', 0];
+    }
+
+    /**
+     * 取光标前正在输入的那段**非空白 token**（空串 = 光标前是空白/行首，没有可补全的东西）。
+     *
+     * ⚠️ 这里**不判触发符**：`@` 只是内建文件补全自己的约定，核心不该替 provider 决定
+     * "什么前缀才值得补全"。插件完全可以认别的前缀 —— 例如 AI 输入框已有的 `/plan` 这类
+     * 指令前缀，`/` 一样能被补全。认不认由 provider 自己看 `$prefix` 决定。
+     */
+    private function completionPrefix(string $text, int $cursor): string
+    {
+        $head = mb_substr($text, 0, max(0, $cursor));
+        return preg_match('/(\S+)$/u', $head, $m) === 1 ? $m[1] : '';
+    }
+
+    /** 重算候选（`handle()` 末尾统一调用，见那里的注释） */
+    private function syncCompletion(): void
+    {
+        if ($this->completionJustAccepted) {
+            $this->completionJustAccepted = false;   // 只用一次
+            return;
+        }
+        if ($this->completionModalOpen()) {
+            $this->completion->close();
+            return;
+        }
+        $ctx = $this->completionContext();
+        if ($ctx === '') {
+            $this->completion->close();
+            return;
+        }
+        [$text, $cursor] = $this->completionInput($ctx);
+        $this->completion->refresh($ctx, $text, $cursor, $this->completionPrefix($text, $cursor));
+    }
+
+    /**
+     * Tab / Shift+Tab 的统一实现（两条路径共用，避免语义漂移）。
+     *
+     * 规则（已与用户确认的口径）：
+     *  - **有候选**：Tab = 接受补全；Shift+Tab = 上一个候选。两者都吞掉。
+     *  - **无候选**：只有「多行上下文」才缩进 —— 编辑器（光标处）/ AI 输入框（末尾，它没有光标位）；
+     *    Shift+Tab 是反向缩进。
+     *  - 单行输入（搜索框 / GIT 提交框）与其它面板**不吞**，落回全局「Tab 切焦点」：
+     *    单行没有"行"可缩进，而这样键盘切面板的能力不丢。
+     *
+     * @param bool $back true = Shift+Tab
+     * @return bool 是否消费了这个键
+     */
+    private function handleTabKey(bool $back): bool
+    {
+        if ($this->completion->isActive()) {
+            if ($back) {
+                $this->completion->move(-1);
+                return true;
+            }
+            return $this->acceptCompletion();
+        }
+        $ctx = $this->completionContext();
+        if ($ctx === 'editor') {
+            return $this->editor->indent($back);
+        }
+        if ($ctx === 'ai_input') {
+            if ($back) {
+                return $this->ai->outdentTail();
+            }
+            $this->ai->insertIndent();
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 接受当前候选：把 `[prefixStart, 光标)` 那段换成 `item->insert`。
+     *
+     * 一律 `return true`（连"候选恰好空了"也吞掉）：Tab 在输入态已经被定义为补全键，
+     * 让它偶尔退化成"切焦点"会让焦点莫名其妙跑掉。
+     */
+    private function acceptCompletion(): bool
+    {
+        $item = $this->completion->current();
+        $ctx = $this->completion->context();
+        $start = $this->completion->prefixStart();
+        $this->completion->close();
+        // 本次按键末尾不许再弹（补全后的 token 仍然匹配前缀，否则会立刻重现）
+        $this->completionJustAccepted = true;
+        if ($item === null) {
+            return true;
+        }
+        switch ($ctx) {
+            case 'ai_input':
+                $this->ai->replaceTail($start, $item->insert);
+                break;
+            case 'editor':
+                // 边界情况：缓冲区为空时 `?->` 会短路，实参不求值
+                $this->buffer?->replaceRange($start, $this->buffer->cursorCol, $item->insert);
+                break;
+            case 'search':
+                $this->search->query = mb_substr($this->search->query, 0, $start) . $item->insert;
+                break;
+            case 'commit':
+                $this->git->commitMsg = mb_substr($this->git->commitMsg, 0, $start) . $item->insert;
+                break;
+        }
+        return true;
+    }
+
+    /** 候选浮层的锚点矩形：贴在"正在输入的那一行"上（编辑器贴光标行，其余贴输入框/输入行） */
+    private function completionAnchor(array $areas): ?Area
+    {
+        switch ($this->completion->context()) {
+            case 'ai_input':
+                return $areas['ai_input'] ?? null;
+            case 'editor':
+                return $this->editor->cursorRowArea($areas['editor']);
+            case 'search':
+            case 'commit':
+                return $this->sidebar->inputRowArea($areas['sidebar']);
+        }
+        return null;
+    }
+
     private function handleCoded(CodedKeyEvent $e, array $a): void
     {
         // Shift+Ins（及 Ins）粘贴：与 Ctrl+V 同源，按当前焦点插入剪贴板内容。
@@ -2149,6 +2458,22 @@ class App
         if (($e->modifiers & KeyModifiers::SHIFT)
             && ($e->code === KeyCode::Left || $e->code === KeyCode::Right)) {
             $this->hScrollByFocus($e->code === KeyCode::Right ? 4 : -4);
+            return;
+        }
+
+        // Tab / Shift+Tab：补全与缩进要在**面板 onKey 之前**处理，原因有两条：
+        //  ① 「候选打开时按 Esc 关候选」必须抢在全局「Esc 退出程序」之前（否则会误退）；
+        //  ② Ctrl+Tab 是编辑器的切 buffer，绝不能抢 —— 故这里显式排除 CONTROL。
+        if ($e->code === KeyCode::Tab && !($e->modifiers & KeyModifiers::CONTROL)) {
+            if ($this->handleTabKey(false)) {
+                return;
+            }
+        }
+        if ($e->code === KeyCode::BackTab && $this->handleTabKey(true)) {
+            return;
+        }
+        if ($e->code === KeyCode::Esc && $this->completion->isActive()) {
+            $this->completion->close();
             return;
         }
 
@@ -2177,7 +2502,15 @@ class App
             case KeyCode::Tab:
                 // Ctrl+Tab 切 buffer 已由 EditorPanel::onKey 处理，这里只剩全局切焦点
                 // 走 focus() 而不是直接改下标：这样焦点变化才会广播 focus.changed 事件
+                //
+                // ⚠️ 注意：Tab 在多行输入上下文（编辑器 / AI 输入框）已被上面的 handleTabKey
+                // 拦成「补全或缩进」，走不到这里；能到这里的是单行输入与其它面板（口径见计划）。
                 $this->focus(self::PANELS[($this->focusIndex + 1) % count(self::PANELS)]);
+                break;
+            case KeyCode::BackTab:
+                // Shift+Tab 的反向切焦点。原本这个键**全项目零处理**（被静默吞掉）；
+                // 给它在非输入上下文补上反向切焦点，与 Tab 对称（输入上下文里它已用于反向缩进/上一个候选）。
+                $this->focus(self::PANELS[($this->focusIndex - 1 + count(self::PANELS)) % count(self::PANELS)]);
                 break;
             case KeyCode::Backspace:
                 // AI 输入框退格（AiPanel::onKey 已处理，这里是历史遗留的空分支，保留以防

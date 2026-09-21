@@ -189,6 +189,11 @@ final class StatusBarPanel
         // 它们不显示却占 1 列宽度，会让状态栏少显内容，故统一剔除。
         $file = $buf !== null ? DisplayWidth::stripControl(basename((string) $buf->path)) : '—';
         $dirty = $buf !== null && $buf->dirty ? ' ' . $t('status.dirty') : '';
+        // 多光标标记：不标出来的话，用户根本不知道自己处于多光标态，也就想不到可以用 Esc 收掉。
+        // 它也是"多光标只在编辑器里有意义"的可见证据（焦点不在编辑器时仍然显示当前 buffer 的状态）。
+        $cursors = $buf !== null && $buf->hasMultipleCursors()
+            ? ' ' . $t('status.cursors', ['n' => (string) (count($buf->extraCursors()) + 1)])
+            : '';
         // 编辑模式（R1 四项之一）：只读必须显式标出来，
         // 否则用户改半天发现保存不了，会以为是 bug。
         $mode = $buf === null ? '—' : ($buf->readOnly ? $t('status.readonly') : $t('status.mode_edit'));
@@ -229,7 +234,7 @@ final class StatusBarPanel
             // 侧栏当前 tab 高亮），状态栏里再写一遍是纯冗余，占掉的 28 列不如让给
             // 「文件 / 消息 / 退出提示」这些没有第二处显示的信息。
             ['k' => 'message', 'p' => 100, 'o' => 8, 't' => $this->shell->message],
-            ['k' => 'file',    'p' => 90,  'o' => 1, 'pfix' => $t('status.file') . '=', 't' => $file . $dirty],
+            ['k' => 'file',    'p' => 90,  'o' => 1, 'pfix' => $t('status.file') . '=', 't' => $file . $dirty . $cursors],
             ['k' => 'mode',    'p' => 85,  'o' => 2, 't' => $t('status.mode') . '=' . $mode],
             ['k' => 'ai',      'p' => 80,  'o' => 4, 't' => $t('status.provider') . '=' . $ai],
             // 策略段紧跟 AI 段（同一件事的两个侧面：哪一档 + 打到哪个模型）。
