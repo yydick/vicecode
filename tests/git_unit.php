@@ -164,6 +164,7 @@ check(str_contains($text4, '提交信息'), 'GIT tab 渲染提交信息输入框
 echo "== R5 可视化交互 ==\n";
 use PhpTui\Term\Event\MouseEvent;
 use PhpTui\Term\MouseEventKind;
+use App\Text\DisplayWidth;
 use PhpTui\Term\MouseButton;
 
 $app2 = new App();
@@ -200,11 +201,23 @@ check($appG->git->commitMsg === 'f',
     '点提交框后键入进提交框（实际 ' . var_export($appG->git->commitMsg, true) . '）');
 
 // b) 鼠标点 Commit ▾ 展开下拉；菜单含四项
+// ⚠️ 列号**必须从渲染帧里量出来**，不能照抄产品代码里的公式。
+// 本次 bug 正是「测试与产品代码用了同一个错误公式」（都以为 ▾ 在面板最右一列）：
+// 两边一致地错，于是测试一直绿，而屏幕上真正画着 ▾ 的那一列点了毫无反应。
 $sb = $app2->areas($vp)['sidebar'];
-$arrowCol = $sb->position->x + 1 + max(0, ($sb->width - 2) - 1);
 $arrowRow = $sb->position->y + 1 + 2 + 3; // 上边框+tab/分隔偏移+GIT_COMMIT_ROW
+$frameB = TuiBuffer::empty($vp);
+$renderer->render($renderer, $app2->render($vp), $frameB, $frameB->area());
+$commitRowText = $frameB->toLines()[$arrowRow] ?? '';
+$arrowByte = strpos($commitRowText, '▾');
+$arrowCol = $arrowByte === false
+    ? -1
+    : DisplayWidth::dispWidth(substr($commitRowText, 0, $arrowByte));
+check($arrowCol >= 0, '前置：能在渲染帧的 Commit 行上定位到 ▾（实际列 '
+    . var_export($arrowCol, true) . '，行文本 ' . var_export($commitRowText, true) . '）');
 $app2->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $arrowCol, $arrowRow, 0), $vp);
-check($app2->git->dropdownOpen, '点 Commit ▾ 展开下拉菜单');
+check($app2->git->dropdownOpen, '点 Commit ▾ 展开下拉菜单（列号取自渲染帧，实际 '
+    . var_export($arrowCol, true) . '）');
 $bufferD = TuiBuffer::empty($vp);
 $renderer->render($renderer, $app2->render($vp), $bufferD, $bufferD->area());
 $textD = implode("\n", $bufferD->toLines());

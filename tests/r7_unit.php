@@ -107,7 +107,10 @@ $app3 = new App();  // $tmpSave 不存在 → 默认 dark / zh_CN 起步
 $app3->layout = $app3->layout->withSidebarWidth(58)->withAiInputHeight(9);
 // 模拟运行时切换：拖拽改布局 + Ctrl+T 切主题 + 切语言，都应反映进落盘
 $app3->cycleTheme();   // dark → midnight
-$app3->toggleLocale(); // zh_CN → en
+// 切语言：V1.2 起只有「状态栏/菜单 → 选项列表」这条路（`toggleLocale()` 已删）
+$app3->openPicker('locale');
+$app3->picker()?->move(1);        // zh_CN → en
+$app3->applyPicker();
 check($app3->saveConfig(), 'saveConfig() 返回成功');
 $saved = json_decode((string) file_get_contents($tmpSave), true);
 check(($saved['layout']['sidebarWidth'] ?? 0) === 58, '落盘 sidebarWidth=58（拖拽后）');

@@ -7,6 +7,7 @@ use Throwable;
 use App\Core\Config;
 use App\Core\CompletionItem;
 use App\Core\CompletionState;
+use App\Core\StatusPicker;
 use App\Core\KeyBindings;
 use App\Core\KeyInput;
 use App\Core\Lifecycle;
@@ -39,6 +40,7 @@ use App\Terminal\KeyToPty;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
 use App\Widget\CompletionOverlay;
+use App\Widget\PickerOverlay;
 use PhpTui\Term\Event\CharKeyEvent;
 use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\Event\FunctionKeyEvent;
@@ -189,6 +191,16 @@ class App
      * 抑制一次即可：用户再敲一个字前缀就变了，该弹自然会弹。
      */
     private bool $completionJustAccepted = false;
+
+    /**
+     * 状态栏可点段弹出的选项列表（语言 / 主题）。null = 关着；有实例就是开着。
+     *
+     * 锚点是**被点段在状态栏里的相对列**（不是屏幕列）：窗口 resize 后状态栏位置会变，
+     * 存屏幕列会错位，存相对列则每次渲染现算。
+     */
+    private ?StatusPicker $picker = null;
+
+    private int $pickerAnchorX0 = 0;
 
     /** 帮助页覆盖层（M6 R2）：全屏居中，打开期间独占键盘 */
     public HelpPanel $help;
@@ -1100,6 +1112,22 @@ class App
                 $overlays[] = $widget;
             }
         }
+        // 状态栏可点段的选项列表（语言 / 主题）：贴状态栏上方，最后画 = 压在最上层。
+        if ($this->picker !== null) {
+            $status = $this->areas($vp)['status'] ?? null;
+            if ($status !== null) {
+                $widgetP = PickerOverlay::widget(
+                    $this->picker,
+                    $status->position->x + $this->pickerAnchorX0,
+                    $status->position->y,
+                    $vp->width,
+                    $this->theme,
+                );
+                if ($widgetP !== null) {
+                    $overlays[] = $widgetP;
+                }
+            }
+        }
         if ($overlays === []) {
             return $base;
         }
@@ -1301,23 +1329,134 @@ class App
         $ids = Theme::ids();
         $cur = array_search($this->theme->id, $ids, true);
         $next = $ids[(($cur === false ? 0 : $cur) + 1) % count($ids)];
-        $this->theme = Theme::byId($next);
+        $this->setTheme($next);
+    }
+
+    /**
+     * 切到指定主题（`cycleTheme()` 与状态栏的选项列表共用）。
+     *
+     * 抽出来是为了让「换主题要做的副作用」（重建 Theme + 让所有 buffer 重算高亮）只有一处：
+     * 两处各写一遍，早晚会漏掉其中一个。
+     */
+    public function setTheme(string $id): void
+    {
+        $this->theme = Theme::byId($id);
         foreach ($this->editor->buffers() as $buf) {
             $buf->hlRev = -1; // 强制下一帧重算高亮
         }
         $this->setMessage($this->t('status.theme') . '=' . $this->t($this->theme->label));
     }
 
-    // ── 语言（顶部菜单「视图 → 语言」）────────────────────
+    // ── 状态栏可点段：选项列表（语言 / 主题）──────────────
 
-    /** 在可用语言间环形切换；setMessage 提示当前语言。 */
-    public function toggleLocale(): void
+    /** 当前的选项列表（null = 关着）；测试与渲染用。 */
+    public function picker(): ?StatusPicker
     {
-        $langs = $this->i18n->available();
-        $cur = array_search($this->i18n->locale(), $langs, true);
-        $next = $langs[(($cur === false ? 0 : $cur) + 1) % count($langs)];
-        $this->i18n->setLocale($next);
-        $this->setMessage($this->t('status.lang') . '=' . $next);
+        return $this->picker;
+    }
+
+    /**
+     * 打开某个状态栏段的选项列表。返回 false = 该段没有列表（调用方据此不消费这次点击）。
+     *
+     * 数据源集中在这里：语言取 `Translator::available()`，主题取 `Theme::ids()`。
+     * 锚点用**被点段在状态栏里的相对列**（`segmentX0`）—— 存屏幕列的话窗口一 resize 就错位。
+     */
+    public function openPicker(string $id): bool
+    {
+        $p = match ($id) {
+            'locale' => StatusPicker::locales(
+                $this->i18n->available(),
+                $this->locale(),
+                $this->t('picker.locale')
+            ),
+            'theme' => StatusPicker::themes(
+                Theme::ids(),
+                $this->theme->id,
+                $this->t('picker.theme'),
+                fn(string $tid): string => $this->t(Theme::byId($tid)->label)
+            ),
+            default => null,
+        };
+        if ($p === null) {
+            return false;
+        }
+        $this->picker = $p;
+        $this->pickerAnchorX0 = $this->statusBar->segmentX0($id) ?? 0;
+        return true;
+    }
+
+    public function closePicker(): void
+    {
+        $this->picker = null;
+    }
+
+    /** 把当前高亮项应用下去（语言 / 主题），然后关闭。 */
+    public function applyPicker(): void
+    {
+        $p = $this->picker;
+        $opt = $p?->selected();
+        $this->closePicker();
+        if ($p === null || $opt === null) {
+            return;
+        }
+        if ($p->id === 'locale') {
+            $this->i18n->setLocale($opt['value']);
+            $this->setMessage($this->t('status.lang') . '=' . $opt['value']);
+        } elseif ($p->id === 'theme') {
+            $this->setTheme($opt['value']);
+        }
+    }
+
+    /** 列表开着时的按键：↑↓ 移动、Enter 应用、Esc 关闭。返回 true = 已消费。 */
+    private function pickerKey(CodedKeyEvent $e): bool
+    {
+        if ($this->picker === null) {
+            return false;
+        }
+        switch ($e->code) {
+            case KeyCode::Up:
+                $this->picker->move(-1);
+                return true;
+            case KeyCode::Down:
+                $this->picker->move(1);
+                return true;
+            case KeyCode::Enter:
+                $this->applyPicker();
+                return true;
+            case KeyCode::Esc:
+                $this->closePicker();
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** 列表开着时的鼠标：点列表项 = 应用；点别处 = 关闭。 */
+    private function pickerMouse(MouseEvent $e, array $a, Area $vp): void
+    {
+        $p = $this->picker;
+        $status = $a['status'] ?? null;
+        if ($p === null || $status === null) {
+            $this->closePicker();
+            return;
+        }
+        $g = PickerOverlay::geometry(
+            $p,
+            $status->position->x + $this->pickerAnchorX0,
+            $status->position->y,
+            $vp->width
+        );
+        if ($g !== null
+            && $e->row > $g['top'] && $e->row < $g['top'] + $g['panelH'] - 1   // 去掉上下边框
+            && $e->column >= $g['startX'] && $e->column < $g['startX'] + $g['panelW']) {
+            $idx = $g['offset'] + ($e->row - $g['top'] - 1);
+            if (isset($p->options[$idx])) {
+                $p->sel = $idx;
+                $this->applyPicker();
+                return;
+            }
+        }
+        $this->closePicker();
     }
 
     // ── 菜单动作（顶部菜单栏每项都对应这里一个真实方法）──
@@ -1353,7 +1492,9 @@ class App
                 $this->lifecycle->requestQuit();
                 break;
             case 'view.theme':
-                $this->cycleTheme();
+                // 菜单是「挑一个」的语境 → 开选项列表；Ctrl+T 仍是快速循环（快捷键适合循环，
+                // 菜单适合给列表 —— 两者并存不冲突）
+                $this->openPicker('theme');
                 break;
             case 'view.focus.editor':
                 $this->focus('editor');
@@ -1368,7 +1509,7 @@ class App
                 $this->focus('ai_stream');
                 break;
             case 'view.lang':
-                $this->toggleLocale();
+                $this->openPicker('locale');
                 break;
             case 'term.cancel':
                 $this->terminal->cancel();
@@ -1460,6 +1601,23 @@ class App
         }
 
         $a = $this->areas($vp);
+
+        // 状态栏可点段的选项列表（语言 / 主题）打开期间独占按键：↑↓ 移动、Enter 应用、Esc 关闭。
+        // 放在菜单/命令面板等模态之前 —— 它是「点状态栏」那一次交互的延续，按键不该漏到面板；
+        // 但**功能键放行**（F10/F1/F2 照常生效），只是顺手把列表收掉。
+        if ($this->picker !== null) {
+            if ($event instanceof FunctionKeyEvent) {
+                $this->closePicker();
+            } elseif ($event instanceof MouseEvent) {
+                $this->handleMouse($event, $a, $vp);
+                return;
+            } elseif ($event instanceof CharKeyEvent) {
+                return;   // 纯选择：别把字符顺手打进编辑器
+            } elseif ($event instanceof CodedKeyEvent) {
+                $this->pickerKey($event);   // 认得的键已消费，认不得的也吞掉
+                return;
+            }
+        }
 
         // F10 激活/收起菜单栏：真实 pty 下是 **FunctionKeyEvent**（独立类，带 number 属性），
         // 不是 CodedKeyEvent——php-tui 把 F1..F12 都归到 FunctionKeyEvent(number=N)，
@@ -1801,6 +1959,12 @@ class App
         if ($e->kind === MouseEventKind::Down) {
             // 任何新点击先清掉上一次文本选择高亮（选区在 Up 后保留显示，直到下次点击）。
             $this->select = null;
+            // 状态栏可点段的选项列表开着时：点列表项 = 应用、点别处 = 关闭。
+            // 必须在菜单栏/状态栏其它点击判定**之前**：列表浮在上面，点哪里都先归它处理。
+            if ($this->picker !== null) {
+                $this->pickerMouse($e, $a, $vp);
+                return;
+            }
             // 菜单栏点击：菜单打开时点下拉条目/空白关闭；关闭时点菜单标签激活。
             // 菜单栏在第 0 行，与 PANELS 各面板不重叠（split 已把它切到独立区域）。
             if ($this->menuBar->isOpen()) {
@@ -1812,13 +1976,19 @@ class App
                     return;
                 }
             }
-            // V1.1 状态栏插件段点击。**放在 tryStartDrag 之前**做双重保险：
-            // 状态栏行本就不在拖拽区间（mainTop..status.y-1），先判就彻底不会和拖拽争。
+            // V1.1/V1.2 状态栏可点段：插件段执行命令，系统段弹出选项列表（语言 / 主题）。
+            // **放在 tryStartDrag 之前**做双重保险：状态栏行本就不在拖拽区间
+            // （mainTop..status.y-1），先判就彻底不会和拖拽争。
             // 命中判据是 StatusBarPanel 最后一帧的 placed，与取舍同源（被丢弃的段不可点）。
             if (isset($a['status']) && $e->row === $a['status']->position->y) {
-                $fq = $this->statusBar->clickSegment($e->column - $a['status']->position->x);
-                if ($fq !== null && $this->runPluginCommand($fq)) {
-                    return;
+                $hit = $this->statusBar->clickSegment($e->column - $a['status']->position->x);
+                if ($hit !== null) {
+                    if ($hit['cmd'] !== null && $this->runPluginCommand($hit['cmd'])) {
+                        return;
+                    }
+                    if ($hit['pick'] !== null && $this->openPicker($hit['pick'])) {
+                        return;   // 锚点由 openPicker 从 segmentX0 取，与命中同源
+                    }
                 }
             }
             // 分隔条拖拽优先于普通点击：命中任一条分隔条就进入拖拽，不触发聚焦/打开。

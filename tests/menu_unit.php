@@ -131,12 +131,21 @@ check($clickedOther && $app6b->menuBar->isOpen(), '点其它标签可切换（�
 // ─════════ 5) menuAction 真实副作用 ═════════
 echo "\n== menuAction 副作用 ==\n";
 $app7 = new App();
+// V1.2：视图 → 主题 / 语言 改成**打开选项列表**（不再盲目循环）。所以「真的改了」要
+// 走完整流程：菜单开列表 → ↓ 移到下一项 → Enter 应用。
 $themeBefore = $app7->theme->id;
 $app7->menuAction('view.theme');
-check($app7->theme->id !== $themeBefore, 'view.theme 真的切换了主题');
+check($app7->picker()?->id === 'theme', 'view.theme 打开主题列表（不再盲目循环）');
+$app7->handle(CodedKeyEvent::new(KeyCode::Down, 0), $vp);
+$app7->handle(CodedKeyEvent::new(KeyCode::Enter, 0), $vp);
+check($app7->theme->id !== $themeBefore, '在列表里选下一项 → 主题真的切换了');
+check($app7->picker() === null, '应用后列表关闭');
 $localeBefore = $app7->locale();
 $app7->menuAction('view.lang');
-check($app7->locale() !== $localeBefore, 'view.lang 真的切换了语言');
+check($app7->picker()?->id === 'locale', 'view.lang 打开语言列表');
+$app7->handle(CodedKeyEvent::new(KeyCode::Down, 0), $vp);
+$app7->handle(CodedKeyEvent::new(KeyCode::Enter, 0), $vp);
+check($app7->locale() !== $localeBefore, '在列表里选下一项 → 语言真的切换了');
 $app8 = new App();
 $app8->openFile('src/App.php');
 $app8->menuAction('file.quit');

@@ -123,8 +123,8 @@ final class StatusBarPanel
      * 按最终 join 顺序给出每段的列区间 [x0,x1]（相对状态栏左沿，含端点）。
      * 必须与 join() 逐列对齐：join() 结果带前导 1 空格 → 起始 x=1；
      * 't'==='' 的段被 join() 跳过 → 不产出矩形；段间分隔符不归入任何段。
-     * @param array<int,array{k:string,p:int,o:int,t:string,pfix?:string,cmd?:?string}> $kept
-     * @return array<int,array{k:string,cmd:?string,x0:int,x1:int}>
+     * @param array<int,array{k:string,p:int,o:int,t:string,pfix?:string,cmd?:?string,pick?:?string}> $kept
+     * @return array<int,array{k:string,cmd:?string,pick:?string,x0:int,x1:int}>
      */
     private function placeWidths(array $kept, int $width): array
     {
@@ -142,6 +142,8 @@ final class StatusBarPanel
             $placed[] = [
                 'k' => $s['k'],
                 'cmd' => $s['cmd'] ?? null,
+                // 系统段自己的选项列表 id（V1.2 可点段）；与 cmd 互斥，二者都不为 null 才算可点
+                'pick' => $s['pick'] ?? null,
                 'x0' => $x,
                 'x1' => min($x + $w - 1, $width - 1),
             ];
@@ -151,17 +153,38 @@ final class StatusBarPanel
     }
 
     /**
-     * 命中测试：相对状态栏左沿的列 → 该段要执行的完全限定命令 id。
-     * 未命中（空列 / 分隔符 / 系统段 / 无命令的段 / 已被整条确认占用）返回 null。
+     * 某个段本帧的左沿列（相对状态栏左沿）；段被丢弃/本帧没摆上则返回 null。
+     *
+     * 选项列表要靠它把浮层对齐到被点的那个段上。取「最后一帧摆放结果」与命中判定同源，
+     * 所以「看不见的段」自然没有锚点。
+     */
+    public function segmentX0(string $k): ?int
+    {
+        foreach ($this->lastPlaced as $p) {
+            if ($p['k'] === $k) {
+                return $p['x0'];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 命中测试：相对状态栏左沿的列 → 命中段的详情 `{k,cmd,pick,x0,x1}`。
+     * 未命中（空列 / 分隔符 / **不可点的段** / 已被整条确认占用）返回 null。
      *
      * 取舍：只有段**文本所占列**算命中，宁可难点也不让"点错也触发"。
      * V1.1 不给可点段加视觉标识，文档建议插件自己在文案里加标记（如 `🕐 12:00 ⟳`）。
+     *
+     * @return array{k:string,cmd:?string,pick:?string,x0:int,x1:int}|null
      */
-    public function clickSegment(int $x): ?string
+    public function clickSegment(int $x): ?array
     {
         foreach ($this->lastPlaced as $p) {
-            if ($p['cmd'] !== null && $x >= $p['x0'] && $x <= $p['x1']) {
-                return $p['cmd'];
+            if (($p['cmd'] ?? null) === null && ($p['pick'] ?? null) === null) {
+                continue;
+            }
+            if ($x >= $p['x0'] && $x <= $p['x1']) {
+                return $p;
             }
         }
         return null;
@@ -244,7 +267,10 @@ final class StatusBarPanel
             ['k' => 'branch',  'p' => 70,  'o' => 3, 'pfix' => $t('status.branch') . '=', 't' => DisplayWidth::stripControl($this->shell->git->branch)],
             ['k' => 'quit',    'p' => 65,  'o' => 9, 't' => $t('status.quit')],
             ['k' => 'app',     'p' => 50,  'o' => 0, 't' => $t('app.title')],
-            ['k' => 'locale',  'p' => 40,  'o' => 7, 't' => $t('status.locale') . '=' . $this->shell->locale()],
+            ['k' => 'locale',  'p' => 40,  'o' => 7, 't' => $t('status.locale') . '=' . $this->shell->locale(),
+                // 可点：弹出语言列表（数据源 Translator::available）。段本身仍按普通段参与裁剪，
+                // 被丢弃时 clickSegment 也读不到它 —— 命中与取舍同源，天然「看不见就点不到」。
+                'pick' => 'locale'],
             ['k' => 'focus',   'p' => 35,  'o' => 5, 't' => $t('status.focus') . '=' . strtoupper($this->shell->focusPanel())],
             // ⚠️ tab 不能排太低：侧栏 tab **只显示图标不显示文字**，状态栏这行是它
             // 唯一的文字标识，丢了用户就分不清当前在哪个 tab。

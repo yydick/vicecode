@@ -30,6 +30,9 @@ return [
     'status.cursors'   => '{n} cursors',
     'status.readonly'  => 'RO',
     'status.locale'    => 'lang',
+    // Titles of the option lists opened from clickable status segments (language / theme)
+    'picker.locale'    => 'Select language',
+    'picker.theme'     => 'Select theme',
     'status.branch'    => 'branch',
     'status.cwd'       => 'cwd',
     'status.provider'  => 'AI',

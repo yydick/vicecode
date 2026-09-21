@@ -230,17 +230,18 @@ check($placedByKey['seg']['cmd'] === 'demo.k', 'seg 段带命令 demo.k');
 // 边界
 $pSeg = $placedByKey['seg'];
 check($app->statusBar->clickSegment($pSeg['x0'] - 1) === null, '段左侧一列不命中');
-check($app->statusBar->clickSegment($pSeg['x0']) === 'demo.k', '段首列命中');
-check($app->statusBar->clickSegment($pSeg['x1']) === 'demo.k', '段末列命中');
+check(($app->statusBar->clickSegment($pSeg['x0'])['cmd'] ?? null) === 'demo.k', '段首列命中');
+check(($app->statusBar->clickSegment($pSeg['x1'])['cmd'] ?? null) === 'demo.k', '段末列命中');
 check($app->statusBar->clickSegment($pSeg['x1'] + 1) === null, '段右侧一列不命中（分隔符不算）');
-// 系统段不可点
-$sysHit = false;
+// 系统段不带**插件命令**（cmd）。V1.2 起系统段可以带自己的选项列表（pick），
+// 所以「不可点」不再等于「不在 placed」—— 判据是「没有 cmd 也没有 pick」。
+$sysHasCmd = false;
 foreach ($r['placed'] as $p) {
-    if ($p['k'] === 'file' && $p['cmd'] !== null) {
-        $sysHit = true;
+    if ($p['k'] === 'file' && ($p['cmd'] ?? null) !== null) {
+        $sysHasCmd = true;
     }
 }
-check(!$sysHit, '系统段不带命令，不可点');
+check(!$sysHasCmd, '系统段不带插件命令（cmd）');
 // 窄屏：低优先级段被丢弃 → 不可点
 $rn = $app->statusBar->assemble(20);
 $lowIn = false;

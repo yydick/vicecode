@@ -26,6 +26,9 @@ return [
     'status.cursors'   => '{n} 个光标',
     'status.readonly'  => '只读',
     'status.locale'    => '语言',
+    // 状态栏可点段弹出的选项列表标题（语言 / 主题）
+    'picker.locale'    => '选择语言',
+    'picker.theme'     => '选择主题',
     'status.branch'    => '分支',
     'status.cwd'       => '目录',
     'status.provider'  => 'AI',

@@ -56,7 +56,15 @@ final class SidebarPanel
     // gitContent 之前的固定两行：tab 行 + 分隔线（SidebarPanel::content 总是先渲染），
     // 故 gitContent 的实际屏幕行 = sidebar 顶 + 1(上边框) + 此偏移 + 行常量。
     private const GIT_CONTENT_OFFSET = 2;
-
+    /**
+     * Commit 按钮的固定文案前缀（后面接 ▾ / ▴）。
+     *
+     * ⚠️ 渲染与**命中判定**必须共用这一份常量：命中列曾经写成 `innerX + innerW - 1`
+     * （面板最右一列），而按钮其实画在左边 `' Commit '`（8 列）之后 —— 于是点屏幕上
+     * 真正的 ▾ 毫无反应（落进 else 去 commit，空消息还提示「提交信息为空」）。
+     * 更麻烦的是当时测试也照抄了同一个错公式，两边一致地错、一直绿。
+     */
+    private const GIT_COMMIT_LABEL = ' Commit ';
     // Search tab 内部分区行（inner 行号，0-based，相对 searchContent 起始）
     private const SEARCH_INPUT_ROW = 0;   // 查询输入框
     private const SEARCH_STATUS_ROW = 1;  // 状态行（搜索中 / N 个匹配 / 无结果 / 出错）
@@ -361,7 +369,7 @@ final class SidebarPanel
 
         // 行3：Commit ▾ 按钮（REVERSED 表示可点击；▾ 展开下拉）
         $arrow = $git->dropdownOpen ? '▴' : '▾';
-        $btn = DisplayWidth::mbPadDisp(' Commit ' . $arrow, $innerW);
+        $btn = DisplayWidth::mbPadDisp(self::GIT_COMMIT_LABEL . $arrow, $innerW);
         $lines[] = Line::fromSpans(Span::styled($btn, Style::default()->addModifier(Modifier::REVERSED)));
 
         // 下拉菜单：覆盖从标题行起，点击项触发对应动作
@@ -772,7 +780,7 @@ final class SidebarPanel
             'innerW' => $innerW,
             'inputY' => $y(self::GIT_INPUT_ROW),
             'commitY' => $y(self::GIT_COMMIT_ROW),
-            'commitArrowX' => $innerX + max(0, $innerW - 1),
+            'commitArrowX' => $innerX + min(DisplayWidth::dispWidth(self::GIT_COMMIT_LABEL), max(0, $innerW - 1)),
             'headerY' => $y(self::GIT_HEADER_ROW),
             'headerPlusX' => $innerX + max(0, $innerW - 3),   // 标题行 '+' 在倒数第 3 列
             'headerMinusX' => $innerX + max(0, $innerW - 1),  // 标题行 '-'/'⟳' 在末列
