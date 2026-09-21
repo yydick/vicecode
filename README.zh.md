@@ -229,6 +229,8 @@ VICECODE_CONFIG=/tmp/my_vicecode.json php bin/vicecode.php
 
 发版记录见 [CHANGELOG.md](CHANGELOG.md)；每个已修 BUG 的现象 / 根因 / 防回归测试见 [docs/BUGFIXES.md](docs/BUGFIXES.md)。
 
+完整用法（各面板 / AI / 配置 / 插件的逐步说明）见 **[docs/manual.zh.md](docs/manual.zh.md)** —— 本 README 只作功能概览。
+
 ## 测试
 
 用自带的跑批脚本一次跑完（**按每个测试的退出码**判定通过与否，支持按文件名过滤与单测超时）：

@@ -221,6 +221,8 @@ Full plugin developer guide (authoring / loading / segment fields / testing) is 
 
 Release notes: [CHANGELOG.md](CHANGELOG.md). Root-cause and regression-test catalogue for every fixed bug: [docs/BUGFIXES.md](docs/BUGFIXES.md).
 
+For full usage (step-by-step on every panel / AI / configuration / plugins) see **[docs/manual.md](docs/manual.md)** — this README stays a feature overview.
+
 ## Tests
 
 Run everything with the bundled runner (pass/fail is decided by each test's **exit code**; supports name filtering and a per-test timeout):

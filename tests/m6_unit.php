@@ -230,6 +230,26 @@ foreach (['Ctrl+Q', 'Ctrl+S', 'Ctrl+W', 'Ctrl+Tab', 'Ctrl+L', 'Ctrl+C', 'Ctrl+P'
     }
 }
 check(true, '帮助页涵盖全部 Ctrl 组合键');
+
+// 非 Ctrl 的新功能同样不能从帮助页悄悄消失。断言直接查注册表的 desc 列
+// （不查渲染文本），因而与语言包无关；desc 的 i18n key 每条唯一，可当稳定锚点。
+// 键名本身会重复（编辑器与 AI 都有 Tab / Shift+Tab），所以按 desc 判定。
+$docDescs = [];
+foreach (KeyBindings::all() as $g) {
+    foreach ($g['items'] as $it) {
+        $docDescs[$it['desc']] = true;
+    }
+}
+foreach ([
+    'help.g_add_cursor'       => 'Alt+↑/↓ 加编辑光标',
+    'help.g_add_cursor_click' => 'Alt+点击 加编辑光标',
+    'help.e_indent'           => '编辑器 Tab 缩进 / Shift+Tab 反向缩进',
+    'help.e_autopair'         => '符号自动配对',
+    'help.a_at_ref'           => 'AI 输入框 @ 文件引用',
+    'help.a_complete'         => 'AI 输入框 Tab 接受补全',
+] as $descKey => $label) {
+    check(isset($docDescs[$descKey]), '帮助页登记了 ' . $label . '（' . $descKey . '）');
+}
 // 键位列对齐：所有条目行的第二列必须起始于同一显示列
 $offsets = [];
 foreach ($lines as $l) {

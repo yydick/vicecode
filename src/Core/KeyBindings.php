@@ -39,6 +39,7 @@ final class KeyBindings
                 ['Tab', 'help.g_tab'],
                 ['Shift+Tab', 'help.g_tab_back'],
                 ['Alt+↑ / Alt+↓', 'help.g_add_cursor'],
+                ['keys.alt_click', 'help.g_add_cursor_click'],
                 ['Esc', 'help.g_esc'],
                 ['q', 'help.g_q'],
                 [self::HELP_KEY, 'help.g_help'],
@@ -53,6 +54,7 @@ final class KeyBindings
                 ['↑ ↓ ← →', 'help.e_move'],
                 ['Home / End', 'help.e_home_end'],
                 ['PageUp / PageDown', 'help.e_page'],
+                ['Tab / Shift+Tab', 'help.e_indent'],
                 ['Enter', 'help.e_newline'],
                 ['Backspace / Delete', 'help.e_del'],
                 ['Ctrl+S', 'help.e_save'],
@@ -61,6 +63,9 @@ final class KeyBindings
                 ['Ctrl+V', 'help.e_paste'],
                 ['Ctrl+E', 'help.e_ai_explain'],
                 ['keys.printable', 'help.e_type'],
+                // 非按键行为也登记一行：帮助页是用户查"这个符号/这块怎么用"的地方，
+                // 自动配对没有对应键，但正是用户最容易困惑的点（打 ( 为什么自己补了 )）。
+                ['() [] {} "" \'\'', 'help.e_autopair'],
             ]),
             self::group('help.group_terminal', [
                 ['Enter', 'help.t_run'],
@@ -101,6 +106,8 @@ final class KeyBindings
             ]),
             self::group('help.group_ai', [
                 ['keys.printable', 'help.a_type'],
+                ['@', 'help.a_at_ref'],
+                ['Tab / Shift+Tab', 'help.a_complete'],
                 ['Enter', 'help.a_send'],
                 ['Ctrl+P', 'help.a_provider'],
                 ['Ctrl+N', 'help.a_model'],

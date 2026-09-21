@@ -43,6 +43,12 @@
 - **`AnthropicSseParser`**：`content_block_delta`（`text_delta` 与 `input_json_delta` 按 `index` 归并到对应工具块）、`message_delta.stop_reason` → finish、**以 `message_stop` 判定结束**（Anthropic **不发** `data: [DONE]`）、`ping` 忽略、`error` 事件映射为错误。与 `SseParser` 同契约，`ChatModel` 侧零改动。
 - **内置一条 `anthropic`**：模型 `claude-opus-4-8` / `claude-sonnet-4-6` / `claude-haiku-4-5-20251001`，key 取 `ANTHROPIC_API_KEY`、base 可用 `ANTHROPIC_BASE_URL` 覆盖；`ConfigStore::providersTemplate()` 同步补 `protocol` / `max_tokens` 写法说明。
 
+### 文档（完整使用手册 + 帮助页补齐）
+
+- **新增 `docs/manual.zh.md` / `docs/manual.md`（中英双语完整使用手册）**：从环境要求与启动、界面与布局、通用按键，到编辑器（含 Tab 缩进/自动配对/多光标）、终端两种模式与会话持久化、资源管理器、GIT 面板（提交动作下拉、分支切换）、搜索面板、AI 助手（协议/能力/策略/自动选档/`@路径` 补全/Agent loop/压缩/持久化/渲染/快捷动作）、配置全表、插件系统、故障排查（含终端被留成乱码时的自救命令）。README 只保留功能概览并链过去。
+- **帮助页补齐本轮新功能**：全局组加 `Alt+点击`（加光标、不产生选区）；编辑器组加 `Tab / Shift+Tab`（缩进 / 反向缩进）与 `() [] {} "" ''`（符号自动配对，说明其四条行为）；AI 组加 `@`（引用项目内文件）与 `Tab / Shift+Tab`（接受补全 / 缩进）。此前这些能力在帮助页只体现为一条合并的全局说明，用户查"打 `(` 为什么自己补了 `)`"时找不到出处。
+- `tests/m6_unit.php` 增一条**帮助页覆盖漂移守护**：断言上述六条（含既有的 `Alt+↑/↓`）的 desc 仍登记在 `KeyBindings::all()` 里，删掉任一行即红。三条注入验证可失败（删自动配对 / `@` 引用 / `Alt+点击` 登记行）。
+
 ### 修复
 
 - **压缩摘要请求是空请求**（`BUGFIXES` T6）：`beginCompact()` 原先只把历史挪走就 `startRequest()`，发出去的是 `{"role":"assistant","content":""}` —— 既没历史也没指令，真实端点上等于让模型续写空回复、续写文本被当摘要**覆盖整段真实历史**。改为构造真正的单条 user 消息（i18n 指令 + `ConversationTranscript` 文本化的历史）。新增 `ConversationTranscript`（角色前缀、工具调用/结果可读化、按字符截断）与 `ai.compact_instruction` 文案（中英两包）。
