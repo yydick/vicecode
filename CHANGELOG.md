@@ -51,6 +51,8 @@
 
 ### 修复
 
+- **被信号终止时终端不还原、且没有任何日志**（`BUGFIXES` D11）：D10 修的是「致命错误不执行 `finally`」，靠 `register_shutdown_function` 兜底 —— 但**信号根本不走 shutdown function**。没装 handler 时默认动作是「进程立即终止」：既不跑 shutdown function、也不走 `finally`，而 `error_get_last()` 是 null（**信号不是 error**）→ 终端留在 raw + 备用屏 + 鼠标上报（与 D10 表象一模一样的 `-bash: 35: command not found`），**日志也不写**，事后完全查不出发生过。现装 SIGTERM / SIGHUP / SIGINT 处理（在终端被改动之前装）：收尾走同一份幂等闭包 + 写一行「被信号终止：SIGTERM（终端已还原）」进日志。⚠️ handler 里**不能** `exit(128+$sig)`——协程内 Swoole 会把它转成 `Swoole\ExitException`，被顶层 catch 接住后退出码变 1；正解是「恢复默认处置 + 重发信号并直接返回」（实测两种底座都得到 `signaled=true, termsig=15/1/2`）。用 pcntl 而非 `Swoole\Process::signal`，两种底座行为一致。
+- **新增「本次会话还活着」标记**（`<配置目录>/.vicecode_alive`，`BUGFIXES` D11）：启动时写、**只有正常退出**才删；下次启动发现残留就往日志写 WARN + 状态栏提示。它覆盖**连信号 handler 都够不到**的那类死亡 —— **SIGKILL / 段错误**：进程没有任何机会执行代码，这个标记是唯一能证明「上次异常结束」的东西。标记带 pid 并做存活检查，否则同时开两个实例时，先启动那个的正常退出会被误报。
 - **压缩摘要请求是空请求**（`BUGFIXES` T6）：`beginCompact()` 原先只把历史挪走就 `startRequest()`，发出去的是 `{"role":"assistant","content":""}` —— 既没历史也没指令，真实端点上等于让模型续写空回复、续写文本被当摘要**覆盖整段真实历史**。改为构造真正的单条 user 消息（i18n 指令 + `ConversationTranscript` 文本化的历史）。新增 `ConversationTranscript`（角色前缀、工具调用/结果可读化、按字符截断）与 `ai.compact_instruction` 文案（中英两包）。
 - **压缩请求不再带 tools**（`BUGFIXES` T7）：摘要是一段纯文本，带工具定义白烧 token、还给了模型"回 `tool_use` 当摘要"的机会（后果与 T6 同级）。
 - **Anthropic 请求丢掉尾部空 assistant 占位符**（`BUGFIXES` T8）：那个空 assistant 是内部占位符（让流式 delta 有地方落），OpenAI 容忍、但 Anthropic 的 text 块**最小长度 1**，原样发会 400。丢掉后请求正好以 user 结尾。带 `tool_calls` 的空 assistant 不算占位符、照常保留。
@@ -145,6 +147,7 @@
 
 ### 测试
 
+- 新增 `tests/pty_signals.php`（真实 pty，`BUGFIXES` D11）：三个信号（SIGTERM / SIGHUP / SIGINT）各自断言「还原三连 + 日志记到信号名 + `signaled=true` 且 `termsig` 等于该信号 + 存活标记残留」，另覆盖**非 Swoole 底座**（`TUI_USE_SWOOLE=0`）的 SIGTERM 一例（两种底座退出路径不同），以及「残留标记 → 下次启动写 WARN」。**反面对照**（正常退出 → 退出码 0 / 标记被清 / 不产生日志）不能省，否则「标记残留」那几条断言可能只是恒真。**四条反向注入全部实测可 FAIL**。⚠️ 写这个用例本身踩了三个坑，都已写进 BUGFIXES D11 的教训：看到还原序列就立刻读进程状态（此刻进程还活着 → termsig 永远是 9）、`proc_get_status()` 在循环外**又取一次**（PHP 语义：首次报告未运行的那次才带正确 exitcode，之后再调得 -1）、`?1049h` 一出现就发按键（初始化窗口的 termios 变更会冲掉 pty 待读输入 → 丢键）。
 - 新增 `tests/docs_links.php`（**文档链接完整性，进跑批**）：校验全仓 markdown 的**相对文件链接目标存在**与**文内锚点命中真实标题**（含 `文件.md#锚点` 跨文件形式）。锚点按 GitHub（github-slugger）的 slug 规则生成，两个边界要记住：`&` 被剔除但两侧空格都保留，故 `A & B` → `a--b`（**双**连字符、不折叠）；全角标点 `（）：、` 属标点类、一并剔除。跳过**代码围栏**与**行内代码**（里面的 `# 注释` 不是标题、`](...)` 不是链接 —— 后者踩过：CHANGELOG 里写了示例 `` `](...)` `` 就被当成真链接报「目标不存在：...」），并处理重复标题的 `-1` 后缀。**外链只统计不校验**（跑批不联网，联网校验反而不可靠）。「无坏链」这类断言最容易**假通过**，故另断言「确实发现 ≥5 个文档」「确实扫到链接」作正向锚点。四条注入验证可失败：目标改错 / 锚点改错 / 让扫描一个文件都找不到 / **行内代码里的假链接必须不报错**（验修复）。
 - 新增 `tests/multicursor_unit.php`（headless：加光标规则 / 打字各自右移 / 退格含跨行合并的行号补偿 / Enter 每行插行且补偿正确 / Tab 缩进 / Esc 两条路径 + 单光标反面对照 / 多格 REVERSED 渲染 / Alt+点击全链路且不产生选区（带"不带 Alt 会复制"的反面对照）/ 自动配对与粘贴不参与）。**六条反向注入全部实测可 FAIL**：扇出改升序、去掉行数 delta 补偿、`SpanClip` 只反显第一列、删掉 Esc 分支、Alt+点击不判修饰键、去掉扇出的按行去重。
   - 其中「`SpanClip` 只反显第一列」第一次注入**没变红** —— 因为「每行最多一个光标」的不变量让整屏永远不会出现同一行两格，整屏断言**根本观察不到**它。补了一条**直接调 `SpanClip::clip`** 的原语级断言才覆盖住。教训：断言要挑一个"退化后真的会变"的观察面。

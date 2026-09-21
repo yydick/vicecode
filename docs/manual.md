@@ -465,13 +465,24 @@ The full plugin development guide (writing / loading mechanism / field values / 
 
 ### The terminal is left garbled (mouse junk / no echo / `-bash: 35: command not found`)
 
-The usual cause is an **abnormal process exit** (a PHP fatal error / SIGKILL) where cleanup never ran, leaving the terminal in raw mode + alternate screen + mouse reporting on.
+The usual cause is an **abnormal process exit** where cleanup never ran, leaving the terminal in raw mode + alternate screen + mouse reporting on.
 
-Newer builds register a `register_shutdown_function` fallback for cleanup (so fatal errors restore the terminal too) and write the fatal error to **`.vicecode_fatal.log` in the config directory**:
+Cleanup now covers these exit paths:
+
+| How it died | Terminal restored | Log |
+| --- | --- | --- |
+| Normal exit / a catchable exception | yes | none (nothing went wrong) |
+| PHP fatal error (including memory exhaustion) | yes | yes, into `.vicecode_fatal.log` |
+| Killed by a signal (`SIGTERM` / `SIGHUP` / `SIGINT`) | yes | yes, naming the signal |
+| **`SIGKILL` / segfault** | **no** — the process never gets to run any code | indirectly (see below) |
+
+The log lives in the **config directory**:
 
 ```bash
 cat ~/.vicecode_fatal.log       # only non-empty after an abnormal exit
 ```
+
+The same directory also holds an "this session is alive" marker, `.vicecode_alive`: written at startup and deleted **only on a clean exit**. So if the previous run was killed by an `SIGKILL` or a segfault — something that **cannot be intercepted** — the next launch appends a WARN line to the log (with the previous run's start time and pid) and prints a notice on the terminal before the UI starts. That is the only way to detect those deaths. Running two ViceCode instances at once does not produce a false warning (the marker records a pid, and a still-running process is not treated as stale).
 
 **If the terminal is still broken**, rescue it manually:
 

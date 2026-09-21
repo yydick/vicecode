@@ -6,6 +6,7 @@ declare(strict_types=1);
  */
 return [
     'app.title'        => 'ViceCode',
+    'app.stale_exit'   => '⚠ 上次会话未正常结束（且无致命错误记录），详见致命日志',
 
     'panel.sidebar'    => '侧栏',
     'panel.editor'     => '编辑器',

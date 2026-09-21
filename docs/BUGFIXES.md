@@ -397,6 +397,59 @@
   本项目已经在 D6→D7→D9→D10 上连着踩了四次「又发现一条没枚举到的退出路径」，
   所以判据应当是「**这条路径能不能被覆盖**」而不是「我已经枚举完了几条」。
 
+#### D11. 信号终止（SIGTERM/SIGHUP/SIGINT）→ 终端不还原**且**没有任何日志 `[本轮]`
+- **现象**：与 D10 的表象完全一样（终端留在 raw + 备用屏 + 鼠标上报，用户回到 shell
+  后看到 `-bash: 35: command not found`），但比 D10 更糟：**连日志都没有**，
+  所以事后完全查不出「发生过」。
+- **根因**：D10 修的是「致命错误不执行 `finally`」，靠 `register_shutdown_function` 兜底 ——
+  可**信号根本不走 shutdown function**。没有装 handler 时，信号的默认动作是
+  「进程立即终止」：既不执行 shutdown function、也不走 finally；而
+  `error_get_last()` 是 null（**信号不是 error**）→ 连日志分支都进不去。
+  实测（`tests/probe_signals.php`，现已升格为 `tests/pty_signals.php`）：
+  SIGTERM / SIGHUP / SIGINT 三种信号下，`?1000l` / `?1049l` / `?25h` **一条都不发**、日志**不写**。
+- **修复**：
+  1. `Shutdown::installSignalHandlers()` 装 SIGTERM / SIGHUP / SIGINT，**在终端被改动之前**调用
+     （保证「刚进 raw mode 就被 kill」也覆盖得到）。handler 里做与其它路径同一份收尾
+     （`Shutdown::run()`，幂等），写一行「被信号终止：SIGTERM（终端已还原）」进日志，
+     再让进程按信号终止。
+  2. **⚠️ handler 里绝不能写 `exit(128 + $sig)`**：协程内 Swoole 会把 `exit()` 转成
+     `Swoole\ExitException`，被顶层 `catch (Throwable)` 接住后走 `reportFatal` → **退出码变成 1**、
+     还多打一句「异常退出：swoole exit」（实测）；非协程内它也不是「被信号终止」，
+     只是「正常退出、码为 128+n」。正解是**恢复默认处置 + 重发信号**
+     （`pcntl_signal($sig, SIG_DFL); posix_kill(getmypid(), $sig);` 然后**直接返回**）：
+     handler 执行期间该信号被内核屏蔽，重发的那个在 handler 返回后**立刻**投递，
+     进程遂按默认处置终止 —— 实测两种底座都得到 `signaled=true, termsig=15/1/2`。
+     不重发则默认动作被吞掉，进程会变得**杀不死**。
+  3. 用 **pcntl**（而非 `Swoole\Process::signal`）：pcntl + `pcntl_async_signals(true)`
+     在两种底座下行为一致，且信号一到就能分发，不依赖事件循环正在跑。
+     没有 pcntl 的构建直接跳过（该类死亡无覆盖，但不引入新行为）。
+  4. 补**「本次会话还活着」标记**（`<配置目录>/.vicecode_alive`）：启动时写、
+     **只有正常退出**才删；下次启动发现残留就写一条 WARN 日志并在状态栏提示。
+     它覆盖的是**连信号 handler 都够不到**的那类死亡 —— **SIGKILL、段错误**：
+     进程没有任何机会执行代码，标记是唯一能证明「上次是异常结束」的东西。
+     - 标记里带 pid 并做存活检查：否则同时开两个 ViceCode 时，先启动那个的**正常**退出
+       会被误报成「上次异常结束」。
+     - 只在 `start()` 正常返回之后 `clearAlive()`（异常路径在上面的 `catch` 里已上抛，
+       走不到那一行）—— 用控制流本身区分正常/异常，不额外传标志。
+- **防回归**：`tests/pty_signals.php`（真实 pty）。三个信号各自断言
+  还原三连 + 日志记到信号名 + `signaled=true, termsig=对应信号` + 存活标记残留；
+  另加**非 Swoole 底座**（`TUI_USE_SWOOLE=0`）的 SIGTERM 一例（两种底座退出路径不同，
+  历史上各自出过不一样的问题）；再加「残留标记 → 下次启动写 WARN」。
+  **反面对照**必须有：正常退出（Ctrl+Q）断言退出码 0、存活标记**被清掉**、不产生日志 ——
+  少了它，「标记残留」那几条断言可能只是恒真。
+  四条**反向注入**都实测可 FAIL：① 不装 handler → 三个信号的还原断言全红；
+  ② 正常退出不清标记 → 反面对照红；③ 启动不写标记 → 「标记残留」三条红；
+  ④ `staleAlive()` 恒返回 null → WARN 断言红。
+- **教训**：**「验证方式本身」也会骗人**。至少三次栽在测试自己身上：
+  ① 发完信号**立刻**读 `proc_get_status()`，`?1049l` 是在 handler 里"还原之后、重发之前"
+     打出来的，此刻进程还活着 → 被我们 SIGKILL，`termsig` 永远是 9；
+  ② 在读循环里取过一次状态、循环外**又取一次** —— PHP 的语义是「首次报告未运行的那次调用
+     带正确 exitcode，之后再调得到 -1」，于是 `signaled` 恒为 false（**我自己的调试脚本**
+     就踩了这个，差点据此得出"非协程底座不生效"的错误结论）；
+  ③ `?1049h` 一出现就发按键：此后应用还要建 Display / 起读键协程，期间的 termios 变更
+     会把 pty 待读输入冲掉 → **丢键**（表现为 Ctrl+Q 无反应、只能 SIGKILL，看起来像产品 bug）。
+  共同点：**先把观测手段验证一遍，再拿它下结论。**
+
 ---
 
 ### E. 交互回归

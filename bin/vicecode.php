@@ -159,6 +159,127 @@ final class Shutdown
     {
         return dirname(ConfigStore::path()) . '/.vicecode_fatal.log';
     }
+
+    /** 往致命日志追加一行。用户不主动看它，但它是「为什么死的」唯一线索来源。 */
+    public static function log(string $line): void
+    {
+        @file_put_contents(self::fatalLogPath(), $line, FILE_APPEND);
+    }
+
+    /**
+     * 「本次会话还活着」标记的路径。
+     *
+     * 它要捕捉的是 shutdown function 与信号 handler **都够不到**的那一类死亡
+     * （SIGKILL、段错误、宿主进程整块消失）：进程没有任何机会执行收尾代码，
+     * 既不会发还原序列、也不会写日志。只有靠「启动时写、**正常退出**时删」的标记，
+     * 下次启动才发现「上一次是异常结束，而且连死因都没留下」。
+     */
+    public static function alivePath(): string
+    {
+        return dirname(ConfigStore::path()) . '/.vicecode_alive';
+    }
+
+    /** 启动时写下存活标记（带启动时间与 pid，事后能判断是哪一次会话） */
+    public static function markAlive(): void
+    {
+        @file_put_contents(self::alivePath(), json_encode([
+            'since' => date('c'),
+            'pid'   => getmypid(),
+        ], JSON_UNESCAPED_SLASHES) . "\n");
+    }
+
+    /** **只有正常退出**才调用：清掉标记。异常路径一律不清，下次启动才会提示。 */
+    public static function clearAlive(): void
+    {
+        @unlink(self::alivePath());
+    }
+
+    /**
+     * 读取残留标记；没有残留返回 null。
+     *
+     * ⚠️ pid 存活检查不能省：同时开两个 ViceCode 时，后启动的会覆盖标记 ——
+     * 若不检查，先启动那个实例的（正常）退出会被后启动的实例在下次启动时
+     * 误报成「上次异常结束」。
+     */
+    public static function staleAlive(): ?array
+    {
+        $path = self::alivePath();
+        if (!is_file($path)) {
+            return null;
+        }
+        $data = json_decode((string) @file_get_contents($path), true);
+        if (!is_array($data)) {
+            return [];   // 标记内容坏掉：仍按「有残留」处理（宁可多提示一次，不可漏报）
+        }
+        $pid = (int) ($data['pid'] ?? 0);
+        if ($pid > 0 && $pid !== getmypid() && self::pidAlive($pid)) {
+            return null;   // 那是**另一个**正在运行的实例
+        }
+        return $data;
+    }
+
+    private static function pidAlive(int $pid): bool
+    {
+        if (function_exists('posix_kill')) {
+            return @posix_kill($pid, 0);
+        }
+        return is_dir('/proc') && file_exists('/proc/' . $pid);
+    }
+
+    /**
+     * 装信号处理：SIGTERM / SIGHUP / SIGINT。
+     *
+     * ⚠️ 为什么必须装（实测见 `tests/pty_signals.php`）：没有 handler 时，信号走
+     * **默认动作 = 进程立即终止** —— PHP 既不执行 `register_shutdown_function`、
+     * 也不走 `finally`。于是终端被留在 raw + 备用屏 + 鼠标上报，而
+     * `error_get_last()` 是 null（信号不是 error）→ **连日志都不写**。
+     * 这类死法在用户眼里与崩溃一模一样，却是唯一「终端乱掉且查不到原因」的一种。
+     *
+     * handler 里**必须 exit**：否则默认动作被吞掉，进程会变得杀不死。
+     * 用 pcntl 而非 `Swoole\Process::signal`：pcntl + async signals 在两种底座下
+     * 行为一致，且信号一到就能分发，不依赖事件循环正在跑。
+     */
+    public static function installSignalHandlers(): void
+    {
+        if (!function_exists('pcntl_signal')) {
+            return;   // 没有 pcntl 的构建：只能接受这一类死亡无覆盖
+        }
+        $handler = static function (int $signo): void {
+            self::run();   // 幂等：还原终端 + 落盘偏好 + 回收资源
+            $name = self::signalName($signo);
+            self::log(sprintf("[%s] 被信号终止：%s（终端已还原）\n", date('c'), $name));
+            fwrite(STDERR, "\nViceCode 被信号终止（{$name}），终端已还原。\n");
+            fwrite(STDERR, '  日志：' . self::fatalLogPath() . "\n");
+            // ⚠️ 这里**不能**写 exit(128 + $signo)：
+            //  - 协程内 Swoole 会把 exit() 转成 `Swoole\ExitException`，被顶层 catch
+            //    接住后走 reportFatal → 退出码变成 1，还多打一句「异常退出：swoole exit」；
+            //  - 非协程内它只是「正常退出、码为 128+n」，而非真正被信号终止。
+            // 改成「恢复默认处置 + 重发信号」：handler 执行期间该信号被内核屏蔽，
+            // 重发的那个会在 handler **返回后立刻**投递，进程遂按默认处置终止
+            // （实测两种底座都得到 `Terminated`；pty 用例断言 termsig=15/1/2）。
+            // 不重发则默认动作被吞掉，进程会变得杀不死。
+            if (function_exists('posix_kill')) {
+                pcntl_signal($signo, SIG_DFL);
+                posix_kill(getmypid(), $signo);
+                return;
+            }
+            exit(128 + $signo);   // 退路：没有 posix 扩展的构建
+        };
+        foreach ([SIGTERM, SIGHUP, SIGINT] as $sig) {
+            pcntl_signal($sig, $handler);
+        }
+        pcntl_async_signals(true);
+    }
+
+    private static function signalName(int $signo): string
+    {
+        return match ($signo) {
+            SIGTERM => 'SIGTERM',
+            SIGHUP  => 'SIGHUP',
+            SIGINT  => 'SIGINT',
+            default => 'signal ' . $signo,
+        };
+    }
 }
 
 /**
@@ -210,7 +331,29 @@ function start(bool $sw, array $argv): void
         chdir($arg['chdirTo']);
     }
 
+    // 存活标记：启动时写、**正常退出**时删（见 start() 末尾）。残留 = 上次异常结束。
+    // 「上一次」的提示要等 new App() 之后才能发（那时才有 setMessage），故先读出来存着。
+    $stale = Shutdown::staleAlive();
+    Shutdown::markAlive();
+
     $app = new App();
+
+    if ($stale !== null) {
+        // 上次没走正常路径。它可能连致命错误都没留下（SIGKILL / 段错误），所以这条
+        // 日志往往是唯一线索 —— 没有它，那种死法永远查不出「到底发生过没有」。
+        Shutdown::log(sprintf(
+            "[%s] WARN: 上次会话未正常结束（启动于 %s, pid %s），且没有致命错误记录"
+            . " —— 可能是被 SIGKILL / 段错误等无法拦截的方式终止。\n",
+            date('c'),
+            (string) ($stale['since'] ?? '未知'),
+            (string) ($stale['pid'] ?? '?')
+        ));
+        // ⚠️ 走 stderr 而**不是**状态栏消息：状态栏的消息段是为**瞬时事件**设计的，
+        // 且优先级最高，会把常显的「Ctrl+Q 退出」这类面包屑挤掉（实测：`pty_hotkey`
+        // 因为上一次被 SIGKILL 留下标记，下一次启动的提示把退出键提示顶没了）。
+        // 这是一条**持续状态**，写在进入备用屏之前 —— 备用屏弹栈后它仍在普通屏上可见。
+        fwrite(STDERR, "\n{$app->t('app.stale_exit')}\n");
+    }
 
     // 命令行首个可读文件作为初始打开文件（验收 / 日常 `vicecode <file>` 都可用）。
     if ($arg['openFile'] !== null) {
@@ -270,6 +413,10 @@ function start(bool $sw, array $argv): void
         // 致命错误则由 register_shutdown_function 再兜一次。
         Shutdown::run();
     }
+
+    // 只有走到这里才是**正常退出**（异常路径在上面的 catch 里已上抛，finally 之后不会执行到）。
+    // 清掉存活标记，下次启动就不会误报「上次异常结束」。
+    Shutdown::clearAlive();
 }
 
 function startMain(App $app, Terminal $term, bool $sw): void
@@ -447,12 +594,17 @@ if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
             $e['line']
         );
         $log = Shutdown::fatalLogPath();
-        @file_put_contents($log, $line, FILE_APPEND);
+        Shutdown::log($line);
         fwrite(STDERR, "\nViceCode 致命错误（终端已尝试还原）：{$e['message']}\n");
         fwrite(STDERR, "  {$e['file']}:{$e['line']}\n");
         fwrite(STDERR, "  日志：{$log}\n");
         fwrite(STDERR, "  若终端仍不正常（鼠标乱码 / 无回显）：reset 或 stty sane\n");
     });
+
+    // 信号兜底：SIGTERM / SIGHUP / SIGINT 不装 handler 时走「默认动作 = 立即终止」，
+    // 既不跑 shutdown function、也不走 finally，且 error_get_last() 为 null → 终端乱掉且无日志。
+    // 装在终端被改动之前，保证「刚进 raw mode 就被 kill」也覆盖得到。
+    Shutdown::installSignalHandlers();
 
     // 交互式终端前置检查：非 tty 的 stdin（重定向 / 管道 / `</dev/null`）下，php-tui 取
     // raw mode 必然失败 —— vendor SttyRawMode::enable() 靠 `stty -g` 探测，非 tty 时直接抛

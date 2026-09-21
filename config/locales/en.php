@@ -7,6 +7,7 @@ declare(strict_types=1);
  */
 return [
     'app.title'        => 'ViceCode',
+    'app.stale_exit'   => '⚠ The previous session did not exit cleanly (no fatal error recorded) — see the fatal log',
 
     // 面板标题
     'panel.sidebar'    => 'SIDEBAR',
