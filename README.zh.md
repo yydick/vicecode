@@ -251,6 +251,7 @@ timeout 90 php tests/pty_interactive.php # 交互式 PTY：真实 pty 端到端�
 php tests/session_unit.php              # 会话持久化：导出/导入 + App 恢复（headless）
 timeout 120 php tests/pty_session.php   # 会话持久化：退出保存 → 重启恢复（真实 pty）
 php tests/m6_unit.php                   # 终端/编辑器/键位漂移等回归
+php tests/docs_links.php                # 文档链接完整性（相对链接 + 文内锚点）
 ```
 
 > 真实 pty 验收脚本严禁裸跑 `bin/vicecode.php`，一律走 `tests/pty_*.php`，并设 `VICECODE_CONFIG` 指向临时文件隔离配置。

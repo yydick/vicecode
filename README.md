@@ -243,6 +243,7 @@ timeout 90 php tests/pty_interactive.php # Interactive PTY: real pty end-to-end 
 php tests/session_unit.php              # Session persistence: export/import + App restore (headless)
 timeout 120 php tests/pty_session.php   # Session persistence: save on exit -> restore on restart (real pty)
 php tests/m6_unit.php                   # terminal/editor/keybinding-drift regression
+php tests/docs_links.php                # doc link integrity (relative links + in-page anchors)
 ```
 
 > Never run `bin/vicecode.php` bare for pty acceptance; always go through `tests/pty_*.php` and set `VICECODE_CONFIG` to a temp file to isolate config.
