@@ -76,7 +76,12 @@ check(ConfigStore::load() === [], '损坏 JSON → 空配置（不抛）');
 echo "\n== 3) App 从配置文件加载 ==\n";
 setCfg($tmp);
 file_put_contents($tmp, json_encode([
-    'layout' => ['sidebarWidth' => 52, 'aiWidth' => 40, 'editorRatio' => 0.33, 'aiInputHeight' => 6],
+    'layout' => [
+        'sidebarWidth' => 52, 'aiWidth' => 40, 'editorRatio' => 0.33, 'aiInputHeight' => 6,
+        // B16：显隐/最大化也随配置恢复。注意 JSON 里写**真布尔**与写字符串 `"false"` 都要认
+        'sidebarVisible' => false, 'aiVisible' => true, 'terminalVisible' => true,
+        'terminalMaximized' => true,
+    ],
     'theme' => 'midnight',
     'locale' => 'en',
 ], JSON_PRETTY_PRINT));
@@ -85,8 +90,19 @@ check($app->layout->sidebarWidth === 52, '布局侧栏宽从文件加载为 52')
 check(abs($app->layout->editorRatio - 0.33) < 1e-6, '编辑器比例从文件加载为 0.33');
 check($app->theme->id === 'midnight', '主题从文件加载为 midnight');
 check($app->locale() === 'en', '语言从文件加载为 en');
+check($app->layout->sidebarVisible === false, 'sidebarVisible=false 从文件加载');
+check($app->layout->terminalMaximized === true, 'terminalMaximized=true 从文件加载');
 $areas = $app->areas(Area::fromDimensions(120, 40));
-check($areas['sidebar']->width === 52, '切出的侧栏矩形宽度==配置值 52');
+check(!isset($areas['sidebar']), '配置里侧栏隐藏 → 切不出 sidebar 矩形');
+check(!isset($areas['editor']) && isset($areas['terminal']), '终端最大化 → 中列只有 terminal');
+
+// 手写 `"false"`（字符串）也必须读成「隐藏」：`(bool) "false"` 是 true，是个经典坑
+file_put_contents($tmp, json_encode([
+    'layout' => ['sidebarWidth' => 30, 'sidebarVisible' => 'false', 'aiVisible' => 0],
+], JSON_PRETTY_PRINT));
+$appB = new App();
+check($appB->layout->sidebarVisible === false && $appB->layout->aiVisible === false,
+    '字符串 "false" / 数字 0 也读成隐藏（不能拿 (bool) 直接转）');
 
 echo "\n== 4) 环境变量优先级高于配置文件 ==\n";
 // 配置文件 locale=en，但 APP_LOCALE=zh_CN 应胜出
@@ -105,6 +121,8 @@ setCfg($tmpSave);
 clearEnv();
 $app3 = new App();  // $tmpSave 不存在 → 默认 dark / zh_CN 起步
 $app3->layout = $app3->layout->withSidebarWidth(58)->withAiInputHeight(9);
+// B16：显隐状态同样要落盘（下次启动保持上次布局）
+$app3->togglePanel('ai');
 // 模拟运行时切换：拖拽改布局 + Ctrl+T 切主题 + 切语言，都应反映进落盘
 $app3->cycleTheme();   // dark → midnight
 // 切语言：V1.2 起只有「状态栏/菜单 → 选项列表」这条路（`toggleLocale()` 已删）
@@ -115,6 +133,8 @@ check($app3->saveConfig(), 'saveConfig() 返回成功');
 $saved = json_decode((string) file_get_contents($tmpSave), true);
 check(($saved['layout']['sidebarWidth'] ?? 0) === 58, '落盘 sidebarWidth=58（拖拽后）');
 check(($saved['layout']['aiInputHeight'] ?? 0) === 9, '落盘 aiInputHeight=9');
+check(($saved['layout']['aiVisible'] ?? true) === false, '落盘 aiVisible=false（显隐状态也持久化）');
+check(($saved['layout']['sidebarVisible'] ?? false) === true, '落盘 sidebarVisible=true（未被误改）');
 check(($saved['theme'] ?? '') === 'midnight', '落盘 theme=midnight（运行时切换后）');
 check(($saved['locale'] ?? '') === 'en', '落盘 locale=en（运行时切换后）');
 @unlink($tmpSave);

@@ -51,6 +51,14 @@ final class LayoutConfig
         public readonly int $aiWidth = self::DEFAULT_AI,
         public readonly float $editorRatio = self::DEFAULT_EDITOR_RATIO,
         public readonly int $aiInputHeight = self::DEFAULT_AI_INPUT,
+        // ── 面板显隐与终端最大化（B16）──
+        // 三个可见性默认全 true（= 与加这些字段之前完全一致：默认布局一字不变），
+        // 最大化默认 false。它们不参与 clamp，只决定 LayoutFactory 切不切这块矩形。
+        public readonly bool $sidebarVisible = true,
+        public readonly bool $aiVisible = true,
+        public readonly bool $terminalVisible = true,
+        /** 终端最大化：中列只留终端（编辑器让位），左右两列保留 */
+        public readonly bool $terminalMaximized = false,
     ) {
     }
 
@@ -61,6 +69,10 @@ final class LayoutConfig
             $this->aiWidth,
             $this->editorRatio,
             $this->aiInputHeight,
+            $this->sidebarVisible,
+            $this->aiVisible,
+            $this->terminalVisible,
+            $this->terminalMaximized,
         );
     }
 
@@ -71,6 +83,10 @@ final class LayoutConfig
             (int) self::clamp($w, self::MIN_AI, self::MAX_AI),
             $this->editorRatio,
             $this->aiInputHeight,
+            $this->sidebarVisible,
+            $this->aiVisible,
+            $this->terminalVisible,
+            $this->terminalMaximized,
         );
     }
 
@@ -81,6 +97,10 @@ final class LayoutConfig
             $this->aiWidth,
             self::clamp($r, self::MIN_EDITOR_RATIO, self::MAX_EDITOR_RATIO),
             $this->aiInputHeight,
+            $this->sidebarVisible,
+            $this->aiVisible,
+            $this->terminalVisible,
+            $this->terminalMaximized,
         );
     }
 
@@ -91,6 +111,52 @@ final class LayoutConfig
             $this->aiWidth,
             $this->editorRatio,
             (int) self::clamp($h, self::MIN_AI_INPUT, self::MAX_AI_INPUT),
+            $this->sidebarVisible,
+            $this->aiVisible,
+            $this->terminalVisible,
+            $this->terminalMaximized,
+        );
+    }
+
+    // ── 面板显隐 / 终端最大化 ──────────────────────────
+    // 注意：这四个 with* 也必须把**其余字段**原样带上。前四个 with* 同理 ——
+    // 漏一个字段就会「拖一下分隔条，隐藏状态被悄悄重置回默认」。
+
+    public function withSidebarVisible(bool $v): self
+    {
+        return $this->copyWith(['sidebarVisible' => $v]);
+    }
+
+    public function withAiVisible(bool $v): self
+    {
+        return $this->copyWith(['aiVisible' => $v]);
+    }
+
+    public function withTerminalVisible(bool $v): self
+    {
+        return $this->copyWith(['terminalVisible' => $v]);
+    }
+
+    public function withTerminalMaximized(bool $v): self
+    {
+        return $this->copyWith(['terminalMaximized' => $v]);
+    }
+
+    /**
+     * 复制并覆盖若干字段（只给布尔显隐字段用：它们不需要 clamp）。
+     * @param array<string,bool> $overrides
+     */
+    private function copyWith(array $overrides): self
+    {
+        return new self(
+            $this->sidebarWidth,
+            $this->aiWidth,
+            $this->editorRatio,
+            $this->aiInputHeight,
+            $overrides['sidebarVisible'] ?? $this->sidebarVisible,
+            $overrides['aiVisible'] ?? $this->aiVisible,
+            $overrides['terminalVisible'] ?? $this->terminalVisible,
+            $overrides['terminalMaximized'] ?? $this->terminalMaximized,
         );
     }
 
@@ -116,7 +182,36 @@ final class LayoutConfig
             ->withSidebarWidth((int) ($layout['sidebarWidth'] ?? self::DEFAULT_SIDEBAR))
             ->withAiWidth((int) ($layout['aiWidth'] ?? self::DEFAULT_AI))
             ->withEditorRatio((float) ($layout['editorRatio'] ?? self::DEFAULT_EDITOR_RATIO))
-            ->withAiInputHeight((int) ($layout['aiInputHeight'] ?? self::DEFAULT_AI_INPUT));
+            ->withAiInputHeight((int) ($layout['aiInputHeight'] ?? self::DEFAULT_AI_INPUT))
+            ->withSidebarVisible(self::boolOr($layout['sidebarVisible'] ?? null, true))
+            ->withAiVisible(self::boolOr($layout['aiVisible'] ?? null, true))
+            ->withTerminalVisible(self::boolOr($layout['terminalVisible'] ?? null, true))
+            ->withTerminalMaximized(self::boolOr($layout['terminalMaximized'] ?? null, false));
+    }
+
+    /**
+     * 宽松地读布尔字段：**不能用 `(bool) $v`** —— 手写配置里写 `"false"` / `0` / `"0"` 时，
+     * `(bool) "false"` 是 true（非空字符串），会把「关掉的面板」读成「开着」。
+     * 缺失（null）走默认值。
+     */
+    private static function boolOr(mixed $v, bool $default): bool
+    {
+        if (is_bool($v)) {
+            return $v;
+        }
+        if (is_int($v) || is_float($v)) {
+            return $v !== 0;
+        }
+        if (is_string($v)) {
+            $s = strtolower(trim($v));
+            if (in_array($s, ['1', 'true', 'yes', 'on'], true)) {
+                return true;
+            }
+            if (in_array($s, ['0', 'false', 'no', 'off', ''], true)) {
+                return false;
+            }
+        }
+        return $default;
     }
 
 }

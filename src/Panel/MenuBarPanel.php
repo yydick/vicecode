@@ -107,6 +107,16 @@ final class MenuBarPanel
                     ['label' => $t('menu.view_focus_ai'),     'action' => 'view.focus.ai',     'shortcut' => 'Tab'],
                     ['label' => $t('menu.command_palette'),    'action' => 'palette.open',      'shortcut' => 'F1'],
                     ['label' => $t('menu.plugin_panels'),       'action' => 'panel.host.open',   'shortcut' => ''],
+                    // 面板显隐 / 终端最大化（B16）：label 随当前状态切换（同 ai.tool_mode 的写法）——
+                    // 菜单是「动作」语境，用户要看到「按下去会发生什么」，而不是一个开关名字。
+                    ['label' => $this->shell->layout->sidebarVisible ? $t('menu.view_sidebar_hide') : $t('menu.view_sidebar_show'),
+                        'action' => 'view.toggle_sidebar', 'shortcut' => ''],
+                    ['label' => $this->shell->layout->aiVisible ? $t('menu.view_ai_hide') : $t('menu.view_ai_show'),
+                        'action' => 'view.toggle_ai', 'shortcut' => ''],
+                    ['label' => $this->shell->layout->terminalVisible ? $t('menu.view_term_hide') : $t('menu.view_term_show'),
+                        'action' => 'view.toggle_terminal', 'shortcut' => ''],
+                    ['label' => $this->shell->layout->terminalMaximized ? $t('menu.view_term_restore') : $t('menu.view_term_max'),
+                        'action' => 'view.toggle_terminal_max', 'shortcut' => ''],
                     ['label' => $t('menu.view_lang'),     'action' => 'view.lang',     'shortcut' => ''],
                 ],
             ],

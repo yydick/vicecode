@@ -74,10 +74,26 @@ VICECODE_CONFIG=/tmp/vc.json php bin/vicecode.php   # use a different config fil
 - **Four sidebar tabs**: Explorer / GIT / Search / 🧩 Extensions. Click the tab row to switch.
 - **Top menu bar**: `F10` (File / View / Terminal / Help / AI / Plugins).
 - **Command palette**: `F1` (or *View → Command palette*), fuzzy-filter every command and press `Enter` to run.
-- **Dividers**: drag with the mouse to resize the layout (session-only, not persisted).
+- **Dividers**: drag with the mouse to resize the layout (**persisted since R7** — restored on the next start).
 - **Status bar**: segments are dropped as width shrinks (low-value ones first). Typical segments: transient message, `file=` (with the unsaved `*` and `N cursors`), `mode=`, `provider=`, `strategy=`, `branch=`, `focus=`, `cwd=`, and the quit hint.
 - **Clickable status bar**: clicking the `lang=` / `Theme=` segment pops up the matching list above the status bar (`↑`/`↓` to move, `Enter` or a click to apply, `Esc` or a click elsewhere to close; the active value is marked `●`). The *View → Language / Theme* menu items open the same lists, and `Ctrl+T` still cycles the theme. Segments without a list (e.g. `file=`) do nothing when clicked.
   - Under tight widths, segments are trimmed by priority, and a **trimmed segment cannot be clicked either** (hit-testing shares the same source as trimming). The theme segment ranks below the language one, so on very narrow terminals (English UI, roughly <120 columns) it may disappear first — use the menu entry in that case.
+
+### Panel visibility & terminal maximize
+
+The three side panels can be collapsed/expanded at any time. The entries live **only in the menu and the command palette** (deliberately no Ctrl shortcut):
+
+| View menu item | Effect |
+| --- | --- |
+| Hide / Show Sidebar | collapse the left column; the centre column takes the freed width and `Tab` skips it |
+| Hide / Show AI Column | collapse the right column (stream + input together) |
+| Hide / Show Terminal | collapse the bottom half of the centre column; the editor fills it |
+| Maximize / Restore Terminal | the centre column holds **only the terminal** (the editor steps aside); both side columns stay |
+
+- The labels **follow the current state** ("Hide Sidebar" means it is currently visible; clicking hides it) — the menu never lies.
+- If focus sits on a panel that gets hidden, it **moves to the nearest visible panel**; hidden panels are never reached by `Tab`.
+- Hiding the terminal while maximized **also restores** it (no contradictory "hidden yet maximized" state); conversely, "Maximize Terminal" while hidden shows it first.
+- All of this **persists with your preferences** (the `layout` section of `~/.vicerc`, next to the panel widths) and comes back on the next start. Search `view.toggle_` in the command palette (`F1`) to run them directly.
 
 ---
 

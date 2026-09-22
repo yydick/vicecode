@@ -936,6 +936,106 @@ class App
         }
     }
 
+    // ── 面板显隐 / 终端最大化（B16）─────────────────────
+
+    /**
+     * 当前**可见**的面板 key 列表（顺序沿用 `PANELS`）。
+     *
+     * `App::PANELS` 常量**不动**（大量测试按它取 focusIndex，改动面太大）：可见性是叠加在
+     * 它之上的一层过滤，Tab 循环与焦点回落都走这里。中列至少留一段（最大化时是终端），
+     * 所以这个列表永远非空。
+     * @return list<string>
+     */
+    public function visiblePanels(): array
+    {
+        $centerKeys = LayoutFactory::centerKeys($this->layout);
+        $out = [];
+        foreach (self::PANELS as $k) {
+            $visible = match ($k) {
+                'sidebar' => $this->layout->sidebarVisible,
+                'editor', 'terminal' => in_array($k, $centerKeys, true),
+                default => $this->layout->aiVisible,   // ai_stream / ai_input
+            };
+            if ($visible) {
+                $out[] = $k;
+            }
+        }
+        return $out;
+    }
+
+    /** 在**可见**面板间循环切焦点（$dir = +1 下一个 / -1 上一个） */
+    public function focusNext(int $dir): void
+    {
+        $vis = $this->visiblePanels();
+        if ($vis === []) {
+            return;
+        }
+        $i = array_search($this->focusPanel(), $vis, true);
+        if ($i === false) {
+            $this->focus($vis[0]);
+            return;
+        }
+        $n = count($vis);
+        $this->focus($vis[(($i + $dir) % $n + $n) % $n]);
+    }
+
+    /**
+     * 焦点落在被隐藏的面板上时，向后找最近的可见面板（找不到再向前）。
+     * 隐藏面板后必须调一次，否则焦点会停在一个不存在的地方：按键发给它、屏幕上却没有它。
+     */
+    private function ensureFocusVisible(): void
+    {
+        $vis = $this->visiblePanels();
+        if ($vis === [] || in_array($this->focusPanel(), $vis, true)) {
+            return;
+        }
+        $n = count(self::PANELS);
+        for ($d = 1; $d < $n; $d++) {
+            $k = self::PANELS[($this->focusIndex + $d) % $n];
+            if (in_array($k, $vis, true)) {
+                $this->focus($k);
+                return;
+            }
+        }
+        $this->focus($vis[0]);
+    }
+
+    /**
+     * 显隐/最大化开关。$k ∈ sidebar | ai | terminal | terminal_max。
+     *
+     * 隐藏时顺手清掉矩形缓存（`areaKey`）：布局变了但视口没变，缓存不失效就会继续按旧布局
+     * 做命中测试 —— 表现是「点了没反应 / 点到别处」。同 `updateDrag()` 末尾的做法。
+     */
+    public function togglePanel(string $k): void
+    {
+        $c = $this->layout;
+        switch ($k) {
+            case 'sidebar':
+                $c = $c->withSidebarVisible(!$c->sidebarVisible);
+                break;
+            case 'ai':
+                $c = $c->withAiVisible(!$c->aiVisible);
+                break;
+            case 'terminal':
+                $visible = !$c->terminalVisible;
+                // 隐藏终端就谈不上「最大化」：一并收掉，避免留下自相矛盾的状态
+                $c = $c->withTerminalVisible($visible)
+                    ->withTerminalMaximized($visible ? $c->terminalMaximized : false);
+                break;
+            case 'terminal_max':
+                // 最大化隐含「终端可见」：终端被隐藏时按一下应当把它显出来并最大化，
+                // 否则这个菜单项点了看不到任何变化（比"什么都不做"更糟）。
+                $c = $c->withTerminalVisible(true)->withTerminalMaximized(!$c->terminalMaximized);
+                break;
+            default:
+                return;
+        }
+        $this->layout = $c;
+        $this->areaKey = '';
+        $this->ensureFocusVisible();
+        $this->setMessage($this->layoutSummary());
+    }
+
     /**
      * V1.1：向所有实现了可选方法 `onEvent(PluginEvent $e): void` 的插件广播应用事件。
      *
@@ -1143,68 +1243,92 @@ class App
 
         // 渲染前把文本选择矩形注入编辑/终端面板（content() 内部做反显高亮）。
         // 归一化矩形 [r0,c0,r1,c1]；无选择时传 null 清掉上一帧高亮。
-        if ($this->select !== null && $this->select['panel'] === 'editor') {
+        // 隐藏的面板不注入：它这一帧根本不渲染，注入反而会让选区状态指向不存在的矩形。
+        $centerKeys = LayoutFactory::centerKeys($this->layout);
+        $mainKeys = LayoutFactory::mainKeys($this->layout);
+        $hasSidebar = in_array('sidebar', $mainKeys, true);
+        $hasAi = in_array('ai', $mainKeys, true);
+        $hasEditor = in_array('editor', $centerKeys, true);
+        $hasTerminal = in_array('terminal', $centerKeys, true);
+
+        if ($this->select !== null && $this->select['panel'] === 'editor' && $hasEditor) {
             $this->editor->setSelection($this->normalizeRect($this->select));
         } else {
             $this->editor->setSelection(null);
         }
-        if ($this->select !== null && $this->select['panel'] === 'terminal') {
+        if ($this->select !== null && $this->select['panel'] === 'terminal' && $hasTerminal) {
             $this->terminal->setSelection($this->normalizeRect($this->select));
         } else {
             $this->terminal->setSelection(null);
         }
 
+        // ⚠️ 面板 widget **只构造可见的**：content() 不是纯函数 —— 编辑器每帧在里面更新
+        // 横滚边界、终端在聚焦首帧会真的起 shell；而且隐藏面板的 `$a['...']` 根本不存在。
+        // 段数/顺序一律以 mainKeys()/centerKeys() 为准，与 split() 切出的矩形天然一一对应。
+
         // ── Sidebar ──
-        $sidebarInner = $this->sidebar->content($a['sidebar'], $focus === 'sidebar');
-        $sidebar = BlockWidget::default()
-            ->borders(Borders::ALL)
-            ->borderStyle($this->borderStyle($focus === 'sidebar'))
-            ->titles(Title::fromString(' ' . $this->i18n->t('panel.sidebar') . ' '))
-            ->widget($sidebarInner);
+        $sidebarWidget = null;
+        if ($hasSidebar) {
+            $sidebarWidget = BlockWidget::default()
+                ->borders(Borders::ALL)
+                ->borderStyle($this->borderStyle($focus === 'sidebar'))
+                ->titles(Title::fromString(' ' . $this->i18n->t('panel.sidebar') . ' '))
+                ->widget($this->sidebar->content($a['sidebar'], $focus === 'sidebar'));
+        }
 
         // ── Editor ──
         // 先算 content()（内部每帧更新 hLeft/hRight 横向滚动边界指示），再据此拼标题，
         // 避免标题指示比正文晚一帧。
-        $editorWidget = $this->editor->content($a['editor'], $focus === 'editor');
-        $editorTitle = ' ' . $this->i18n->t('panel.editor') . ' ';
-        if ($this->buffer !== null) {
-            $name = basename((string) $this->buffer->path);
-            $flag = $this->buffer->dirty ? ' ' . $this->i18n->t('status.dirty') : '';
-            $hint = '';
-            if ($this->editor->hLeft) {
-                $hint .= '‹';   // ‹ 左侧还有隐藏内容（已横滚）
+        $editorWidget = null;
+        if ($hasEditor) {
+            $editorInner = $this->editor->content($a['editor'], $focus === 'editor');
+            $editorTitle = ' ' . $this->i18n->t('panel.editor') . ' ';
+            if ($this->buffer !== null) {
+                $name = basename((string) $this->buffer->path);
+                $flag = $this->buffer->dirty ? ' ' . $this->i18n->t('status.dirty') : '';
+                $hint = '';
+                if ($this->editor->hLeft) {
+                    $hint .= '‹';   // ‹ 左侧还有隐藏内容（已横滚）
+                }
+                if ($this->editor->hRight) {
+                    $hint .= '›';   // › 右侧还有隐藏内容
+                }
+                $editorTitle = ' ' . $this->i18n->t('panel.editor') . ': ' . $name . $flag
+                    . ($hint !== '' ? ' ' . $hint : '') . ' ';
             }
-            if ($this->editor->hRight) {
-                $hint .= '›';   // › 右侧还有隐藏内容
-            }
-            $editorTitle = ' ' . $this->i18n->t('panel.editor') . ': ' . $name . $flag
-                . ($hint !== '' ? ' ' . $hint : '') . ' ';
+            $editorWidget = BlockWidget::default()
+                ->borders(Borders::ALL)
+                ->borderStyle($this->borderStyle($focus === 'editor'))
+                ->titles(Title::fromString($editorTitle))
+                ->widget($editorInner);
         }
-        $editor = BlockWidget::default()
-            ->borders(Borders::ALL)
-            ->borderStyle($this->borderStyle($focus === 'editor'))
-            ->titles(Title::fromString($editorTitle))
-            ->widget($editorWidget);
 
         // ── Terminal（默认交互式 PTY / shell 退出后回落命令运行器）──
         // 标题**不**随默认模式变化：pty 下只有「捕获中」才值得写出来（那是用户唯一看不出
         // 来的状态，其余靠面板底部的提示行说明）。默认态标题保持「终端」，与改动前一致。
-        $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
-        if ($this->terminal->mode === 'pty' && $this->terminal->isCaptured()) {
-            $termTitle = ' ' . $this->i18n->t('term.interactive') . ' · ' . $this->i18n->t('term.captured') . ' ';
-        } elseif ($this->terminal->mode === 'runner' && $this->terminal->isRunning()) {
-            $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' · ' . $this->i18n->t('term.running') . ' ';
+        $terminalWidget = null;
+        if ($hasTerminal) {
+            $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
+            if ($this->terminal->mode === 'pty' && $this->terminal->isCaptured()) {
+                $termTitle = ' ' . $this->i18n->t('term.interactive') . ' · ' . $this->i18n->t('term.captured') . ' ';
+            } elseif ($this->terminal->mode === 'runner' && $this->terminal->isRunning()) {
+                $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' · ' . $this->i18n->t('term.running') . ' ';
+            }
+            $terminalWidget = BlockWidget::default()
+                ->borders(Borders::ALL)
+                ->borderStyle($this->borderStyle($focus === 'terminal'))
+                ->titles(Title::fromString($termTitle))
+                ->widget($this->terminal->content($a['terminal'], $focus === 'terminal'));
         }
-        $terminal = BlockWidget::default()
-            ->borders(Borders::ALL)
-            ->borderStyle($this->borderStyle($focus === 'terminal'))
-            ->titles(Title::fromString($termTitle))
-            ->widget($this->terminal->content($a['terminal'], $focus === 'terminal'));
 
+        $centerWidgets = [];
+        foreach ($centerKeys as $k) {
+            $centerWidgets[] = $k === 'editor' ? $editorWidget : $terminalWidget;
+        }
         $center = GridWidget::default()
             ->direction(Direction::Vertical)
             ->constraints(...LayoutFactory::centerConstraints($this->layout))
-            ->widgets($editor, $terminal);
+            ->widgets(...$centerWidgets);
 
         // ── AI Stream ──
         // 标题带上当前 Provider/模型：切换后要能立刻看见生效的是谁
@@ -1218,43 +1342,54 @@ class App
         $modelLabel = $spec !== null && $this->chat->hasSelection()
             ? ' · ' . $spec->label . '/' . $spec->model
             : '';
-        $aiTitle = ' ' . $this->i18n->t('panel.ai_chat')
-            . $modelLabel
-            . ($this->chat->isStreaming() ? ' …' : '') . ' ';
-        $aiStream = BlockWidget::default()
-            ->borders(Borders::ALL)
-            ->borderStyle($this->borderStyle($focus === 'ai_stream'))
-            ->titles(Title::fromString($aiTitle))
-            ->widget($this->ai->streamContent(
-                max(0, ($a['ai_stream']->width ?? 0) - 2),
-                max(0, ($a['ai_stream']->height ?? 0) - 2),
-            ));
+        $ai = null;
+        if ($hasAi) {
+            $aiTitle = ' ' . $this->i18n->t('panel.ai_chat')
+                . $modelLabel
+                . ($this->chat->isStreaming() ? ' …' : '') . ' ';
+            $aiStream = BlockWidget::default()
+                ->borders(Borders::ALL)
+                ->borderStyle($this->borderStyle($focus === 'ai_stream'))
+                ->titles(Title::fromString($aiTitle))
+                ->widget($this->ai->streamContent(
+                    max(0, ($a['ai_stream']->width ?? 0) - 2),
+                    max(0, ($a['ai_stream']->height ?? 0) - 2),
+                ));
 
-        // ── AI Input ──
-        // 输入框内部 = 框高 - 上下边框(2)，恒为输入内容（默认 3 行）。
-        // 工具栏（发送/换行/清空）用图标放在顶边框右对齐，不占用输入行。
-        $aiInput = BlockWidget::default()
-            ->borders(Borders::ALL)
-            ->borderStyle($this->borderStyle($focus === 'ai_input'))
-            ->titles(
-                Title::fromString(' ' . $this->i18n->t('panel.ai_input') . ' '),
-                Title::fromString($this->ai->toolbarTitleString())->horizontalAlignment(HorizontalAlignment::Right),
-            )
-            ->widget($this->ai->inputContent(
-                max(0, ($a['ai_input']->width ?? 0) - 2),
-                max(0, ($a['ai_input']->height ?? 0) - 2),
-            ));
+            // ── AI Input ──
+            // 输入框内部 = 框高 - 上下边框(2)，恒为输入内容（默认 3 行）。
+            // 工具栏（发送/换行/清空）用图标放在顶边框右对齐，不占用输入行。
+            $aiInput = BlockWidget::default()
+                ->borders(Borders::ALL)
+                ->borderStyle($this->borderStyle($focus === 'ai_input'))
+                ->titles(
+                    Title::fromString(' ' . $this->i18n->t('panel.ai_input') . ' '),
+                    Title::fromString($this->ai->toolbarTitleString())->horizontalAlignment(HorizontalAlignment::Right),
+                )
+                ->widget($this->ai->inputContent(
+                    max(0, ($a['ai_input']->width ?? 0) - 2),
+                    max(0, ($a['ai_input']->height ?? 0) - 2),
+                ));
 
-        $ai = GridWidget::default()
-            ->direction(Direction::Vertical)
-            ->constraints(...LayoutFactory::aiConstraints($this->layout))
-            ->widgets($aiStream, $aiInput);
+            $ai = GridWidget::default()
+                ->direction(Direction::Vertical)
+                ->constraints(...LayoutFactory::aiConstraints($this->layout))
+                ->widgets($aiStream, $aiInput);
+        }
 
         // ── 主区 ──
+        $mainWidgets = [];
+        foreach ($mainKeys as $k) {
+            $mainWidgets[] = match ($k) {
+                'sidebar' => $sidebarWidget,
+                'ai' => $ai,
+                default => $center,
+            };
+        }
         $main = GridWidget::default()
             ->direction(Direction::Horizontal)
             ->constraints(...LayoutFactory::mainConstraints($this->layout))
-            ->widgets($sidebar, $center, $ai);
+            ->widgets(...$mainWidgets);
 
         // ── StatusBar ──
         // 传入可视宽度：状态栏要在放不下时**按优先级丢弃**低优先级段，
@@ -1517,6 +1652,19 @@ class App
                 break;
             case 'view.lang':
                 $this->openPicker('locale');
+                break;
+            // 面板显隐 / 终端最大化（B16）：只做菜单与命令面板入口，**不加 Ctrl 快捷键**（用户定的）
+            case 'view.toggle_sidebar':
+                $this->togglePanel('sidebar');
+                break;
+            case 'view.toggle_ai':
+                $this->togglePanel('ai');
+                break;
+            case 'view.toggle_terminal':
+                $this->togglePanel('terminal');
+                break;
+            case 'view.toggle_terminal_max':
+                $this->togglePanel('terminal_max');
                 break;
             case 'term.cancel':
                 $this->terminal->cancel();
@@ -1814,7 +1962,9 @@ class App
             // ⚠️ 必须在这里就把 shell 起好：正常路径是「聚焦后的首帧渲染」起 shell，
             // 而触发捕获的这个键就在本帧的事件里 —— 等渲染完再转发，这个键已经没了
             // （实测一次性灌 `ll\r`：首轮只处理事件不渲染，三个字节全丢）。
-            $this->terminal->ensurePtyStarted($a['terminal']);
+            if (isset($a['terminal'])) {
+                $this->terminal->ensurePtyStarted($a['terminal']);
+            }
             $this->terminal->enterCapture();
             $bytes = KeyToPty::encode($event);
             if ($bytes !== null) {
@@ -2105,59 +2255,76 @@ class App
         // 面板在拖拽轴上的最小可点击尺寸：小于它的面板，其拖拽容差带会吞掉整个内部，
         // 导致"点中间反而拖不动、无法聚焦"。此时把点击交给焦点逻辑；从相邻的大面板一侧仍可拖动调整。
         $min = 2 * $tol + 1;
-        $mainTop = $a['sidebar']->position->y;
+        // ⚠️ 被隐藏的面板在 $a 里**根本不存在**（split 不返回它），所以每条分隔条都要先确认
+        // 它两侧的面板都在 —— 否则隐藏侧栏/AI/终端后点一下就是 Undefined array key。
+        if (!isset($a['status'])) {
+            return false;
+        }
+        $mainTop = isset($a['sidebar']) ? $a['sidebar']->position->y
+            : (isset($a['editor']) ? $a['editor']->position->y
+                : (isset($a['terminal']) ? $a['terminal']->position->y
+                    : (isset($a['ai_stream']) ? $a['ai_stream']->position->y : 0)));
         $mainBottom = $a['status']->position->y; // 状态栏起始 = 主区底部
 
-        // 竖分隔条①：侧栏右边界（x = sidebar.x + sidebar.width）
-        $sidebarEdge = $a['sidebar']->position->x + $a['sidebar']->width;
-        if (abs($e->column - $sidebarEdge) <= $tol
-            && $e->row >= $mainTop && $e->row < $mainBottom) {
-            $key = $e->column <= $sidebarEdge ? 'sidebar' : 'editor';
-            if ($a[$key]->width > $min) {
-                $this->drag = ['which' => 'sidebar', 'horizontal' => false];
-                return true;
+        // 竖分隔条①：侧栏右边界（x = sidebar.x + sidebar.width）——两侧都得在
+        if (isset($a['sidebar'])) {
+            $sidebarEdge = $a['sidebar']->position->x + $a['sidebar']->width;
+            if (abs($e->column - $sidebarEdge) <= $tol
+                && $e->row >= $mainTop && $e->row < $mainBottom) {
+                $key = $e->column <= $sidebarEdge ? 'sidebar' : (isset($a['editor']) ? 'editor' : 'terminal');
+                if (isset($a[$key]) && $a[$key]->width > $min) {
+                    $this->drag = ['which' => 'sidebar', 'horizontal' => false];
+                    return true;
+                }
             }
         }
 
-        // 竖分隔条②：AI 列左边界（x = ai_stream.x）
-        $aiEdge = $a['ai_stream']->position->x;
-        if (abs($e->column - $aiEdge) <= $tol
-            && $e->row >= $mainTop && $e->row < $mainBottom) {
-            $key = $e->column < $aiEdge ? 'editor' : 'ai_stream';
-            if ($a[$key]->width > $min) {
-                $this->drag = ['which' => 'ai', 'horizontal' => false];
-                return true;
+        // 竖分隔条②：AI 列左边界（x = ai_stream.x）——左侧邻居是中间列
+        if (isset($a['ai_stream'])) {
+            $aiEdge = $a['ai_stream']->position->x;
+            if (abs($e->column - $aiEdge) <= $tol
+                && $e->row >= $mainTop && $e->row < $mainBottom) {
+                $key = $e->column < $aiEdge ? (isset($a['editor']) ? 'editor' : 'terminal') : 'ai_stream';
+                if (isset($a[$key]) && $a[$key]->width > $min) {
+                    $this->drag = ['which' => 'ai', 'horizontal' => false];
+                    return true;
+                }
             }
         }
 
-        // 横分隔条①：编辑器下边界（y = editor.y + editor.height），且仅在中间列水平范围内
-        $centerX = $a['editor']->position->x;
-        $centerW = $a['editor']->width;
-        $editorEdge = $a['editor']->position->y + $a['editor']->height;
-        if (abs($e->row - $editorEdge) <= $tol
-            && $e->column >= $centerX && $e->column < $centerX + $centerW) {
-            $key = $e->row < $editorEdge ? 'editor' : 'terminal';
-            if ($a[$key]->height > $min) {
-                $this->drag = ['which' => 'center', 'horizontal' => true];
-                return true;
+        // 横分隔条①：编辑器下边界（y = editor.y + editor.height），且仅在中间列水平范围内。
+        // 终端最大化 / 终端被隐藏时中列只有一段 → 没有这条分隔条。
+        if (isset($a['editor'], $a['terminal'])) {
+            $centerX = $a['editor']->position->x;
+            $centerW = $a['editor']->width;
+            $editorEdge = $a['editor']->position->y + $a['editor']->height;
+            if (abs($e->row - $editorEdge) <= $tol
+                && $e->column >= $centerX && $e->column < $centerX + $centerW) {
+                $key = $e->row < $editorEdge ? 'editor' : 'terminal';
+                if ($a[$key]->height > $min) {
+                    $this->drag = ['which' => 'center', 'horizontal' => true];
+                    return true;
+                }
             }
         }
 
         // 横分隔条②：AI 消息流下边界（y = ai_stream.y + ai_stream.height），且在 AI 列水平范围内
-        $aiX = $a['ai_stream']->position->x;
-        $aiW = $a['ai_stream']->width;
-        $aiEdgeY = $a['ai_stream']->position->y + $a['ai_stream']->height;
-        if (abs($e->row - $aiEdgeY) <= $tol
-            && $e->column >= $aiX && $e->column < $aiX + $aiW) {
-            // 工具栏图标画在 ai_input 顶边框（== aiEdgeY），点图标区应触发按钮而非拖拽，
-            // 否则 tryStartDrag 会抢先返回 true，handleClick 永远收不到 → 按钮无反应。
-            if ($this->ai->isToolbarBorderHit($e->column, $e->row, $a['ai_input'])) {
-                return false;
-            }
-            $key = $e->row < $aiEdgeY ? 'ai_stream' : 'ai_input';
-            if ($a[$key]->height > $min) {
-                $this->drag = ['which' => 'ai_input', 'horizontal' => true];
-                return true;
+        if (isset($a['ai_stream'], $a['ai_input'])) {
+            $aiX = $a['ai_stream']->position->x;
+            $aiW = $a['ai_stream']->width;
+            $aiEdgeY = $a['ai_stream']->position->y + $a['ai_stream']->height;
+            if (abs($e->row - $aiEdgeY) <= $tol
+                && $e->column >= $aiX && $e->column < $aiX + $aiW) {
+                // 工具栏图标画在 ai_input 顶边框（== aiEdgeY），点图标区应触发按钮而非拖拽，
+                // 否则 tryStartDrag 会抢先返回 true，handleClick 永远收不到 → 按钮无反应。
+                if ($this->ai->isToolbarBorderHit($e->column, $e->row, $a['ai_input'])) {
+                    return false;
+                }
+                $key = $e->row < $aiEdgeY ? 'ai_stream' : 'ai_input';
+                if ($a[$key]->height > $min) {
+                    $this->drag = ['which' => 'ai_input', 'horizontal' => true];
+                    return true;
+                }
             }
         }
 
@@ -2172,27 +2339,44 @@ class App
      */
     private function updateDrag(MouseEvent $e, array $a, Area $vp): void
     {
+        // ⚠️ 拖拽目标在 Down 时命中、Drag 时面板可能已经被hidden/maximize 掉（同一会话里
+        // 用户按了快捷键或点了菜单）→ 每个分支都要确认自己依赖的面板仍在 $a 里。
         switch ($this->drag['which']) {
             case 'sidebar':
-                // 新宽度 = 鼠标列 - 侧栏起点；上界受「视口 - AI 宽 - 中间列最小宽」限制
-                $maxW = $vp->width - $this->layout->aiWidth - LayoutConfig::MIN_CENTER;
+                if (!isset($a['sidebar'])) {
+                    break;
+                }
+                // 新宽度 = 鼠标列 - 侧栏起点；上界受「视口 - 可见的中间列最小宽」限制
+                // （AI 隐藏时那部分宽度可以全部让给侧栏）
+                $reserved = $this->layout->aiVisible ? $this->layout->aiWidth : 0;
+                $maxW = $vp->width - $reserved - LayoutConfig::MIN_CENTER;
                 $w = max(LayoutConfig::MIN_SIDEBAR, min($e->column - $a['sidebar']->position->x, $maxW));
                 $this->layout = $this->layout->withSidebarWidth($w);
                 break;
             case 'ai':
-                // 新宽度 = 视口右沿 - 鼠标列
-                $maxW = $vp->width - $this->layout->sidebarWidth - LayoutConfig::MIN_CENTER;
+                if (!isset($a['ai_stream'])) {
+                    break;
+                }
+                // 新宽度 = 视口右沿 - 鼠标列；上界同样只保留**可见的**侧栏宽度
+                $reserved = $this->layout->sidebarVisible ? $this->layout->sidebarWidth : 0;
+                $maxW = $vp->width - $reserved - LayoutConfig::MIN_CENTER;
                 $w = max(LayoutConfig::MIN_AI, min(($vp->position->x + $vp->width) - $e->column, $maxW));
                 $this->layout = $this->layout->withAiWidth($w);
                 break;
             case 'center':
-                // 比例 = 鼠标行到编辑器顶 / 中间列总高
+                // 比例 = 鼠标行到编辑器顶 / 中间列总高（两段都在才有这条分隔条）
+                if (!isset($a['editor'], $a['terminal'])) {
+                    break;
+                }
                 $centerH = $a['editor']->height + $a['terminal']->height;
                 $ratio = $centerH > 0 ? ($e->row - $a['editor']->position->y) / $centerH : 0.5;
                 $this->layout = $this->layout->withEditorRatio($ratio);
                 break;
             case 'ai_input':
                 // 新高度 = AI 列底沿 - 鼠标行；上界受「AI 列总高 - 消息流最小行」限制
+                if (!isset($a['ai_stream'], $a['ai_input'])) {
+                    break;
+                }
                 $aiH = $a['ai_stream']->height + $a['ai_input']->height;
                 $maxH = $aiH - LayoutConfig::MIN_AI_STREAM;
                 $h = max(LayoutConfig::MIN_AI_INPUT, min(($a['ai_stream']->position->y + $aiH) - $e->row, $maxH));
@@ -2215,6 +2399,11 @@ class App
     private function updateSelect(MouseEvent $e, array $a): void
     {
         $panel = $this->select['panel'];
+        if (!isset($a[$panel])) {
+            // 选区所属面板被隐藏了（拖选过程中按了隐藏入口）：丢弃这次拖选
+            $this->select = null;
+            return;
+        }
         $area = $a[$panel];
         $this->select['bRow'] = max($area->position->y, min($e->row, $area->position->y + $area->height - 1));
         $this->select['bCol'] = max($area->position->x, min($e->column, $area->position->x + $area->width - 1));
@@ -2230,6 +2419,11 @@ class App
         }
         [$r0, $c0, $r1, $c1] = $this->normalizeRect($s);
         $panel = $s['panel'];
+        if (!isset($a[$panel])) {
+            // 拖选期间那个面板被隐藏了：矩形已无意义，丢弃这次复制（不再动剪贴板）
+            $this->select = null;
+            return;
+        }
         if ($panel === 'editor') {
             $text = $this->editor->getTextRect($a['editor'], $r0, $c0, $r1, $c1);
         } else {
@@ -2455,7 +2649,7 @@ class App
     public function layoutSummary(): string
     {
         $c = $this->layout;
-        return sprintf(
+        $s = sprintf(
             '%s%d %s%d %s%d%% %s%d',
             $this->t('status.l_sidebar'),
             $c->sidebarWidth,
@@ -2466,6 +2660,23 @@ class App
             $this->t('status.l_input'),
             $c->aiInputHeight,
         );
+        // 只在**真有隐藏**时追加：默认态的输出必须一字不变（大量宽度/内容断言按它写）。
+        $hidden = [];
+        if (!$c->sidebarVisible) {
+            $hidden[] = $this->t('status.hidden_sidebar');
+        }
+        if (!$c->aiVisible) {
+            $hidden[] = $this->t('status.hidden_ai');
+        }
+        if (!$c->terminalVisible) {
+            $hidden[] = $this->t('status.hidden_terminal');
+        } elseif ($c->terminalMaximized) {
+            $hidden[] = $this->t('status.term_max');
+        }
+        if ($hidden !== []) {
+            $s .= ' ' . $this->t('status.hidden') . ':' . implode('/', $hidden);
+        }
+        return $s;
     }
 
     /**
@@ -2489,6 +2700,11 @@ class App
                     'aiWidth' => $this->layout->aiWidth,
                     'editorRatio' => $this->layout->editorRatio,
                     'aiInputHeight' => $this->layout->aiInputHeight,
+                    // 显隐/最大化（B16）也随偏好落盘：下次启动保持上次的面板布局
+                    'sidebarVisible' => $this->layout->sidebarVisible,
+                    'aiVisible' => $this->layout->aiVisible,
+                    'terminalVisible' => $this->layout->terminalVisible,
+                    'terminalMaximized' => $this->layout->terminalMaximized,
                 ],
                 'theme' => $this->theme->id,
                 'locale' => $this->i18n->locale(),
@@ -2685,10 +2901,10 @@ class App
             case 'ai_input':
                 return $areas['ai_input'] ?? null;
             case 'editor':
-                return $this->editor->cursorRowArea($areas['editor']);
+                return isset($areas['editor']) ? $this->editor->cursorRowArea($areas['editor']) : null;
             case 'search':
             case 'commit':
-                return $this->sidebar->inputRowArea($areas['sidebar']);
+                return isset($areas['sidebar']) ? $this->sidebar->inputRowArea($areas['sidebar']) : null;
         }
         return null;
     }
@@ -2760,12 +2976,13 @@ class App
                 //
                 // ⚠️ 注意：Tab 在多行输入上下文（编辑器 / AI 输入框）已被上面的 handleTabKey
                 // 拦成「补全或缩进」，走不到这里；能到这里的是单行输入与其它面板（口径见计划）。
-                $this->focus(self::PANELS[($this->focusIndex + 1) % count(self::PANELS)]);
+                // 切焦点只在**可见**面板之间循环（隐藏的面板不该被 Tab 切到）。
+                $this->focusNext(1);
                 break;
             case KeyCode::BackTab:
                 // Shift+Tab 的反向切焦点。原本这个键**全项目零处理**（被静默吞掉）；
                 // 给它在非输入上下文补上反向切焦点，与 Tab 对称（输入上下文里它已用于反向缩进/上一个候选）。
-                $this->focus(self::PANELS[($this->focusIndex - 1 + count(self::PANELS)) % count(self::PANELS)]);
+                $this->focusNext(-1);
                 break;
             case KeyCode::Backspace:
                 // AI 输入框退格（AiPanel::onKey 已处理，这里是历史遗留的空分支，保留以防
@@ -2799,13 +3016,14 @@ class App
         $pos = new Position($col, $row);
 
         // 侧栏：tab 行 + 树条目（行首三角展开/折叠、双击展开、单击文件打开都由面板自己处理）
-        if ($a['sidebar']->containsPosition($pos) && $this->sidebar->onClick($pos, $a)) {
+        if (isset($a['sidebar']) && $a['sidebar']->containsPosition($pos) && $this->sidebar->onClick($pos, $a)) {
             return;
         }
 
         // 命中测试：点哪个面板就聚焦哪个；点编辑器则按坐标定位光标（R6）
+        // ⚠️ `$key` 来自 PANELS 常量（含被隐藏的面板），必须 isset 才能查矩形。
         foreach (self::PANELS as $key) {
-            if ($a[$key]->containsPosition($pos)) {
+            if (isset($a[$key]) && $a[$key]->containsPosition($pos)) {
                 if ($key === 'editor') {
                     // 点 tab 栏切 buffer / 按坐标定位光标，都由编辑器面板处理（它会自己聚焦）
                     $this->editor->onClick($pos, $a);

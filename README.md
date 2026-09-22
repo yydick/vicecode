@@ -110,13 +110,26 @@ TUI_USE_SWOOLE=0 php bin/vicecode.php   # force fallback to the pure php-tui/ter
 | `F10` | open/close the top menu bar |
 | `Ctrl+T` | switch theme |
 | `Shift+←` / `Shift+→` | horizontal scroll (covers editor/terminal/AI/sidebar) |
-| mouse wheel / drag | scroll content; drag panel dividers to resize the layout (session-only) |
+| mouse wheel / drag | scroll content; drag panel dividers to resize the layout (persisted) |
 
 **Clickable status bar**: clicking the `lang=` / `Theme=` segment pops up the matching **list above the status bar** (`↑`/`↓` to move, `Enter` or a click to apply, `Esc` or a click elsewhere to close); the *View → Language / Theme* menu items open the same lists, while `Ctrl+T` still cycles the theme quickly. Segments without a list (e.g. `file=`) are not clickable.
 
 For the Editor (`Enter` newline, `Ctrl+S` save, `Ctrl+W` close, `Ctrl+Tab` switch tab, etc.), Explorer (single-click to open a file, double-click a directory to expand/collapse, click the leading triangle to expand/collapse), and GIT / Search panel usage, see the in-app `?` help page.
 
 **Editor multi-cursor (edit several lines at once)**: `Alt+↑` / `Alt+↓` adds a cursor on the line above/below, or `Alt+click` adds one where you click (at most one cursor per line). Typing, backspace, Delete, Enter and `Tab`/`Shift+Tab` indentation then apply to **all** cursors; `Esc` collapses back to a single cursor (in that state `Esc` will not quit). The status bar shows `N cursors` in its `file=` segment. Auto-pairing and paste do **not** participate with multiple cursors (they act on the main cursor only) — for auto-pairing because "should this pair here?" can differ per position, so one keystroke producing different results would be unpredictable. `Alt+click` adds a cursor and does **not** start a selection (hold `Alt`, otherwise it is a normal drag-copy).
+
+## Panel visibility & terminal maximize
+
+All three side panels can be collapsed/expanded at any time. The entries live **only in the View menu and the command palette (`F1`)** — deliberately no Ctrl shortcut:
+
+| View menu item | Effect |
+| --- | --- |
+| Hide / Show Sidebar | collapse the left column (the centre column takes the width; `Tab` skips it) |
+| Hide / Show AI Column | collapse the right column (stream + input together) |
+| Hide / Show Terminal | collapse the bottom half of the centre column; the editor fills it |
+| Maximize / Restore Terminal | the centre column holds **only the terminal**; both side columns stay |
+
+Labels follow the current state ("Hide Sidebar" = currently visible); focus moves to the nearest visible panel if it sat on a panel that gets hidden; hiding the terminal also cancels maximize; all of it **persists with your preferences**. The status bar marks `hidden:sidebar/AI/terminal` (or `term max`) whenever something is hidden or maximized.
 
 ## Terminal panel
 
