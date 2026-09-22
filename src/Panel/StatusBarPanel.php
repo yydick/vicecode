@@ -256,7 +256,7 @@ final class StatusBarPanel
             // 焦点/标签排得低是刻意的：它们**在界面上已经有视觉表达**（聚焦面板边框高亮、
             // 侧栏当前 tab 高亮），状态栏里再写一遍是纯冗余，占掉的 28 列不如让给
             // 「文件 / 消息 / 退出提示」这些没有第二处显示的信息。
-            ['k' => 'message', 'p' => 100, 'o' => 8, 't' => $this->shell->message],
+            ['k' => 'message', 'p' => 100, 'o' => 9, 't' => $this->shell->message],
             ['k' => 'file',    'p' => 90,  'o' => 1, 'pfix' => $t('status.file') . '=', 't' => $file . $dirty . $cursors],
             ['k' => 'mode',    'p' => 85,  'o' => 2, 't' => $t('status.mode') . '=' . $mode],
             ['k' => 'ai',      'p' => 80,  'o' => 4, 't' => $t('status.provider') . '=' . $ai],
@@ -265,25 +265,31 @@ final class StatusBarPanel
             ['k' => 'strategy', 'p' => 82, 'o' => 4,
                 't' => $stText === '' ? '' : $t('status.strategy') . '=' . DisplayWidth::stripControl($stText)],
             ['k' => 'branch',  'p' => 70,  'o' => 3, 'pfix' => $t('status.branch') . '=', 't' => DisplayWidth::stripControl($this->shell->git->branch)],
-            ['k' => 'quit',    'p' => 65,  'o' => 9, 't' => $t('status.quit')],
-            ['k' => 'app',     'p' => 50,  'o' => 0, 't' => $t('app.title')],
+            ['k' => 'quit',    'p' => 65,  'o' => 10, 't' => $t('status.quit')],
+            // ⚠️ app 段的优先级刻意压到最低：状态栏要腾地方给**可点的**语言/主题段时，
+            // 「应用名」是这里唯一的纯装饰（单应用终端里没有第二处需要它），
+            // 而 focus 段又必须继续在 120 列被丢掉（m6 有断言：它有边框高亮、本就冗余）。
+            ['k' => 'app',     'p' => 30,  'o' => 0, 't' => $t('app.title')],
             ['k' => 'locale',  'p' => 40,  'o' => 7, 't' => $t('status.locale') . '=' . $this->shell->locale(),
                 // 可点：弹出语言列表（数据源 Translator::available）。段本身仍按普通段参与裁剪，
                 // 被丢弃时 clickSegment 也读不到它 —— 命中与取舍同源，天然「看不见就点不到」。
                 'pick' => 'locale'],
+            // 主题段：与语言段相邻（同属「视图偏好」）。**可点**，弹出主题列表。
+            ['k' => 'theme',   'p' => 45,  'o' => 8,
+                't' => $t('status.theme') . '=' . $t($this->shell->theme->label), 'pick' => 'theme'],
             ['k' => 'focus',   'p' => 35,  'o' => 5, 't' => $t('status.focus') . '=' . strtoupper($this->shell->focusPanel())],
             // ⚠️ tab 不能排太低：侧栏 tab **只显示图标不显示文字**，状态栏这行是它
             // 唯一的文字标识，丢了用户就分不清当前在哪个 tab。
             ['k' => 'tab',     'p' => 75,  'o' => 6, 't' => $t('status.tab') . '=' . $this->shell->sidebar->tabLabel()],
             // 终端 cwd：仅在聚焦终端时显示（避免与其它面板争抢状态栏空间）。
             // 值来自 PROMPT_COMMAND 钩子经 OSC 实时上报的 shell 工作目录。
-            ['k' => 'cwd',     'p' => 60,  'o' => 10,
+            ['k' => 'cwd',     'p' => 60,  'o' => 11,
                 'pfix' => $t('status.cwd') . '=',
                 't' => $this->shell->focusPanel() === 'terminal'
                     ? DisplayWidth::stripControl($this->shell->terminal->cwd())
                     : ''],
             // 拖拽尺寸段：排最右、优先级最高，拖拽时必定显示，松手即消失。
-            ['k' => 'layout',  'p' => 95,  'o' => 11, 't' => $layout],
+            ['k' => 'layout',  'p' => 95,  'o' => 12, 't' => $layout],
         ];
 
         // 插件段（V1）：与系统段统一走「按优先级丢弃 + 按 order 摆放」逻辑，

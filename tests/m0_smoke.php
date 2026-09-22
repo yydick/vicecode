@@ -56,10 +56,11 @@ $renderer->render($renderer, $app->render($vp), $buffer, $buffer->area());
 $text = implode("\n", $buffer->toLines());
 
 echo "== 面板标题渲染 ==\n";
-// 状态栏只断言 'ViceCode'：M6 起状态栏改为按优先级裁剪，段的顺序与取舍会随
-// 视口宽度变化（焦点/标签在界面上已有高亮，窄屏时优先被丢），不能再断言
-// 'ViceCode · focus' 这种相邻片段。
-foreach (['SIDEBAR', 'EDITOR', 'TERMINAL', 'AI CHAT', 'AI INPUT', 'ViceCode'] as $needle) {
+// 状态栏只断言 'Mode='（模式段，优先级 p=85，任何宽度都在）：M6 起状态栏按优先级裁剪，
+// 段的顺序与取舍会随视口宽度变化。原先这里断言 'ViceCode'（app 段），但 2026-09-21 起
+// app 段被降到**最低**优先级 —— 状态栏要腾地方给可点的语言/主题段，而「应用名」是这里
+// 唯一的纯装饰（README 的状态栏预览里本来也没有它，且它另有终端标题一处显示）。
+foreach (['SIDEBAR', 'EDITOR', 'TERMINAL', 'AI CHAT', 'AI INPUT', 'Mode='] as $needle) {
     check(str_contains($text, $needle), "渲染输出包含标题: $needle");
 }
 

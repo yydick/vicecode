@@ -112,7 +112,7 @@ TUI_USE_SWOOLE=0 php bin/vicecode.php   # force fallback to the pure php-tui/ter
 | `Shift+←` / `Shift+→` | horizontal scroll (covers editor/terminal/AI/sidebar) |
 | mouse wheel / drag | scroll content; drag panel dividers to resize the layout (session-only) |
 
-**Clickable status bar**: clicking the `lang=` segment pops up a **language list above the status bar** (`↑`/`↓` to move, `Enter` or a click to apply, `Esc` or a click elsewhere to close); the *View → Language* menu item opens the same list. **Theme** works the same way (*View → Theme*), while `Ctrl+T` still cycles quickly. Segments without a list (e.g. `file=`) are not clickable.
+**Clickable status bar**: clicking the `lang=` / `Theme=` segment pops up the matching **list above the status bar** (`↑`/`↓` to move, `Enter` or a click to apply, `Esc` or a click elsewhere to close); the *View → Language / Theme* menu items open the same lists, while `Ctrl+T` still cycles the theme quickly. Segments without a list (e.g. `file=`) are not clickable.
 
 For the Editor (`Enter` newline, `Ctrl+S` save, `Ctrl+W` close, `Ctrl+Tab` switch tab, etc.), Explorer (single-click to open a file, double-click a directory to expand/collapse, click the leading triangle to expand/collapse), and GIT / Search panel usage, see the in-app `?` help page.
 

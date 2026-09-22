@@ -174,9 +174,10 @@ $renderer = new AggregateWidgetRenderer($renderers);
 $buffer = TuiBuffer::empty($vp);
 $renderer->render($renderer, $app->render($vp), $buffer, $buffer->area());
 $text = implode("\n", $buffer->toLines());
-// 末位用 '模式'（M6 R1 新增的编辑模式）而不是 '焦点'：M6 起状态栏按优先级裁剪，
-// 焦点在界面上已有边框高亮，120 列下会被优先丢弃（改用 m6_unit.php 精确覆盖取舍规则）。
-foreach (['编辑器', '资源管理器', 'AI 对话', '终端', 'ViceCode', '模式'] as $needle) {
+// 末位用 '模式'（M6 R1 新增的编辑模式）而不是 '焦点' 或 'ViceCode'：M6 起状态栏按优先级
+// 裁剪，焦点在界面上已有边框高亮、120 列下会被优先丢弃；app 段自 2026-09-21 起更是被降到
+// 最低优先级（腾地方给可点的语言/主题段），故两者都不能当"状态栏渲染了"的锚点。
+foreach (['编辑器', '资源管理器', 'AI 对话', '终端', '模式'] as $needle) {
     check(str_contains($text, $needle), "渲染输出包含: $needle");
 }
 

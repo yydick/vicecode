@@ -137,6 +137,42 @@ check(count($app->picker()?->options ?? []) >= 2, '列表至少两项（当前�
 check($app->picker()?->sel === $app->picker()?->currentIndex,
     '初始高亮落在**当前值**上（不是第一项）');
 
+echo "\n== 1b) 语言 / 主题段在 120 列下都必须可见 ==\n";
+// 「可点」的前提是「看得见」：段被裁掉时 clickSegment 也读不到它（命中与取舍同源）。
+// 这条同时是**宽度预算的回归守护** —— 以后再加新段把某个可点段挤出去，这里会红。
+// ⚠️ 刻意**打开一个文件**再测：`文件=—` 那种空态太窄，腾出的空间会让两个段都轻松放下，
+// 于是这条断言对「优先级排序不合理」这种退化**观察不到**（实测：把 app 段优先级调回去，
+// 空态下依然全绿、打开文件后才红）。
+$appT = new App();
+$appT->openFile('src/App.php');
+$rT = $appT->statusBar->assemble(120);
+check(!in_array('locale', $rT['dropped'], true), '120 列（打开了文件）：语言段没被丢弃');
+check(!in_array('theme', $rT['dropped'], true), '120 列（打开了文件）：主题段没被丢弃');
+check(str_contains($rT['text'], '主题='), '状态栏文本里真的出现「主题=」');
+$kept = [];
+foreach ($rT['placed'] as $p) {
+    $kept[$p['k']] = $p;
+}
+check(isset($kept['theme']), '主题段在 placed 里');
+check(($kept['theme']['pick'] ?? null) === 'theme', '主题段带 pick=theme');
+
+$stT = $appT->areas($vp)['status'];
+$appT->handle(MouseEvent::new(
+    MouseEventKind::Down,
+    MouseButton::Left,
+    $stT->position->x + $kept['theme']['x0'],
+    $stT->position->y,
+    0
+), $vp);
+check($appT->picker()?->id === 'theme', '点主题段 → 打开主题列表（实际 '
+    . var_export($appT->picker()?->id, true) . '）');
+$themeBeforeT = $appT->theme->id;
+$appT->handle(CodedKeyEvent::new(KeyCode::Down, 0), $vp);
+$wantT = $appT->picker()->selected()['value'];
+$appT->handle(CodedKeyEvent::new(KeyCode::Enter, 0), $vp);
+check($appT->theme->id === $wantT && $appT->theme->id !== $themeBeforeT,
+    "从状态栏段入口切主题真的生效（{$themeBeforeT} → {$appT->theme->id}）");
+
 echo "\n== 2) 不可点的段点了没反应 ==\n";
 $app2 = new App();
 // 用 file 段当例子：它在 120 列下一定在 placed 里（focus 那种低优先级段会被丢弃，
@@ -251,7 +287,11 @@ check($title === null || $title['row'] < $statusRow,
     '列表项在状态栏**上方**（' . var_export($title['row'] ?? null, true) . ' < ' . $statusRow . '）');
 check(findInGrid($gridBefore, 'English (en)') === null,
     '关闭时屏幕上没有它（阴性对照，证明上面那条不是恒真）');
-check(findInGrid($gridAfter, 'ViceCode') !== null, '底层状态栏仍在（透明叠加，没把整屏抹白）');
+// 「底层仍在」用状态栏里的 'Ctrl+Q' 当锚点（ASCII、p=65 在 120 列下必留），并顺便断言
+// **浮层没盖住状态栏那一行**。⚠️ 别用 'ViceCode'（app 段）：它自 2026-09-21 起被降到最低
+// 优先级、随时可能被裁掉，拿它做锚点会在"panel 没问题、只是锚点消失"时误报。
+$statusText = implode('', $gridAfter[$statusRow] ?? []);
+check(str_contains($statusText, 'Ctrl+Q'), '状态栏那行仍完整可见（浮层没盖住它）');
 
 echo $failed ? "\n状态栏选项列表 FAIL\n" : "\n状态栏选项列表 PASS\n";
 exit($failed ? 1 : 0);

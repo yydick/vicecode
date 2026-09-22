@@ -76,7 +76,8 @@ VICECODE_CONFIG=/tmp/vc.json php bin/vicecode.php   # use a different config fil
 - **Command palette**: `F1` (or *View → Command palette*), fuzzy-filter every command and press `Enter` to run.
 - **Dividers**: drag with the mouse to resize the layout (session-only, not persisted).
 - **Status bar**: segments are dropped as width shrinks (low-value ones first). Typical segments: transient message, `file=` (with the unsaved `*` and `N cursors`), `mode=`, `provider=`, `strategy=`, `branch=`, `focus=`, `cwd=`, and the quit hint.
-- **Clickable status bar**: clicking the `lang=` segment pops up a language list above the status bar (`↑`/`↓` to move, `Enter` or a click to apply, `Esc` or a click elsewhere to close; the active language is marked `●`). The *View → Language* menu item opens the same list, and the same goes for the theme (`Ctrl+T` still cycles). Segments without a list (e.g. `file=`) do nothing when clicked.
+- **Clickable status bar**: clicking the `lang=` / `Theme=` segment pops up the matching list above the status bar (`↑`/`↓` to move, `Enter` or a click to apply, `Esc` or a click elsewhere to close; the active value is marked `●`). The *View → Language / Theme* menu items open the same lists, and `Ctrl+T` still cycles the theme. Segments without a list (e.g. `file=`) do nothing when clicked.
+  - Under tight widths, segments are trimmed by priority, and a **trimmed segment cannot be clicked either** (hit-testing shares the same source as trimming). The theme segment ranks below the language one, so on very narrow terminals (English UI, roughly <120 columns) it may disappear first — use the menu entry in that case.
 
 ---
 
