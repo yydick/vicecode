@@ -319,6 +319,10 @@ check(DemoPlugin::$events === [] || DemoPlugin::$events[0] === 'app.ready', 'app
 
 // 终端输出（条件轮询，不赌 sleep）
 DemoPlugin::$events = [];
+// ⚠️ 钉回 runner：终端默认已是交互式 pty（B15），而 poll() 在 pty 模式下走 pollPty()，
+// 命令行运行器的管道**不会被排空** → 这条 terminal.output 事件永远发不出来。
+// 本用例要验的是「runner 输出会广播 terminal.output」，故显式钉住 runner。
+$app5->terminal->mode = 'runner';
 $app5->terminal->input = 'echo v11unit';
 $app5->terminal->submit();
 $deadline = microtime(true) + 5;

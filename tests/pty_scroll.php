@@ -6,8 +6,9 @@ declare(strict_types=1);
  *
  * 关键设计点（来自 App::handle 路由）：
  *   - pty 捕获态：PageUp/Down 字节被转发给 shell（readline），不归我们的滚动处理；
- *     故「用 PageUp 翻 pty 回退」必须在「非捕获态」测（F2 进 pty → Esc 退捕获仍在跑 → PageUp）。
- *   - runner 模式：PageUp/Down 由 TerminalPanel::onKey → scrollBy 直接处理。
+ *     故「用 PageUp 翻 pty 回退」必须在「非捕获态」测（打字自动进捕获 → Esc 退捕获 → PageUp）。
+ *   - runner 模式（终端默认已是 pty 的**回落态**，靠打字 `exit` 结束 shell 到达）：
+ *     PageUp/Down 由 TerminalPanel::onKey → scrollBy 直接处理。
  *
  * 差分渲染陷阱：php-tui 只把相对上一帧「变了」的格重发到 pty，滚动走的旧行不会重发，
  *   所以裸 grep 累积字节找某行不可靠（见项目 facts）。本测试在翻到顶/翻回底后各触发一次
@@ -24,9 +25,23 @@ require __DIR__ . '/lib/isolation.php';
 
 // 独占配置目录：tempnam 的 dirname 是 /tmp，父子进程会一起读 /tmp/.vicecode_ai（对话存档）
 $cfgFile = vc_isolate_config('vc_scroll_pty');
-file_put_contents($cfgFile, (string) json_encode(['persistSession' => false]));
+file_put_contents($cfgFile, (string) json_encode(['persistSession' => true]));
 $sessionFile = dirname($cfgFile) . '/.vicecode_session';
-@unlink($sessionFile); // 确保从干净状态开始
+
+// 场景 A 靠「runner 会话快照」把应用**确定性**地放在 runner 模式：
+// 终端默认已是交互式 pty（B15），runner 是 shell 退出后的回落态 —— 若用「脚本喂 exit」去到达，
+// 就被 bash 启动快慢牵着走（实测 bash 慢时 exit 很晚才被读到，会把后面的命令一起当成自己的
+// 输入吃掉，用例偶发假红）。预置一份 runner 快照则从构造起就是 runner，零竞态，
+// 顺带覆盖 maybeRestore() 的 runner 分支（它必须显式回落 mode='runner'，否则还会去 spawn shell）。
+$seedRunnerSnapshot = static function () use ($sessionFile): void {
+    file_put_contents($sessionFile, (string) json_encode([
+        'mode' => 'runner',
+        'cwd' => getcwd() ?: '.',
+        'lines' => [['runner seeded line', 0]],
+        'savedAt' => time(),
+    ]));
+};
+$seedRunnerSnapshot();
 
 $env = array_merge(getenv(), [
     'COLUMNS' => '120',
@@ -121,6 +136,9 @@ $pages = static function (string $key, int $n, int $us): array {
 };
 
 // runner 模式：60 行输出 → PageUp 翻到顶现 R001、PageDown 翻回底现 R060。
+//
+// 起手就是 runner（上面预置的 runner 快照；终端默认已是交互式 pty，runner 是回落态）。
+//
 // 关键点：php-tui 用差分渲染，滚动走的旧行不会重发到 pty 字节流（grep 累积字节不可靠，
 // 见项目 facts）。要可靠断言最旧行可见，滚动到目标位置后**触发一次整屏重绘**——
 // 打开/关闭帮助层（? / Esc）会让覆盖层改写所有格，底层终端面板整帧重画，R001/R060 才进流。
@@ -149,13 +167,13 @@ $seqRunner = array_merge(
     ],
 );
 
-// pty 非捕获态：F2 进 pty → 60 行 → Esc 退捕获 → PageUp 翻回退现 P001、PageDown 回底现 P060
+// pty 非捕获态：默认就是 pty，**打字即自动进捕获** → 60 行 → Esc 退捕获 →
+// PageUp 翻回退现 P001、PageDown 回底现 P060（PageUp 归我们的 scrollPty 只在非捕获态生效）
 $seqPty = array_merge(
     [
         ["\t", 700000],
         ["\t", 700000],
-        ["\x1bOQ", 1800000],            // F2：进入交互式 pty（捕获态）
-        ["printf 'P%03d\\n' $(seq 1 60)\r", 1500000],
+        ["printf 'P%03d\\n' $(seq 1 60)\r", 1500000],  // 首个字符触发自动捕获，整条命令转发给 shell
         ["", 1500000],                  // 等 shell 输出 60 行（底部 P052-P060 已发出）
         ["\x1b", 600000],               // Esc：退捕获（shell 仍在跑，进入非捕获态）
     ],
@@ -164,13 +182,15 @@ $seqPty = array_merge(
     $pages("\x1b[6~", 20, 120000),      // PageDown ×20 → 回到底
     $fullRedraw(),                      // 整屏重绘 → P060 在底部进入字节流
     [
-        ["\x04", 1500000],              // Ctrl+D：shell 退出 → 退回 runner
-        ["\x1b", 600000],               // Esc 退出应用
+        ["\x1b", 800000],               // Esc：非捕获态 → 退出应用（shell 由 shutdown 回收）
         ["\x11", 1800000],              // Ctrl+Q 保底退出
     ],
 );
 
 $rr = runApp($bin, $env, $descs, $seqRunner);
+// 场景 B 前清掉快照：否则场景 A 退出时落盘的 runner 快照会被场景 B 恢复，
+// 场景 B 就不是「默认 pty」了（两种模式的日期都要在真终端里各验一遍，不能互相污染）。
+@unlink($sessionFile);
 $rp = runApp($bin, $env, $descs, $seqPty);
 
 $failed = false;
@@ -191,6 +211,7 @@ $fatalP = str_contains($rp['out'], 'Fatal error') || str_contains($rp['out'], 'U
 echo "== runner 模式：PageUp/Down 回退滚动 ==\n";
 check($rr['code'] === 0, "干净退出 exit=$rr[code]");
 check(!$fatalR, '无 Fatal / Uncaught');
+check(str_contains($nr, 'runnerseededline'), '起手就是 runner：快照里的旧输出可见（runner 快照恢复生效、没去 spawn shell）');
 check(str_contains($nr, 'r060'), '底部时最新行 R060 可见（命令输出已渲染）');
 check(str_contains($nr, 'r001'), 'PageUp 翻到顶后最旧行 R001 出现（证明回退滚动生效）');
 check(str_contains($nr, 'r060'), 'PageDown 翻回底后最新行 R060 仍在（证明可滚回底部）');

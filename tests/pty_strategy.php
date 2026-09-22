@@ -199,7 +199,11 @@ check($ok2, '钉住时 /plan 被忽略 → 状态栏明说「自动选档未生�
 $send("\x12");                                   // 从钉住的 smart → 「自动」
 $gotAuto = $waitForFrame(static fn(string $f): bool => str_contains($f, '自动选档'), 8.0);
 check($gotAuto, 'Ctrl+R → 切回「自动」档');
-check(str_contains($frame(), 'zzsmart自动'), '状态栏标出「ZZSMART·自动」（说明现在听自动的）');
+// ⚠️ 这里也必须**等**：策略段与 AI 段不是同一帧更新的（AI 段要等自动选档解析出模型），
+// 原先用 `str_contains($frame(), …)` 立刻断言，负载高时会读到「策略段已切、AI 段还没跟上」
+// 的中间帧 → 偶发假红（批跑里红过两次，单独跑却全绿）。
+$gotAutoSeg = $waitForFrame(static fn(string $f): bool => str_contains($f, 'zzsmart自动'), 8.0);
+check($gotAutoSeg, '状态栏标出「ZZSMART·自动」（说明现在听自动的）');
 
 $send('/plan 规划二');
 usleep(200000);
@@ -239,6 +243,11 @@ $code = $st['running'] ? -1 : (int) $st['exitcode'];
 if ($st['running']) {
     proc_terminate($proc, SIGKILL);
 }
+// ⚠️ 收尾再排空一次：应用退出前写的那批字节（含「还原终端」的 `?1049l` / `?25h`）可能还压在
+// pty 缓冲里 —— 上面那轮排空是「连续 3 次空读」就收手的，正好会停在它写出之前，
+// 于是 `str_contains($out, "\x1b[?1049l")` 偶发假红（实测批跑红过、单独跑全绿）。
+usleep(100000);
+$out .= (string) $readPty($pipes[1], 65536);
 proc_close($proc);
 proc_terminate($srv, SIGKILL);
 proc_close($srv);

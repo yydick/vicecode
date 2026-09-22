@@ -12,6 +12,26 @@
 
 > 本轮主题：**AI V2** —— 把 AI 从「孤岛聊天框」接进工作台：代码上下文、只读工具 Agent loop、上下文压缩、对话持久化与 Markdown 渲染。
 
+### 变更（终端默认进交互式 shell：别名 / 函数 / 全屏程序直接可用）
+
+- **终端面板默认就是一个真实 PTY**（`bash --rcfile`，会 source 用户的 `~/.bashrc`）：**别名 / 函数 / 提示符都在**，`ll` 这类别名直接可用（用户报障原文就是「终端里 `ll` 用不了」），`vim` / `top` / `less` / `ssh` 等全屏程序也能跑。原先默认的「命令运行器」保留为 **shell 退出（`exit` / `Ctrl+D`）后的回落态**，不再是启动态；runner 仍用 `sh -c`，因此**看不到**别名——这一点写进了 README 与使用手册。
+- **聚焦后直接打字即接管键盘**：第一个可打印字符或回车自动进捕获并把该键转发给 shell，不必先按 `F2`。判据刻意**只认「打字」**：`Tab` / `Shift+Tab` 仍切焦点、`?` 仍开帮助页、`Esc` 仍退出应用、方向键 / `PageUp` 仍翻回退 —— 少任何一条，焦点一进终端就再也出不来（帮助页更会永久打不开，因为捕获态的按键全部转发给 shell）。
+- **shell 只在「聚焦后的首帧」起**，不在构造时起：`content()` 与焦点无关、`App::render()` 每帧都构造它，若首帧无条件 spawn，几十个 headless 渲染用例会各起一个 bash（孤儿进程 + 秒级开销）。未聚焦且 shell 未起时面板显示「（聚焦此面板即启动交互式 shell）」。
+- 自动捕获路径上会**先用当前面板尺寸把 shell 起好再转发**：触发捕获的那个键就在这一帧的事件里，等渲染完再转发它已经丢了（实测一次性灌入 `exit\r` 时首轮只处理事件、三个字节全丢）。
+- **修 Esc 在非捕获 pty 下被静默吞掉**：判据原先是 `isRunning()`，而 pty 模式下它**恒真**（交互 shell 一直活着）→ 落进 `cancel()`（对 pty 是空操作，什么都不发生）。改为只在 **runner** 模式走「中断命令 / 清空输入」，否则退出应用。
+- **修 shell 退出瞬间的按键被喂给已经死掉的 pty**：主循环每轮才 poll 一次，同一批按键里靠后的部分会落进 runner 输入行 —— 表现为命令被**截掉开头**（实操：`printf '…` 的前 8 个字节连开引号一起没了，`sh` 报 `unexpected EOF while looking for matching '`）。新增 `TerminalPanel::syncShellState()`，在按键与粘贴路径上先结算一次 shell 状态（真实场景：刚 `exit` 就粘贴一条命令）。
+- **粘贴在非捕获 pty 下也接受**（粘贴即打字，先进捕获再转发）：原先直接忽略，默认 pty 下按 `Ctrl+V` 毫无反应。
+- **修「刚起 shell 就打字，命令被丢掉」**：bash 在 readline 初始化之前会**丢弃**先到的输入 —— tty 回显看得见那行命令，但它既不执行、也不留在行里，随后直接出现一个新提示符。默认 pty 把 shell 的启动时机和用户第一次按键拉到了一起（聚焦即 spawn），启动慢的 `.bashrc`（nvm/pyenv/conda）能把这个窗口拉到几百毫秒，人手速足够快就会撞上。现在 `TerminalPanel` 会把就绪前的按键**攒起来**，等提示符（`PROMPT_COMMAND` 的 cwd OSC）或兜底时限到了再按原顺序补发。⚠️ 兜底时限的判定必须放在 `pollPty()` 的**任何 return 之前**（含「本轮无输出」那条），否则「bash 还没打出提示符」这种正是要兜底的情形永远走不到、攒下的按键成了死锁（实测 `pty_term` 段 A 直接挂住）。
+- **新增退出兜底回收**：`register_shutdown_function` 里回收 pty 子进程。产品的正常/异常退出路径早已覆盖（Lifecycle 关闭闭包 / bin 的 finally / 信号 handler），但**直接 `new App()` 的调用方**没有任何保证 —— headless 用例只要「聚焦终端 + 渲染一帧」就会真起 shell，进程结束后它被 reparent 到 init 一直活着（实测 `command_palette_unit` 漏 1 个 bash + 1 个 rc 文件；交互式 bash **扛得住 SIGTERM**，只有 SIGKILL 收得掉）。
+- `PtyProcess::pollExited()` 的退出码改为**只认第一次**（`proc_get_status()` 之后再问会变成 -1），因为它现在有了第二个调用点（按键路径）。
+- **脚本/自动化喂键的坑（写进测试注释）**：非捕获 pty 下敲**任何可打印字符**都会自动进捕获 —— 于是「Esc 退捕获 → 再按 `q` 想退出应用」会变成「q 又被当成打字、重新进捕获」的死循环，脚本永远退不出去。退出应用一律用 `Ctrl+Q`（捕获态下它会被转发给 shell，所以先 Esc 退捕获再 Ctrl+Q）。
+- 文案：底部提示行改为「在此输入即接管键盘（Esc 退出程序）」；`exit` 后的横幅补「F2 可重新进入」；帮助页 `F2` 条目改为「F2 切换终端键盘捕获（交互 shell 是默认模式）」。标题保持不随默认模式变化（只有捕获态才显示 `交互终端 · 捕获中`）。
+- **测试**：新增 `tests/pty_term_alias.php`（真终端：自造 `HOME` 的 `.bashrc` 里 `alias ll=…`，断言敲 `ll` 跑出别名结果、且整份输出**没有** command not found；再 `exit` 落到 runner 后同样的 `ll` **确实** command not found —— 反向对照证明成功来自别名而非「`ll` 恰好是个真命令」）；新增 `tests/term_default_unit.php`（headless：自动捕获只认打字、Tab/`?`/修饰键/方向键都不捕获、Esc 不空吞、shell 退出后按键不丢、**刚起 shell 就打字命令仍被执行**）。
+- **⚠️ 一条测试环境的硬事实（本轮踩得最久）**：交互式 shell 会 source 用户的 `~/.bashrc`，而开发机那份要加载 **nvm + conda**（`conda shell.bash hook` 真的起一个 Python 子进程）—— 启动要**数秒**且随机器负载抖动。任何「打字 → 等结果」的 pty 用例若把窗口写死在几百毫秒，就会随负载偶发假红（实测同一脚本 3/6 红）。对策：测终端管线的用例给一个**自造 HOME**（里面只有一行 `.bashrc`），并把盲等改成**等锚点出现**（`pty_term` 的 `runApp` 支持 `[字节, 上限, 锚点]`）。
+- 迁移：`pty_term`（拆成**两次运行**：pty 段「Tab×2 直接打字 → 42 渲染」+ runner 段「预置 runner 快照起手 → 退出码/stderr/中断」，两段都用自造 HOME 与条件等待；原先把两段塞进一次运行，`exit` 之后 shell 退出与命令输出同轮发生、输出会随仿真器一起丢，偶发假红）、`pty_scroll`（runner 场景改用**预置的 runner 会话快照**起手——原先靠脚本喂 `exit` 会被 bash 启动快慢牵着走、偶发假红；pty 场景改为自动捕获，顺带覆盖 `?` 打开帮助层）、`pty_rc_cleanup`（新增「不调 `shutdown()` 的调用方在进程退出后不留交互 shell / rc 文件」场景，带「子进程运行期间确实起来过 shell」的正向锚点）、`interactive_term_unit`（默认 pty / 未聚焦不起 shell / 聚焦首帧起 shell）、`m2_smoke` / `scroll_unit` / `hscroll_unit` / `clipboard_unit` / `selection_unit` / `session_unit` / `plugin_v11_unit`（测 runner 语义的用例显式钉住 `mode = 'runner'`，不再依赖默认值）。
+- **九条反向注入全部实测变红**（且都是 `[FAIL]` 断言失败而非崩溃）：关掉自动捕获 / 过度捕获（连 Tab、`?`、修饰键一起吞）/ Esc 判据退回只看 `isRunning()` / runner 快照不回落 `mode` / 未聚焦也 spawn / 去掉 `pollPty` 的「待启动」保留判据 / `syncShellState()` 空操作 / 粘贴不自动捕获 / 去掉就绪前的按键缓冲。
+- **顺手修两条与本轮无关、但同样随负载偶发假红的旧断言**（都会让跑批结果不可信）：`pty_strategy` 的「状态栏标出 `ZZSMART·自动`」原先在策略段切换后**立刻**读帧，而 AI 段要等自动选档解析出模型、慢一帧 → 改成 `waitForFrame` 等它出现；同文件的「退出仍还原终端」在排空收手后**没再读一次**，应用退出前写的 `?1049l` 可能还压在 pty 缓冲里 → 收尾补一次读取。（两条都是「单独跑全绿、批跑偶发红」。）
+
 ### 修复（没选模型却显示模型名）
 
 - **一次都没选过 provider/模型，标题栏、状态栏、AI 空态就声称「正在用 OpenAI/gpt-4o-mini」**（`BUGFIXES` B14）：展示层拿 `ChatModel::spec() !== null` 当「用户选过模型」的判据，而 `spec()` 在未选时会**兜底到 `defaultId()`** —— 只要配了 provider 就恒非 null。新增 `ChatModel::hasSelection()`，三处展示改用它；未选时分别显示「`AI 对话`」「`AI=未选`」「未选模型 · Ctrl+P 选 Provider、Ctrl+N 选模型」。发送路径不变（未选时请求仍走默认 provider，那是实现细节）。

@@ -145,6 +145,9 @@ check($app->sidebar->hScroll === 0, '侧栏 hScroll 下界钳到 0');
 echo "== TerminalPanel::onScrollH ==\n";
 $app = new App();
 $app->focus('terminal');
+// ⚠️ 钉回 runner：终端默认已是交互式 pty（B15）。本段按 runner 的视口口径渲染输出缓冲
+// 并断言 TERMMARK 进入视口；pty 模式渲染的是仿真器网格，输出缓冲根本不上屏。
+$app->terminal->mode = 'runner';
 $app->terminal->buffer()->append(str_repeat('y', 150) . 'TERMMARK' . "\n", false);
 
 $tBefore = paint($app, $vp, $renderer);
@@ -173,6 +176,7 @@ check($app->buffer->scrollLeft === 0, 'editor 焦点收到 ScrollLeft：scrollLe
 
 // 焦点=terminal → onScrollH
 $app->focus('terminal');
+$app->terminal->mode = 'runner';   // 终端默认已是 pty（B15）；pty 下滚轮走 scrollPty，不是 onScrollH
 $app->handle(MouseEvent::new(MouseEventKind::ScrollRight, MouseButton::Left, 0, 0, 0), $vp);
 check($app->terminal->hScroll === 4, 'terminal 焦点收到 ScrollRight：hScroll=4');
 
@@ -383,6 +387,9 @@ echo "== 终端长输出横滚 ==\n";
 $mkTerm = static function (string $out, int $hScroll = 0) use ($vp): array {
     $app = new App();
     $app->focus('terminal');
+    // ⚠️ 钉回 runner：终端默认已是交互式 pty（B15）。本段测的是 runner 的 hScroll 钳制与
+    // 「选区列 + hScroll」取字；pty 模式的行列口径来自仿真器网格，两套东西不能混算。
+    $app->terminal->mode = 'runner';
     $app->terminal->buffer()->append($out, false);
     $area = $app->areas($vp)['terminal'];
     $app->terminal->content($area, true);          // 先渲染：算出上界

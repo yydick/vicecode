@@ -30,9 +30,14 @@ use PhpTui\Tui\Widget\Margin;
 use PhpTui\Tui\Widget\Widget;
 
 /**
- * 终端面板（M2 命令运行器）：输出视口 + 命令输入行 + 命令历史。
+ * 终端面板：**默认走真实交互式 PTY**（bash --rcfile），shell 退出后回落到命令运行器。
  *
- * 命令在独立子进程里跑，主循环每轮调 poll() 排空管道，故不阻塞渲染。
+ * 两种模式共用同一块画布与同一个 TerminalBuffer 语义：
+ *   - pty（默认）：真实 shell，用户的别名/函数/提示符都在（`ll` 直接能用）；
+ *     聚焦后敲第一个可打印字符/回车自动进捕获（App::handleEvent），F2 切换捕获，
+ *     Esc（捕获态）退出捕获。
+ *   - runner（回落态）：shell 退出（`exit` / Ctrl+D）后接管，用 `sh -c` 跑单条命令。
+ *     命令在独立子进程里跑，主循环每轮调 poll() 排空管道，故不阻塞渲染。
  *
  * 面板契约（本项目无 interface，靠签名约定保持一致）：
  *   content(Area, bool $focused): Widget —— 生成面板内容 Widget（外层 Block 由 App 加）；
@@ -40,10 +45,9 @@ use PhpTui\Tui\Widget\Widget;
  *   状态归面板自己，App 只负责把事件分发给当前聚焦面板。
  *
  * ⚠️ content() 不是纯函数：它会把钳制后的滚动偏移回写到 $scroll
- * （视口贴住末尾时同步最新偏移，这样下次手动滚动才从正确的位置起算）。
- * 这是既有渲染管线约定，保持原样搬移，不要在重构时「提纯」。
- *
- * M7 若要做真正的交互式 PTY 终端，替换 CommandRunner 即可，这里的视口/输入行逻辑仍可复用。
+ * （视口贴住末尾时同步最新偏移，这样下次手动滚动才从正确的位置起算）；
+ * pty 路径下它还会**起 shell**（聚焦后的首帧，用真实面板尺寸）。这是既有渲染管线约定，
+ * 保持原样搬移，不要在重构时「提纯」。
  */
 final class TerminalPanel
 {
@@ -74,11 +78,19 @@ final class TerminalPanel
 
     private const MAX_HISTORY = 200;
 
-    // ── 交互式 PTY 模式（F2 进入/退出，与命令运行器共存）──
-    /** 'runner' = 命令运行器；'pty' = 真实交互式 shell */
-    public string $mode = 'runner';
+    // ── 交互式 PTY 模式（默认，与命令运行器共存）──
+    /**
+     * 'pty' = 真实交互式 shell（**默认**）；'runner' = 命令运行器（shell 退出后的回落态）。
+     *
+     * 默认走 pty 的理由：runner 用 `sh -c` 起命令，**看不到用户的 shell 别名/函数**
+     * （`ll` 这类来自 ~/.bashrc 的别名一律 command not found），且非交互、没有提示符。
+     * 用户报障原文就是「终端里 ll 用不了」。
+     */
+    public string $mode = 'pty';
 
-    /** 捕获态：所有按键转发 PTY（runner 模式恒为 false） */
+    /** 捕获态：所有按键转发 PTY（runner 模式恒为 false）。默认**不**捕获 —— 焦点落在终端后
+     *  敲第一个可打印字符/回车才进捕获（App::handleEvent 的自动捕获分支），
+     *  这样 Tab/Esc/方向键仍归应用导航，用户能 Tab 走。 */
     public bool $captured = false;
 
     private ?PtyProcess $pty = null;
@@ -107,9 +119,12 @@ final class TerminalPanel
     /** 待恢复标记：首帧 ptyContent() 在真实列宽下起 pty 并灌入 */
     private bool $restorePending = false;
 
-    /** 交互 pty 待启动：F2 切到 pty 模式后，推迟到首帧 ptyContent() 用真实面板尺寸起 pty
-     *  （避免 toggleInteractive 硬编码 80x24 与面板不符，导致全屏程序按错误 LINES 渲染、首末行错位） */
-    private bool $ptyStartPending = false;
+    /** 交互 pty 待启动：默认 pty 模式下一构造就为真；推迟到**聚焦后的首帧** ptyContent()
+     *  用真实面板尺寸起 pty。双重目的：
+     *   1) 避免硬编码 80x24 与面板不符，导致全屏程序按错误 LINES 渲染、首末行错位；
+     *   2) 未聚焦就不 spawn —— content() 与焦点无关、App::render() 每帧都构造它，
+     *      若首帧无条件 spawn，几十个 headless 渲染用例会各起一个 bash（孤儿进程 + 秒级开销）。 */
+    private bool $ptyStartPending = true;
 
     /** 回退滚动偏移（滚轮 / PageUp/Down 调整） */
     public int $scrollback = 0;
@@ -122,6 +137,27 @@ final class TerminalPanel
     private int $lastCols = 0;
 
     private int $lastRows = 0;
+
+    /** 是否已登记「进程退出时回收 pty」的兜底钩子 */
+    private bool $reapRegistered = false;
+
+    /**
+     * shell 是否已「可接收输入」（提示符已画出）。
+     *
+     * ⚠️ 不能刚 spawn 就往里写：bash 在 readline 初始化之前**会丢掉**先到的输入 ——
+     * 实测（写一个临时探针复现，6/6）：tty 回显看得见那行命令，
+     * 但它既不执行、也没留在行里，随后直接出现一个新提示符。表现为「聚焦终端后立刻敲
+     * `ll`，屏幕上明明有 `ll` 却什么都没发生」。启动慢的 .bashrc（nvm/pyenv/conda）
+     * 会把窗口拉到几百毫秒到数秒，人手速足够快就能撞上。
+     * 守护用例：`tests/term_default_unit.php` 第 9 段（去掉这里的缓冲就会红）。
+     */
+    private bool $shellReady = false;
+
+    /** shell 就绪前攒下的按键字节（就绪后原样补发，见 $shellReady） */
+    private string $pendingInput = '';
+
+    /** 就绪判据的兜底时限：某些 shell / rc 组合不报 cwd 也不能把用户输入永远攒着 */
+    private float $shellReadyDeadline = 0.0;
 
     public function __construct(private App $shell)
     {
@@ -189,20 +225,32 @@ final class TerminalPanel
     private function pollPty(): bool
     {
         if ($this->pty === null) {
+            // ⚠️ 还不能把 mode 打回 runner：默认 pty 下 shell 要等**聚焦后的首帧**才起
+            // （见 $ptyStartPending），而 poll() 每轮主循环都跑、通常早于那一帧。
+            // 少了这个判据，默认 pty 会在第一轮就被 poll 回 runner，等于没改。
+            if ($this->ptyStartPending || $this->restorePending) {
+                return false;
+            }
             $this->mode = 'runner';
             return false;
         }
+
+        $got = false;
+        // 就绪兜底：非 bash / 被用户 rc 改掉 PROMPT_COMMAND 时收不到那条 cwd OSC，不能因此把
+        // 用户的按键永远攒着。⚠️ 必须放在**任何 return 之前**（含下面 pollExited 的那条与
+        // 「本轮无输出」的那条）—— 早先它排在 `if ($bytes === '') return false;` 之后，
+        // 于是「bash 还没打出提示符」这种正是要兜底的情形反而永远走不到，攒下的按键成了
+        // 死锁（实测 pty_term 段 A 直接挂住、term_default_unit 第 8 段拿不到字符）。
+        if (!$this->shellReady && microtime(true) >= $this->shellReadyDeadline) {
+            $got = $this->markShellReady();   // 补发了按键 → 值得重绘
+        }
         if ($this->pty->pollExited()) {
-            $this->buf->append($this->shell->t('term.interactive_exit') . "\n", false);
-            $this->mode = 'runner';
-            $this->captured = false;
-            $this->dropPty();
-            $this->emu = null;
+            $this->fallbackToRunner();
             return true;
         }
         $bytes = $this->pty->read();
         if ($bytes === '') {
-            return false;
+            return $got;
         }
         $this->shell->emitPluginEvent('terminal.output', ['bytes' => $bytes]);
         $this->emu?->write($bytes);
@@ -210,8 +258,75 @@ final class TerminalPanel
         $cwd = $this->emu?->consumeCwd();
         if ($cwd !== null) {
             $this->cwd = $cwd;
+            // 这条 OSC 是 PROMPT_COMMAND 里发的 —— 收到它就说明提示符已经画出来了、
+            // readline 已经进了读循环，此后写进去的按键不会再被丢掉（见 $shellReady）。
+            $this->markShellReady();
         }
         return true;
+    }
+
+    /** 标记 shell 就绪，并把就绪期攒下的按键按原顺序补发。返回是否真的补发了内容。 */
+    private function markShellReady(): bool
+    {
+        if ($this->shellReady) {
+            return false;
+        }
+        $this->shellReady = true;
+        if ($this->pendingInput === '') {
+            return false;
+        }
+        $bytes = $this->pendingInput;
+        $this->pendingInput = '';
+        if ($this->pty !== null && $this->pty->isRunning()) {
+            $this->pty->write($bytes);
+        }
+        return true;
+    }
+
+    /**
+     * 是否已到「可以往里写输入」的时候：提示符已到（$shellReady），或兜底时限已过。
+     *
+     * ⚠️ 兜底时限必须在**每个写入点**都判一次，不能只放在主循环的 poll 里：
+     * 调用方完全可能长时间不 poll（headless 测试就直接 sendToPty），那时按键会一直
+     * 攒着不出去 —— 实测 `term_default_unit` 第 8 段就是这么挂住的。
+     */
+    private function canAcceptInput(): bool
+    {
+        if (!$this->shellReady && microtime(true) >= $this->shellReadyDeadline) {
+            $this->markShellReady();
+        }
+        return $this->shellReady;
+    }
+
+    /** shell 退出后的统一回落：横幅 + 回 runner 模式 + 退捕获 + 回收 pty。 */
+    private function fallbackToRunner(): void
+    {
+        $this->buf->append($this->shell->t('term.interactive_exit') . "\n", false);
+        $this->mode = 'runner';
+        $this->captured = false;
+        // 就绪期攒的按键属于那个已经死掉的 shell，不能带给下一个（见 $shellReady）
+        $this->pendingInput = '';
+        $this->shellReady = false;
+        $this->dropPty();
+        $this->emu = null;
+    }
+
+    /**
+     * 把「shell 是否已退出」在**按键/粘贴路径上**同步掉（主循环 poll 之外的第二处结算）。
+     *
+     * 为什么需要：主循环每轮只 poll 一次，而一次 stdin 读取里可能连着好几个按键
+     * （脚本一次性灌入的长命令、粘贴、未来的批量输入）。若中途 shell 退出了却要等到下一轮
+     * poll 才知道，同一批按键就会被劈成两半 —— 前半喂给**已经死掉的 pty**（sendToPty 静默丢弃）、
+     * 后半落进 runner 输入行，用户看到的是命令被**截掉开头**。
+     * 实测（`pty_scroll` 场景 A）：`exit\r` 之后紧接的前 8 个字节
+     * （`printf '` 连同开引号）被丢掉，于是 runner 执行到的是
+     * `R%03d\n' $(seq 1 60)` —— sh 报 `unexpected EOF while looking for matching '`。
+     */
+    public function syncShellState(): void
+    {
+        if ($this->mode === 'pty' && $this->pty !== null && $this->pty->pollExited()) {
+            $this->fallbackToRunner();
+        }
     }
 
     // ── 交互式 PTY 控制 ────────────────────────────────
@@ -246,15 +361,67 @@ final class TerminalPanel
     /** 转发按键字节给 PTY（捕获态由 App 调用） */
     public function sendToPty(string $bytes): void
     {
-        if ($this->pty !== null && $this->pty->isRunning()) {
-            $this->pty->write($bytes);
+        if ($this->pty === null || !$this->pty->isRunning()) {
+            return;
         }
+        if (!$this->canAcceptInput()) {
+            // 刚起的 bash 还没进读循环：此刻写进去会被 readline 初始化丢掉（见 $shellReady）。
+            // 攒着，等提示符出来（或兜底时限到）再按原顺序补发。
+            $this->pendingInput .= $bytes;
+            return;
+        }
+        $this->pty->write($bytes);
     }
 
     /** 退出捕获态（shell 仍在跑，焦点回到应用导航） */
     public function exitCapture(): void
     {
         $this->captured = false;
+    }
+
+    /**
+     * 进入捕获态（**自动捕获**用：聚焦终端时敲第一个可打印字符/回车就接管键盘，
+     * 用户不必先按 F2）。与 toggleInteractive() 的区别是**只进不出**，
+     * 便于 App 在事件分发里无条件调用——不必先判断当前捕获态。
+     */
+    public function enterCapture(): void
+    {
+        if ($this->mode !== 'pty') {
+            return;
+        }
+        $this->captured = true;
+        $this->scrollback = 0;
+    }
+
+    /**
+     * 确保交互 shell 已启动（自动捕获路径用）。正常路径是「聚焦后的首帧 ptyContent()」
+     * 起 shell，但**触发捕获的那个按键就在这一帧的事件里**：若等渲染完再转发，
+     * 按键已经丢了（实测：一次性灌入 `ll\r` 时第一帧只处理事件、不渲染，
+     * 三个字节全丢）。故这里用当前面板区域提前起 shell，再转发。
+     */
+    public function ensurePtyStarted(Area $terminal): void
+    {
+        if ($this->mode !== 'pty' || $this->pty !== null) {
+            return;
+        }
+        [, $W, $outH] = $this->viewport($terminal);
+        if ($W <= 0 || $outH <= 0) {
+            return; // 面板太小（或未布局）：等首帧渲染路径再来
+        }
+        if ($this->restorePending) {
+            $this->restoreSession($W, $outH);
+        } elseif ($this->ptyStartPending) {
+            $this->startPty($W, $outH);
+        }
+    }
+
+    /** 面板内容区尺寸：（内层 Area, 列数, 输出行数=总行−1 行提示行） */
+    private function viewport(Area $terminal): array
+    {
+        $inner = $terminal->inner(new Margin(1, 1));
+        $W = max(0, $inner->width);
+        $H = max(0, $inner->height);
+        return [$inner, $W, max(0, $H - 1)];
     }
 
     /** 是否处于捕获态（App 据此拦截按键） */
@@ -272,6 +439,7 @@ final class TerminalPanel
     {
         $this->emu = new Vt100Emulator($W, $outH);
         $this->pty = new PtyProcess();
+        $this->ensureReapOnExit();
         $env = $this->buildPtyEnv();
         if (!$this->pty->start(
             (string) (getenv('SHELL') ?: '/bin/bash'),
@@ -291,6 +459,26 @@ final class TerminalPanel
         $this->lastCols = $W;
         $this->lastRows = $outH;
         $this->ptyStartPending = false;
+        $this->resetShellReadiness();
+    }
+
+    /**
+     * 新起了一个 shell：把「是否可接收输入」打回未就绪，并记下兜底时限。
+     * 之后 `sendToPty()` 会把按键攒起来，等提示符（或时限）到了再补发 —— 见 $shellReady。
+     *
+     * 时限按 shell 区分：
+     *  - **bash**：我们注入了 `PROMPT_COMMAND` 钩子，提示符一画出来就有 cwd OSC 报到，
+     *    所以正常路径几乎立刻就绪；兜底给足 10s —— 它只是「万一收不到 OSC」的保命线，
+     *    给短了反而危险：启动慢的 `.bashrc`（nvm/pyenv/conda，实测批跑负载下能超过 1.5s）
+     *    会让补发落在那次「丢输入」的窗口里，等于把 bug 原样搬回来。
+     *  - **其它 shell**：没有这条 OSC，只能靠时限。给 0.3s，避免用户敲了半天看不见字。
+     */
+    private function resetShellReadiness(): void
+    {
+        $this->shellReady = false;
+        $this->pendingInput = '';
+        $isBash = basename((string) (getenv('SHELL') ?: '/bin/bash')) === 'bash';
+        $this->shellReadyDeadline = microtime(true) + ($isBash ? 10.0 : 0.3);
     }
 
     // ── 会话持久化 ────────────────────────────────────
@@ -352,6 +540,10 @@ final class TerminalPanel
             && isset($snap['lines']) && is_array($snap['lines'])) {
             $this->buf->loadLines($snap['lines']);
             $this->cwd = $snap['cwd'];
+            // ⚠️ 必须显式回落到 runner：默认模式已改成 pty，不写这两行的话
+            // runner 快照恢复完仍停在 pty，接着还会去 spawn 一个 shell，快照等于白恢复。
+            $this->mode = 'runner';
+            $this->ptyStartPending = false;
             SessionStore::clear();
             return;
         }
@@ -363,6 +555,7 @@ final class TerminalPanel
         }
         $this->restoreCwd = $snap['cwd'];
         $this->restorePending = true;
+        $this->ptyStartPending = false;   // 走恢复路径（restoreSession），别再让默认起 shell 那条路也标着待启动
         $this->mode = 'pty';
         $this->captured = true;
         $this->scrollback = 0;
@@ -379,6 +572,7 @@ final class TerminalPanel
         $cwd = $this->restoreCwd ?? $this->cwd;
         $this->emu = new Vt100Emulator($W, $outH);
         $this->pty = new PtyProcess();
+        $this->ensureReapOnExit();
         $env = $this->buildPtyEnv();
         if (!$this->pty->start(
             (string) (getenv('SHELL') ?: '/bin/bash'),
@@ -412,6 +606,8 @@ final class TerminalPanel
         $this->restoreCwd = null;
         $this->restoreText = null;
         $this->restoreCells = null;
+        // 恢复出来的新 shell 同样要先等提示符（快照是灌进仿真器的，不代表 shell 已可接收输入）
+        $this->resetShellReadiness();
     }
 
     /** 回退滚动（滚轮 / PageUp / PageDown） */
@@ -470,10 +666,7 @@ final class TerminalPanel
     /** 交互式 PTY 模式渲染：仿真器网格 + 底部提示行（无命令输入行） */
     private function ptyContent(Area $terminal, bool $focused): Widget
     {
-        $inner = $terminal->inner(new Margin(1, 1));
-        $W = max(0, $inner->width);
-        $H = max(0, $inner->height);
-        $outH = max(0, $H - 1);   // 末行留给提示行
+        [$inner, $W, $outH] = $this->viewport($terminal);
 
         if ($outH <= 0 || $W <= 0) {
             return ParagraphWidget::fromLines(
@@ -481,18 +674,17 @@ final class TerminalPanel
             );
         }
 
-        // 首帧恢复：在真实列宽下起 pty 并灌入快照（规避屏宽未定导致的折行错位）。
-        // 恢复失败已回退 runner，本帧改走 runner 渲染。
-        if ($this->restorePending && $this->pty === null) {
-            $this->restoreSession($W, $outH);
-            if ($this->mode !== 'pty') {
-                return $this->runnerContent($terminal, $focused);
+        // 恢复快照 / 起默认 shell 都推迟到**聚焦后的首帧**（真实尺寸 + 不给未聚焦的渲染起进程）。
+        // 未聚焦且 shell 还没起 → 只画一行「聚焦即启动」，不 spawn，也不建仿真器矩阵。
+        if ($this->pty === null && ($this->restorePending || $this->ptyStartPending)) {
+            if (!$focused) {
+                return $this->pendingContent($W, $outH, $focused);
             }
-        }
-
-        // F2 进入 pty 后，首帧用真实面板尺寸起 pty（修复全屏程序按错误 LINES 渲染）。
-        if ($this->ptyStartPending && $this->pty === null) {
-            $this->startPty($W, $outH);
+            if ($this->restorePending) {
+                $this->restoreSession($W, $outH);
+            } else {
+                $this->startPty($W, $outH);
+            }
             if ($this->mode !== 'pty') {
                 return $this->runnerContent($terminal, $focused);
             }
@@ -726,7 +918,21 @@ final class TerminalPanel
         return [$st, $fk . '|' . $bk . '|' . $mods];
     }
 
-    /** 底部提示行：捕获态提示按 F2 退出；非捕获态提示按 F2 进入交互 */
+    /** shell 还没起（未聚焦）：主体只留一行「聚焦即启动」，末行仍是提示行 */
+    private function pendingContent(int $W, int $outH, bool $focused): Widget
+    {
+        $lines = [Line::fromSpans(Span::styled(
+            $this->shell->t('term.focus_to_start'),
+            $this->shell->theme->style('termHint')
+        ))];
+        while (count($lines) < $outH) {
+            $lines[] = Line::fromSpans(Span::styled('', Style::default()));
+        }
+        $lines[] = $this->ptyHintLine($W, $focused);
+        return ParagraphWidget::fromLines(...$lines);
+    }
+
+    /** 底部提示行：捕获态提示按 F2 退出；非捕获态提示「输入即接管键盘」 */
     private function ptyHintLine(int $W, bool $focused): Line
     {
         $hint = $this->captured
@@ -1097,17 +1303,20 @@ final class TerminalPanel
      *  - runner 模式：插到命令输入行光标处；输入行是单行的，粘贴文本里的换行统一规整为空格，
      *    避免把多行塞进单行输入行（也不自动提交命令，避免误执行）。
      *  - pty 捕获态：把文本字节转发给 PTY（\n→\r 适配 Enter 语义），由真实 shell 解释（真粘贴）。
-     *  - pty 非捕获态：焦点在应用导航、无输入行，忽略。
+     *  - pty 非捕获态：先进捕获再转发（粘贴即打字）。
      */
     public function pasteText(string $text): void
     {
         if ($text === '') {
             return;
         }
+        $this->syncShellState();   // shell 可能刚退出（见 syncShellState）：别把粘贴喂给死 pty
         if ($this->mode === 'pty') {
-            if (!$this->captured) {
-                return; // 非捕获态：无焦点输入行
-            }
+            // 非捕获态也接受粘贴：粘贴就是打字，与「聚焦后敲第一个字符自动进捕获」同一语义。
+            // （改动前非捕获态直接 return，默认 pty 下用户按 Ctrl+V 会毫无反应。）
+            // shell 由调用方 App::applyPaste() 先经 ensurePtyStarted() 起好；
+            // 若面板还没布局过（pty 仍为 null）则 sendToPty 静默丢弃，不致命。
+            $this->enterCapture();
             $bytes = str_replace("\n", "\r", str_replace("\r\n", "\r", $text));
             $this->sendToPty($bytes);
             return;
@@ -1147,5 +1356,30 @@ final class TerminalPanel
         }
         $this->pty->shutdown();
         $this->pty = null;
+    }
+
+    /**
+     * pty 子进程的**退出兜底回收**：登记一次 PHP 进程退出时的回收钩子。
+     *
+     * 产品内的正常/异常退出都已覆盖（Lifecycle 的关闭闭包 → `App::shutdownResources()`、
+     * `bin/vicecode.php` 的 finally、信号 handler），但**直接 `new App()` 的调用方**没有任何
+     * 东西保证会调 shutdown() —— headless 测试就是这种调用方：只要有一个用例把焦点放在终端并
+     * 渲染一帧，就会真起一个 shell，进程结束后它被 reparent 到 init 一直活着
+     * （实测 `command_palette_unit` 漏一个 bash + 一个 rc 文件，且交互式 bash **扛得住
+     *  SIGTERM**，只有 SIGKILL 才收得掉）。`register_shutdown_function` 在 PHP 正常结束与
+     * 致命错误时都会跑，正好补上这一段。
+     *
+     * ⚠️ 只回收进程，**不落盘会话快照**（那要 persistSession 开关 + 用户明确退出才算数，
+     * 顺手写文件会给调用方留下意外副作用）。
+     */
+    private function ensureReapOnExit(): void
+    {
+        if ($this->reapRegistered) {
+            return;
+        }
+        $this->reapRegistered = true;
+        register_shutdown_function(function (): void {
+            $this->dropPty();
+        });
     }
 }

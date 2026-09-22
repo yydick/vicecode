@@ -9,8 +9,8 @@ declare(strict_types=1);
  *    滚动回退 / 保存·恢复光标 / 宽字符占位 / UTF-8 跨块拼接。
  *  - PtyProcess：headless 下 proc_open pty 跑 echo，读回含预期串（验证管道通）。
  *  - KeyToPty：Enter/Backspace/Delete/方向/Ctrl+C/Tab/F1 映射正确字节。
- *  - TerminalPanel 模式切换：App 聚焦终端 → toggleInteractive 进入 pty+captured；
- *    exitCapture 退捕获；再次 F2 重新捕获；Ctrl+D 后 pty 退出自动回 runner。
+ *  - TerminalPanel 模式切换：**默认即 pty 且未捕获**；未聚焦渲染不起 shell、聚焦首帧才起；
+ *    F2（toggleInteractive）进/退捕获；Ctrl+D 后 shell 退出自动回落 runner。
  *
  * 运行：php tests/interactive_term_unit.php
  */
@@ -200,22 +200,29 @@ check($ctrlUp === "\x1b[1;5A", 'Ctrl+Up → CSI 1;5A');
 // ── TerminalPanel 模式切换（经 App）────────────────────
 echo "== TerminalPanel 模式切换 ==\n";
 $app = new App();
-$app->focus('terminal');
 $term = $app->terminal;
-check($term->mode === 'runner', '初始为 runner 模式');
-$term->toggleInteractive();
-check($term->mode === 'pty', 'F2 进入 pty 模式');
-check($term->isCaptured(), '进入后处于捕获态');
-// 触发首帧渲染消费 ptyStartPending：F2 切 pty 后 pty 推迟到首帧 ptyContent()
-// 用真实面板尺寸起（避免按错误 LINES 渲染全屏程序），故需先渲染一帧才能 isRunning()。
-$term->content(\PhpTui\Tui\Display\Area::fromDimensions(120, 40), true);
-check($term->isRunning(), 'pty shell 在运行');
+$area = \PhpTui\Tui\Display\Area::fromDimensions(120, 40);
+check($term->mode === 'pty', '默认就是交互式 pty（不必先按 F2 —— 别名/函数才可用）');
+check(!$term->isCaptured(), '默认**未**捕获（Tab/Esc/方向键仍归应用导航）');
+
+// 未聚焦渲染**不起** shell：content() 与焦点无关、App::render() 每帧都构造它，
+// 若这里就 spawn，几十个 headless 渲染用例会各起一个 bash（孤儿进程 + 秒级开销）。
+$term->content($area, false);
+check(!$term->isRunning(), '未聚焦渲染不起 shell（省掉几十个 headless 用例的 bash）');
+
+$app->focus('terminal');
+// 触发首帧渲染消费 ptyStartPending：shell 推迟到**聚焦后的首帧**用真实面板尺寸起
+// （避免按错误 LINES 渲染全屏程序），故需先渲染一帧才能 isRunning()。
+$term->content($area, true);
+check($term->isRunning(), '聚焦后的首帧即起 shell（pty shell 在运行）');
+
+$term->toggleInteractive();   // F2：pty && !captured → 进捕获
+check($term->isCaptured(), 'F2 进入捕获');
 $term->exitCapture();
 check(!$term->isCaptured(), 'exitCapture 退出捕获（shell 仍在跑）');
 $term->toggleInteractive(); // pty && !captured → 重新捕获
 check($term->isCaptured(), '再次 F2 重新进入捕获');
 // 渲染 pty 内容不崩
-$area = \PhpTui\Tui\Display\Area::fromDimensions(120, 40);
 try {
     $term->content($area, true);
     $ok = true;

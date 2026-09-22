@@ -166,26 +166,26 @@ Behaviour:
 
 ## 6. Terminal panel
 
-The terminal panel has two modes, toggled with `F2`.
+The terminal panel **is a real PTY by default**: it allocates a pseudo-terminal and launches an interactive shell (bash, reading your `~/.bashrc`), forwarding all keystrokes straight to it. So **aliases / functions / the prompt are all there**, and you can run `vim`, `top`, `less`, `ssh`, or anything that needs a full terminal. A built-in lightweight VT100/ANSI emulator handles cursor positioning, coloring, erasing, scrolling and the alternate screen.
 
-### 6.1 Command Runner mode (default)
+### 6.1 Interactive terminal (default)
 
-Run commands like a normal command palette:
+- **Just type**: focus the terminal panel with `Tab`, then **start typing** to take over the keyboard (no need to press `F2` first) — the first printable character or Enter enters capture mode and that key is forwarded to the shell.
+- **Leave capture** (the shell keeps running): press `Esc` or `F2`. Afterwards focus returns to app navigation and you can browse the scrollback with `PageUp` / `PageDown` and the arrow keys.
+- **Recapture**: press `F2` again, or just keep typing.
+- **While not capturing these keys still belong to the app**: `Tab` switches panels, `?` opens the help page, `Esc` quits, `PageUp` / arrows browse the scrollback; only "typing" (printable characters / Enter) is treated as taking over the keyboard.
+- **End the shell**: send `Ctrl+D` or `exit` while capturing → the panel falls back to 6.2 Command Runner mode (leaving "Interactive terminal exited · F2 to re-enter" behind).
+- The title reads `interactive · capturing` while capturing.
+
+### 6.2 Command Runner mode (fallback state after the shell exits)
+
+Takes over once the shell ends; runs a single command like a normal command palette (via `sh -c`, so your shell **aliases / functions are not available** here):
 
 - Type a command in the input line at the bottom and press `Enter`; output streams in real time.
 - `↑` / `↓` browse command history; `Home` / `End` jump to line start/end.
 - `Ctrl+C` interrupts the running command; `Ctrl+L` clears the output.
 - `PageUp` / `PageDown` review past output (auto-disables "stick to bottom").
-
-### 6.2 Interactive PTY mode
-
-Press `F2` to allocate a **real PTY** and launch an interactive shell (bash); all keystrokes are forwarded directly to the shell — so you can run `vim`, `top`, `less`, `ssh`, or anything that needs a full terminal. A built-in lightweight VT100/ANSI emulator handles cursor positioning, coloring, erasing, scrolling and the alternate screen.
-
-- **Enter capture**: press `F2` while the terminal panel is focused.
-- **Leave capture** (the shell keeps running): press `Esc` or `F2` again while capturing. Afterwards focus returns to app navigation and you can browse the scrollback with `PageUp` / `PageDown` and the arrow keys.
-- **Re-enter**: press `F2` again while the shell is still alive.
-- **End the shell back to the runner**: send `Ctrl+D` or `exit` while capturing; when the shell ends the panel returns to Command Runner mode automatically.
-- The terminal title shows the current state (`interactive` / `capturing`).
+- To get a real shell back: press `F2`.
 
 > The window size is synced to the shell via `stty` as the panel resizes; wide characters (CJK) are rendered as 2 columns.
 

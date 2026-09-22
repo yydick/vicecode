@@ -43,6 +43,20 @@ function check(bool $cond, string $msg): void
     }
 }
 
+/**
+ * 构造一个**钉在命令运行器模式**的 App。
+ *
+ * ⚠️ 终端默认模式已改成交互式 pty（B15），而本用例整段测的是 runner 的
+ * 输入行 / 历史召回 / 退出码 / Esc 三级语义 —— 不钉住的话 App 会去起真 shell，
+ * 下面所有 `$app->terminal->input` 断言全部失效。
+ */
+function runnerApp(): App
+{
+    $app = new App();
+    $app->terminal->mode = 'runner';
+    return $app;
+}
+
 /** 渲染 App 到文本（headless，不创建 Terminal/Display）。 */
 function renderApp(App $app, Area $vp): string
 {
@@ -151,7 +165,7 @@ check(!$r3->isRunning(), 'shutdown() 杀掉在跑的命令');
 // ─────────────────── 3) App 集成（R1–R7） ───────────────────
 echo "== App 集成 ==\n";
 $vp = Area::fromDimensions(120, 40);
-$app = new App();
+$app = runnerApp();
 $app->focusIndex = array_search('terminal', App::PANELS, true);
 check($app->focusPanel() === 'terminal', '焦点切到 terminal');
 $text = renderApp($app, $vp);
@@ -267,13 +281,13 @@ $app->handle(CodedKeyEvent::new(KeyCode::Esc, 0), $vp);
 check($app->quit, 'Esc 在空输入时退出（保持原有手感）');
 
 // 非运行状态下 Ctrl+Q 退出（Ctrl+C 已让位给「复制」，不再兼任退出热键）
-$app2 = new App();
+$app2 = runnerApp();
 $app2->focusIndex = array_search('terminal', App::PANELS, true);
 $app2->handle(CharKeyEvent::new('q', KeyModifiers::CONTROL), $vp);
 check($app2->quit, '非运行时 Ctrl+Q 退出应用');
 
 // 退出时清理：命令在跑时按 Ctrl+Q 直接退出，也要干净收尾（不留孤儿进程）
-$app3 = new App();
+$app3 = runnerApp();
 $app3->focusIndex = array_search('terminal', App::PANELS, true);
 typeTerm($app3, $vp, 'sleep 20');
 $app3->handle(CharKeyEvent::new("\r", 0), $vp);

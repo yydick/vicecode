@@ -126,10 +126,20 @@ if (!$tty) {
 
     // 终端（runner 模式）：单行输入行，换行规整为空格
     $app->focus('terminal');
+    // ⚠️ 钉回 runner：终端**默认**已是交互式 pty（B15），而本段断言的是 runner 的单行
+    // 输入行语义（换行规整为空格、不自动提交）。不钉住的话粘贴会走 pty 转发。
+    $app->terminal->mode = 'runner';
     $app->clipboardCopy("TERM_PASTE\nline2");
     $app->requestPaste();
     check(str_contains($app->terminal->input, "TERM_PASTE line2"), '终端：多行粘贴被规整为空格（无换行）');
     check(!str_contains($app->terminal->input, "\n"), '终端：粘贴结果不含换行符');
+
+    // 终端（pty）：非捕获态粘贴 = 打字 → 先进捕获再转发给 shell，**不**落进 runner 输入行
+    $app->terminal->mode = 'pty';
+    $app->clipboardCopy("PTY_PASTE");
+    $app->requestPaste();
+    check($app->terminal->isCaptured(), '终端（pty）：非捕获态粘贴会先进捕获（粘贴即打字）');
+    check($app->terminal->input === 'TERM_PASTE line2', '终端（pty）：粘贴不走 runner 输入行');
 
     // 触发键 Ctrl+V：经 handle 分发到 requestPaste
     $app2 = new App();

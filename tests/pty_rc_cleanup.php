@@ -184,5 +184,76 @@ if (is_resource($pipes[0])) {
 }
 proc_close($p);
 
+// ⑥ 兜底回收：**只 new App() 的调用方**（headless 测试 / 未来别的宿主）不调 shutdown() 时，
+//    进程结束也必须把交互 shell 收走 —— 否则「聚焦终端 + 渲染一帧」的用例会一个个漏 bash
+//    （实测 command_palette_unit 漏过 1 个孤儿 bash + 1 个 rc 文件，而交互 bash 扛得住 SIGTERM，
+//     只有 SIGKILL 收得掉 → 会一直堆着）。这里起子进程：聚焦终端、渲染一帧（真起 shell）、
+//     **故意不调 shutdown()** 直接退出，断言进程退出后没有多出来的 shell / rc 文件。
+echo "\n== 进程退出兜底回收（不调 shutdown 的调用方）==\n";
+$root = dirname(__DIR__);
+$childCode = <<<'PHP'
+require $argv[1] . '/vendor/autoload.php';
+require $argv[1] . '/tests/lib/isolation.php';
+vc_isolate_config('vc_rc_reap');
+$app = new App\App();
+$app->focus('terminal');
+$app->render(PhpTui\Tui\Display\Area::fromDimensions(120, 40));   // 聚焦首帧 → 起 shell
+usleep(600000);   // 留出一段「shell 活着」的窗口，好让父进程观察到它确实起来了（正向锚点）
+// 故意不调 shutdown()：register_shutdown_function 的兜底回收负责收尾
+PHP;
+$pidsBeforeReap = bashRcfilePids();
+$rcBeforeReap = rcCount();
+$pReap = proc_open(
+    [PHP_BINARY, '-r', $childCode, $root],
+    [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+    $pipes2
+);
+$childOut = '';
+$spawnedPids = [];
+if (is_resource($pReap)) {
+    stream_set_blocking($pipes2[1], false);
+    $deadline = microtime(true) + 15;
+    while (microtime(true) < $deadline) {
+        $childOut .= (string) @fread($pipes2[1], 8192);
+        // 采样：子进程还活着时它拉起的 shell 应当看得见（它就是「正向锚点」）。
+        // ⚠️ 必须**累积**而不是覆盖最后一次：循环最后一轮是在子进程退出之后采的，
+        // 那时 shell 已被兜底钩子收走，覆盖写会把整段窗口的观察结果清成空数组。
+        $spawnedPids = array_values(array_unique(array_merge(
+            $spawnedPids,
+            array_diff(bashRcfilePids(), $pidsBeforeReap)
+        )));
+        if (!proc_get_status($pReap)['running']) {
+            break;
+        }
+        usleep(50000);
+    }
+}
+$childStillRunning = is_resource($pReap) && proc_get_status($pReap)['running'];
+// 正向锚点：子进程运行期间确实多出过一个交互 shell（否则下面的阴性断言全是空转）
+check($spawnedPids !== [],
+    sprintf('子进程运行期间确实起来了交互 shell（正向锚点，见到 pid：%s）', implode(',', $spawnedPids)));
+check(!$childStillRunning, '子进程已自行退出（正向锚点：证明这段流程跑到了）');
+usleep(500000);   // 给退出钩子与内核回收一点时间
+$leftAfterReap = array_values(array_diff(bashRcfilePids(), $pidsBeforeReap));
+check($leftAfterReap === [],
+    sprintf('不调 shutdown() 的进程退出后没有多出交互 shell（$leftAfterReap 残留：%s）', implode(',', $leftAfterReap)));
+check(rcCount() <= $rcBeforeReap,
+    sprintf('且 /tmp 未残留 rc 文件（%d → %d）', $rcBeforeReap, rcCount()));
+// 兜底：真超时了才动手（正常路径不该走到这）
+if ($childStillRunning && is_resource($pReap)) {
+    @proc_terminate($pReap, SIGKILL);
+    foreach ($leftAfterReap as $opid) {
+        @posix_kill($opid, SIGKILL);
+    }
+}
+foreach ([1, 2] as $fd) {
+    if (isset($pipes2[$fd]) && is_resource($pipes2[$fd])) {
+        @fclose($pipes2[$fd]);
+    }
+}
+if (isset($pipes2[0]) && is_resource($pipes2[0])) {
+    @fclose($pipes2[0]);
+}
+
 echo $failed ? "\nD9 rc 临时文件清理 FAIL\n" : "\nD9 rc 临时文件清理 PASS\n";
 exit($failed ? 1 : 0);

@@ -32,6 +32,13 @@ $env = array_merge(getenv(), [
     'APP_LOCALE' => 'zh_CN',
     'VICECODE_CONFIG' => $cfgFile,
 ]);
+// ⚠️ 自造 HOME（替代开发机那份会加载 nvm + conda 的 .bashrc）：本用例要「恢复出新 shell 后
+// 立刻打字」（MARK_NEW），而就绪前的按键会被 TerminalPanel 攒着等提示符 —— 开发机 rc 要数秒
+// 才出提示符，窗口就不可预测了（实测批跑时假红）。测会话往返，不该被用户 rc 的启动速度牵着走。
+$home = vc_tmp_dir('vc_session_home');
+file_put_contents($home . '/.bashrc', "PS1='ready$ '\n");
+$env['HOME'] = $home;
+$env['SHELL'] = '/bin/bash';
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
 
 function normalize(string $raw): string

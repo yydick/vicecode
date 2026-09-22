@@ -216,7 +216,10 @@ final class PtyProcess
         }
         $st = proc_get_status($this->proc);
         if ($st['running'] === false) {
-            $this->exitCode = $st['exitcode'];
+            // proc_get_status 只在**首次**报告真实退出码，之后再问会变成 -1；
+            // 而本方法现在有两个调用点（主循环 poll 与 TerminalPanel::syncShellState 的按键路径），
+            // 故只认第一次的值，别被后续调用覆盖成 -1。
+            $this->exitCode ??= $st['exitcode'];
             $this->running = false;
             return true;
         }

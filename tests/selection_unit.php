@@ -107,6 +107,9 @@ check($app->clipboardPeek() !== '', '编辑器：跨行复制后内存剪贴板�
 // ─════════ 2) 终端（runner）选择 ═════════
 echo "\n== 终端文本选择 ==\n";
 $app2 = new App();
+// ⚠️ 钉回 runner：终端**默认**已是交互式 pty（B15），而本段按 runner 的视口几何算行号
+// （输出顶对齐 + 输入行占底部一行）。pty 模式下取字走的是仿真器网格，行号口径完全不同。
+$app2->terminal->mode = 'runner';
 $tb = $app2->terminal->buffer();
 $tb->append("echo hello\n", false);
 $tb->append("line two output\n", false);

@@ -1186,14 +1186,13 @@ class App
             ->titles(Title::fromString($editorTitle))
             ->widget($editorWidget);
 
-        // ── Terminal（M2 命令运行器 / 交互式 PTY）──
+        // ── Terminal（默认交互式 PTY / shell 退出后回落命令运行器）──
+        // 标题**不**随默认模式变化：pty 下只有「捕获中」才值得写出来（那是用户唯一看不出
+        // 来的状态，其余靠面板底部的提示行说明）。默认态标题保持「终端」，与改动前一致。
         $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
-        if ($this->terminal->mode === 'pty') {
-            $termTitle = ' ' . $this->i18n->t('term.interactive') . ' ';
-            if ($this->terminal->isCaptured()) {
-                $termTitle = ' ' . $this->i18n->t('term.interactive') . ' · ' . $this->i18n->t('term.captured') . ' ';
-            }
-        } elseif ($this->terminal->isRunning()) {
+        if ($this->terminal->mode === 'pty' && $this->terminal->isCaptured()) {
+            $termTitle = ' ' . $this->i18n->t('term.interactive') . ' · ' . $this->i18n->t('term.captured') . ' ';
+        } elseif ($this->terminal->mode === 'runner' && $this->terminal->isRunning()) {
             $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' · ' . $this->i18n->t('term.running') . ' ';
         }
         $terminal = BlockWidget::default()
@@ -1588,6 +1587,44 @@ class App
         $this->syncCompletion();
     }
 
+    /**
+     * 自动捕获判据：这个事件算不算「用户在终端里打字」。
+     *
+     * 刻意**只认**不带 Ctrl/Alt 的可打印字符与回车：
+     *  - Tab / BackTab 必须留给焦点切换 —— 若被吞进捕获，焦点一到终端就再也出不来；
+     *  - Esc 留给「退出应用」的全局语义（非捕获 pty 下 Esc = 退出，见 handleCoded）；
+     *  - ↑↓/PgUp/PgDn/Home/End 留给 pty 回退滚动（TerminalPanel::onKey）；
+     *  - Ctrl+字母 / Alt+字母不是「开始打字」的信号（且大写字母带 SHIFT 仍要能捕获，
+     *    故只排 CONTROL|ALT，不排 SHIFT）；
+     *  - **`?`（帮助键）例外**：它是全局浮层键，且捕获态的按键会全部转发给 shell
+     *    （见下面的捕获分支）—— 若这里也把它当「开始打字」，那么只要终端聚焦且 shell 活着，
+     *    帮助页就**再也打不开**（默认态正是如此）。
+     *
+     * 代价（已知且接受）：Backspace / Ctrl+D / `?` 作为**第一个**按键不会触发自动捕获。
+     */
+    private function isAutoCaptureKey(\PhpTui\Term\Event $event): bool
+    {
+        if ($event instanceof CodedKeyEvent) {
+            return $event->code === KeyCode::Enter;
+        }
+        if (!$event instanceof CharKeyEvent) {
+            return false;
+        }
+        if (($event->modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT)) !== 0) {
+            return false;
+        }
+        if ($event->char === KeyBindings::HELP_KEY) {
+            return false;
+        }
+        // 回车在某些解析路径下是 CharKeyEvent("\r") 而非 CodedKeyEvent(Enter)
+        // （TerminalPanel::onChar 也同时认这两种，口径保持一致）。
+        // isPrintable 对 \r(13)/\n(10) 返回 false，故必须单独放行。
+        if ($event->char === "\r" || $event->char === "\n") {
+            return true;
+        }
+        return KeyInput::isPrintable($event->char);
+    }
+
     private function handleEvent(\PhpTui\Term\Event $event, Area $vp): void
     {
         // 未保存确认进行中：拦截所有输入，只响应 y/n/Esc（及 Ctrl+Q 视为确认）
@@ -1609,6 +1646,13 @@ class App
         }
 
         $a = $this->areas($vp);
+
+        // 终端聚焦时，先把「交互 shell 是否已经退出」同步掉（见 TerminalPanel::syncShellState）。
+        // 一次 stdin 读取里可能连着好几个按键；不在这里同步的话，shell 退出这件事要等主循环
+        // 下一轮 poll 才知道，中间那几个键会被喂给已经死掉的 pty 而**静默丢掉**。
+        if ($this->focusPanel() === 'terminal') {
+            $this->terminal->syncShellState();
+        }
 
         // 状态栏可点段的选项列表（语言 / 主题）打开期间独占按键：↑↓ 移动、Enter 应用、Esc 关闭。
         // 放在菜单/命令面板等模态之前 —— 它是「点状态栏」那一次交互的延续，按键不该漏到面板；
@@ -1756,6 +1800,27 @@ class App
                 return;
             }
             return; // 其余键一律吞掉：浮层是模态的
+        }
+
+        // 终端默认就是交互式 pty：聚焦时敲第一个**可打印字符/回车**即自动进入捕获并把该键
+        // 转发给 shell，用户不必先按 F2。
+        //
+        // 只认可打印字符与回车（见 isAutoCaptureKey）：Tab / Esc / 方向键 / PgUp 等仍是应用
+        // 导航键 —— 否则焦点一到终端就被锁死，用户再也 Tab 不出去（这是本设计最容易踩的坑）。
+        if ($this->focusPanel() === 'terminal'
+            && $this->terminal->mode === 'pty'
+            && !$this->terminal->isCaptured()
+            && $this->isAutoCaptureKey($event)) {
+            // ⚠️ 必须在这里就把 shell 起好：正常路径是「聚焦后的首帧渲染」起 shell，
+            // 而触发捕获的这个键就在本帧的事件里 —— 等渲染完再转发，这个键已经没了
+            // （实测一次性灌 `ll\r`：首轮只处理事件不渲染，三个字节全丢）。
+            $this->terminal->ensurePtyStarted($a['terminal']);
+            $this->terminal->enterCapture();
+            $bytes = KeyToPty::encode($event);
+            if ($bytes !== null) {
+                $this->terminal->sendToPty($bytes);
+            }
+            return;
         }
 
         // 交互式 PTY 捕获态：终端面板聚焦且已捕获时，除 F2/Esc 退出键外，
@@ -2318,7 +2383,7 @@ class App
     /**
      * 请求粘贴（读剪贴板）：按当前焦点定插入目标，再读剪贴板内容插入。
      * - editor  → 编辑器缓冲区光标处
-     * - terminal → runner 输入行光标处 / pty 捕获态转发给 shell；pty 非捕获态忽略
+     * - terminal → runner 输入行光标处 / pty 转发给 shell（非捕获态会先进捕获，粘贴即打字）
      * - ai_input / ai_stream → AI 输入框
      * - 其余（sidebar 等）→ 无目标，忽略
      * tty 环境走 OSC 52 异步读取（暂存 pasteTarget，响应回来再插入）；
@@ -2329,7 +2394,7 @@ class App
         $f = $this->focusPanel();
         $target = match ($f) {
             'editor' => 'editor',
-            'terminal' => ($this->terminal->mode === 'pty' && !$this->terminal->captured) ? null : 'terminal',
+            'terminal' => 'terminal',
             'ai_input', 'ai_stream' => 'ai_input',
             default => null,
         };
@@ -2371,6 +2436,12 @@ class App
                 $this->buffer?->insertText($text);
                 break;
             case 'terminal':
+                // 交互 shell 可能还没起（默认 pty 下要等聚焦后的首帧渲染）：
+                // 粘贴走的是「异步剪贴板读回」，本来不信赖渲染帧，这里显式补上，
+                // 免得默认 pty 下第一次 Ctrl+V 把内容丢进一个不存在的 shell。
+                if ($this->lastVp !== null) {
+                    $this->terminal->ensurePtyStarted($this->areas($this->lastVp)['terminal']);
+                }
                 $this->terminal->pasteText($text);
                 break;
             case 'ai_input':
@@ -2667,11 +2738,17 @@ class App
 
         switch ($e->code) {
             case KeyCode::Esc:
-                // 终端：运行中→中断命令；有输入→清空输入；否则才退出
+                // 终端：**runner 模式**下运行中→中断命令；有输入→清空输入；否则才退出
                 // （Esc 不归任何面板的 onKey，故走到这里统一处理）
-                if ($focus === 'terminal' && $this->terminal->isRunning()) {
+                //
+                // ⚠️ 必须判 mode === 'runner'：pty 模式下 isRunning() **恒真**（交互 shell 一直
+                // 活着），照旧写法会让 Esc 落进 cancel() 而 cancel() 对 pty 是空操作 ——
+                // 结果是非捕获 pty 下按 Esc 被**静默吞掉**，什么都不发生。
+                // 捕获态的 Esc 更早（捕获分支）就被消费成「退出捕获」，到不了这里。
+                $runner = $focus === 'terminal' && $this->terminal->mode === 'runner';
+                if ($runner && $this->terminal->isRunning()) {
                     $this->terminal->cancel();
-                } elseif ($focus === 'terminal' && $this->terminal->input !== '') {
+                } elseif ($runner && $this->terminal->input !== '') {
                     $this->terminal->clearInput();
                 } else {
                     $this->lifecycle->requestQuit();

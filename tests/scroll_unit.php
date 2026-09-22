@@ -60,7 +60,10 @@ echo "\n== runner 模式滚动 ==\n";
 $app = new App();
 $app->focus('terminal');
 $term = $app->terminal;
-check($term->mode === 'runner', '初始 runner 模式');
+// ⚠️ 钉回 runner：终端**默认**已是交互式 pty（B15），本段测 runner 的翻页/滚轮语义
+// （原样断言 mode==='runner' 是恒真的废话了，故删掉；默认是否 pty 由
+//  interactive_term_unit 与 pty_term_alias 覆盖）。
+$term->mode = 'runner';
 $area = Area::fromDimensions(120, 12); // 模拟终端面板区域（非满屏）
 for ($i = 1; $i <= 60; $i++) {
     $term->buffer()->append('R' . sprintf('%03d', $i) . "\n", false);

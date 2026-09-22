@@ -86,7 +86,13 @@ file_put_contents($cfg2, (string) json_encode(['persistSession' => false]));
 // 在 cfg2 名下预置一份快照
 SessionStore::save(['cwd' => '/tmp/x', 'text' => 'Y', 'savedAt' => 1]);
 $app2 = new App();
-check($app2->terminal->mode === 'runner', 'persistSession=false：即使存在快照也不恢复，mode 仍为 runner');
+// ⚠️ 判据不能再用 `mode === 'runner'`：终端**默认**已是交互式 pty（B15），
+// 无论恢不恢复都是 pty，旧断言等于恒真/恒假。改用两条互不依赖的证据：
+//   1) 没进「捕获恢复态」（恢复路径必然置 captured=true，见 maybeRestore()）；
+//   2) 快照文件**没被消费**（恢复成功会 SessionStore::clear()）。
+check(!$app2->terminal->isCaptured(), 'persistSession=false：不进捕获恢复态 → 快照确实没被恢复');
+check(SessionStore::load() !== null, 'persistSession=false：快照未被「消费」，文件仍在');
+SessionStore::clear();
 
 echo "\n== 5. 彩色网格单元格序列化（v2）==\n";
 $ce = new Vt100Emulator(20, 3);

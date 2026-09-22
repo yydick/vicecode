@@ -23,20 +23,20 @@ A VSCode-style multi-panel terminal workspace (TUI). Built on **PHP 8.3 + php-tu
 
 ## Preview
 
-> Text mockups below (identical layout in a real terminal). Press **F2** in the Terminal panel to switch between "Command Runner" and "Interactive PTY" modes — the latter forwards keystrokes directly to a real shell, so full-screen programs like `vim` / `top` / `ssh` work.
+> Text mockups below (identical layout in a real terminal). The Terminal panel **is a real PTY by default** (bash, reading your `~/.bashrc`) — aliases, functions and the prompt are all there, and full-screen programs like `vim` / `top` / `ssh` just work. Once focused, **start typing** to take over the keyboard; `Esc` / `F2` leaves capture; `exit` / `Ctrl+D` ends the shell and drops back to "Command Runner".
 
-**Command Runner mode (Terminal panel default)**
+**Interactive terminal (Terminal panel default)**
 
 ```
-┌─ Command Runner mode (Terminal panel default) ───────────────────────────────┐
+┌─ Interactive terminal (Terminal panel default) ──────────────────────────────┐
 ┌──────────────┬──────────────────────────────────────┬──────────────────────┐
 │ Sidebar      │ Editor                               │ Terminal             │
 ├──────────────┼──────────────────────────────────────┼──────────────────────┤
-│ > Project    │ <?php                                │ $ ls src             │
+│ > Project    │ <?php                                │ ~/work/tui$ ls src   │
 │   src        │ final class App {                    │ app.php  panel/ ...  │
-│   tests      │   public function run() {            │ $ grep -r TODO .     │
+│   tests      │   public function run() {            │ ~/work/tui$ grep ... │
 │   vendor     │     // edit code                     │ ... 3 hits           │
-│              │   }                                  │ $ ▏                  │
+│              │   }                                  │ ~/work/tui$ ▏        │
 │ GIT          │ }                                    │                      │
 │  * main      │                                      │                      │
 └──────────────┴──────────────────────────────────────┴──────────────────────┘
@@ -51,10 +51,10 @@ A VSCode-style multi-panel terminal workspace (TUI). Built on **PHP 8.3 + php-tu
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Interactive PTY mode (Terminal panel, press F2 to capture)**
+**Full-screen programs in the interactive terminal (vim / top — default mode)**
 
 ```
-┌─ Interactive PTY mode (Terminal panel, F2 to capture) ────────────────────────┐
+┌─ Interactive terminal: vim / top (capturing) ─────────────────────────────────┐
 ┌──────────────┬──────────────────────────────────────┬──────────────────────┐
 │ Sidebar      │ Editor                               │ Terminal             │
 ├──────────────┼──────────────────────────────────────┼──────────────────────┤
@@ -120,26 +120,26 @@ For the Editor (`Enter` newline, `Ctrl+S` save, `Ctrl+W` close, `Ctrl+Tab` switc
 
 ## Terminal panel
 
-The Terminal panel has two modes, toggled with **F2**:
+The Terminal panel **is a real PTY by default**: it allocates a pseudo-terminal and launches an interactive shell (bash, reading your `~/.bashrc`), forwarding all keystrokes straight to it. So **aliases / functions / the prompt are all there** (`ll` and friends just work) and you can run `vim`, `top`, `less`, `ssh`, TUI programs, or anything that needs a full terminal. A built-in lightweight VT100/ANSI emulator handles cursor positioning, coloring, erasing, scrolling, and the alternate screen.
 
-### 1. Command Runner mode (default)
+### 1. Interactive terminal (default)
 
-Run commands like a normal command palette:
+- **Just type**: focus the Terminal panel with `Tab`, then **start typing** to take over the keyboard (no need to press `F2` first) — the first printable character or Enter enters capture mode and that key is forwarded to the shell.
+- **Exit capture** (shell keeps running in the background): press `Esc` or `F2`. Focus returns to app navigation; you can then use `PageUp` / `PageDown` and arrow keys to browse the terminal scrollback.
+- **Recapture**: press `F2` again, or just keep typing.
+- **While not capturing these keys still belong to the app**: `Tab` switches panels, `?` opens the help page, `Esc` quits, `PageUp` / arrows browse the scrollback. Only "typing" (printable characters / Enter) is treated as taking over the keyboard — otherwise focus would get stuck in the terminal.
+- **End the shell**: send `exit` or `Ctrl+D` while capturing → the panel falls back to Command Runner mode (leaving "Interactive terminal exited · F2 to re-enter" behind).
+- The panel title reads `Interactive · captured` while capturing, and the hint line at the bottom always says what to press.
+
+### 2. Command Runner mode (fallback state after the shell exits)
+
+Takes over once the shell ends; runs a single command like a normal command palette (via `sh -c`, so your shell **aliases / functions are not available** here):
 
 - Type a command in the input line at the bottom and press `Enter`; output streams in real time.
 - `↑` / `↓` browse command history; `Home` / `End` jump to line start/end.
 - `Ctrl+C` interrupts the running command; `Ctrl+L` clears the output.
 - `PageUp` / `PageDown` review past output (auto-disables "stick to bottom").
-
-### 2. Interactive PTY mode (F2 to enter)
-
-Press **F2** to allocate a **real PTY** and launch an interactive shell (bash); all keystrokes are forwarded directly to the shell — so you can run `vim`, `top`, `less`, `ssh`, TUI programs, or anything that needs a full terminal. A built-in lightweight VT100/ANSI emulator handles cursor positioning, coloring, erasing, scrolling, and the alternate screen.
-
-- **Enter capture**: with the Terminal panel focused, press `F2` → enter capture mode, all keys forwarded to the PTY.
-- **Exit capture** (shell keeps running in the background): in capture mode press `Esc` or `F2` again. Focus returns to app navigation; you can then use `PgUp/PgDn` and arrow keys to browse terminal scrollback.
-- **Re-enter**: after exiting capture (shell not yet quit), press `F2` again to recapture.
-- **Quit shell back to runner**: in capture mode send `Ctrl+D` or `exit`; once the shell ends, it automatically returns to Command Runner mode.
-- The terminal title shows the current state (`Interactive` / `Capturing`).
+- To get a real shell back: press `F2`.
 
 > Window size is synced to the shell via `stty` as the panel resizes; wide characters (CJK) are rendered at 2 columns.
 
