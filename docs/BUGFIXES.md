@@ -202,6 +202,33 @@
 
 ---
 
+#### B14. 一次都没选过模型，标题栏/状态栏/空态就声称「正在用 OpenAI/gpt-4o-mini」 `[本轮]`
+- **现象**：全新环境（没按过 `Ctrl+P`/`Ctrl+N`）启动，AI 面板标题是
+  `AI 对话 · OpenAI/gpt-4o-mini`，状态栏是 `AI=OpenAI/gpt-4o-mini`，空态第一行也是
+  `OpenAI / gpt-4o-mini`。用户从没选过，界面却把一个具体的模型说成他的选择。
+- **根因**：展示层拿 `ChatModel::spec() !== null` 当「用户选过模型」的判据，而 `spec()` 在未选时
+  会**兜底到 `defaultId()`**（`ChatModel.php:178`）—— 只要 `config/providers.php` 里有 provider
+  它就恒非 null。设计意图本来就写在字段注释里（`// 空表示还没定，首次用时取默认`），
+  是展示层提前把「默认」当成了「用户的选择」。
+- **修复**：新增 `ChatModel::hasSelection()`，**三处展示**（`App::render()` 的 `$aiTitle`、
+  `StatusBarPanel` 的 `AI=` 段、`AiPanel::helpLines()` 空态）改用它；未选时分别显示
+  「`AI 对话`」「`AI=未选`」「未选模型 · Ctrl+P 选 Provider、Ctrl+N 选模型」。
+  发送路径**不变**：未选时请求仍走默认 provider（那是实现细节，不该当成用户的选择说出来）。
+- **⚠️ 判据必须是 `providerId !== null || model !== null`**，不能只看 `providerId`：`cycleModel()`
+  只写 `$model`、**不写** `$providerId`（它有意保留「Provider 还是默认那个」的语义），
+  所以「从没选过 → 直接按 Ctrl+N」会得到 `providerId=null, model!=null` 这个合法状态。
+- **防回归**：`tests/ai_selection_unit.php`（未选三处都不出现模型名 + `useProvider` 后都出现 +
+  **只 `cycleModel()` 也算已选** + 反面对照）。四条反向注入全部实测可 FAIL：标题判据改回
+  `spec() !== null` / 状态栏判据改回 / `hasSelection()` 只看 `providerId` / 空态去掉未选分支。
+  另外 `tests/pty_provider_caps.php`、`tests/pty_providers.php`、`tests/provider_caps_unit.php`
+  原先都**靠「默认 provider 一定显示」当锚点**，已改为显式选一次再断言。
+- **教训**：**兜底值不是用户的选择**。一个「未设置就用默认」的读取器（`spec()`）天然不能兼任
+  「用户设置过没有」的判据 —— 两者需求相反，硬用会让界面替用户表态。展示层要的是「已知」，
+  就该单独暴露一个「已知性」查询，而不是拿解析结果的非空去近似。
+  同类坑还有：`hasKey()` 也不能当判据（它答的是「能不能用」，不是「选没选」）。
+
+---
+
 ### C. 集成与外部命令
 
 #### C1. GIT 面板在真实 pty 下 refresh 全失败、branch 永远空 `[@ec878d3]`

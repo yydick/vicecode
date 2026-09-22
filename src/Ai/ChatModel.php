@@ -167,6 +167,22 @@ final class ChatModel
         return $this->providerId;
     }
 
+    /**
+     * 用户是否已经「有明确选择」——**只给展示层用**。
+     *
+     * `spec()` 会在未选时兜底到 `defaultId()`（见其实现），所以「`spec()` 非 null」**不**代表
+     * 用户选过：只要配了 provider 它恒为真。展示层拿它当判据，就会在用户什么都没选时
+     * 声称「正在用 OpenAI/gpt-4o-mini」——那是假信息。要判断该不该把模型名说出来，用这个。
+     *
+     * ⚠️ 判据是 `providerId 或 model 有值`，**不能只看 providerId**：`cycleModel()` 只写
+     * `$model`、不写 `$providerId`（它故意保留「Provider 还是默认那个」的语义），
+     * 所以从「未选」直接按 Ctrl+N 会得到 `providerId=null, model!=null` 的合法状态。
+     */
+    public function hasSelection(): bool
+    {
+        return $this->providerId !== null || $this->model !== null;
+    }
+
     public function registry(): ProviderRegistry
     {
         return $this->registry;

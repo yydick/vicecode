@@ -37,6 +37,7 @@ return [
     'status.cwd'       => 'cwd',
     'status.provider'  => 'AI',
     'status.no_tools'  => 'no tools',
+    'status.ai_unset'  => 'none',
     'status.strategy_auto' => 'auto',
     'status.strategy'  => 'strategy',
     'status.strategy_offpeak' => 'off-peak',
@@ -129,6 +130,7 @@ return [
 
     'ai.no_provider'     => 'No provider configured',
     'ai.no_key'          => 'Missing API key: set env {env}',
+    'ai.no_selection'    => 'No model selected · Ctrl+P provider, Ctrl+N model',
     'ai.caps'            => 'Capabilities',
     'ai.caps_none'       => 'none declared',
     'ai.streaming'       => 'Generating…',

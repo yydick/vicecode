@@ -33,6 +33,7 @@ return [
     'status.cwd'       => '目录',
     'status.provider'  => 'AI',
     'status.no_tools'  => '无工具',
+    'status.ai_unset'  => '未选',
     'status.strategy_auto' => '自动',
     'status.strategy'  => '策略',
     'status.strategy_offpeak' => '折扣',
@@ -121,6 +122,7 @@ return [
 
     'ai.no_provider'     => '未配置任何 Provider',
     'ai.no_key'          => '缺少 API key：请设置环境变量 {env}',
+    'ai.no_selection'    => '未选模型 · Ctrl+P 选 Provider、Ctrl+N 选模型',
     'ai.caps'            => '能力',
     'ai.caps_none'       => '未声明任何能力',
     'ai.streaming'       => '生成中…',

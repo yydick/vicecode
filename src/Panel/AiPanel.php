@@ -598,6 +598,14 @@ final class AiPanel
                 $this->shell->t('ai.clear_hint'),
             ];
         }
+        // 没显式选过 provider/模型时，**不要**把兜底的默认模型当成「你在用的模型」列出来
+        // （判据见 ChatModel::hasSelection()），改成一句「未选 + 怎么选」。
+        if (!$this->chat()->hasSelection()) {
+            return [
+                $this->shell->t('ai.no_selection'),
+                $this->shell->t('ai.clear_hint'),
+            ];
+        }
         // 当前模型能力（声明见 config/providers.php）：让用户一眼看出「这个模型能不能用工具」，
         // 而不是等到 Agent 永不触发时才来猜。空列表显式说明「未声明任何能力」。
         $caps = $spec->capabilities === []

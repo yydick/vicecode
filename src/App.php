@@ -1210,9 +1210,17 @@ class App
         // ── AI Stream ──
         // 标题带上当前 Provider/模型：切换后要能立刻看见生效的是谁
         // （输入面板只有 1 行可用，放不下独立的状态行）
+        //
+        // ⚠️ 判据是 `hasSelection()` 而不是 `$spec !== null`：后者在配了 provider 时**恒真**
+        // （`spec()` 会兜底到 defaultId()），于是用户一次都没选过，标题也会声称正在用某个模型。
+        // 「还没选」时只显示面板名 —— 请求仍然走默认 provider，但那是实现细节，不该当成
+        // 用户的选择说出来（要选的话有 Ctrl+P / Ctrl+N）。
         $spec = $this->chat->spec();
+        $modelLabel = $spec !== null && $this->chat->hasSelection()
+            ? ' · ' . $spec->label . '/' . $spec->model
+            : '';
         $aiTitle = ' ' . $this->i18n->t('panel.ai_chat')
-            . ($spec !== null ? ' · ' . $spec->label . '/' . $spec->model : '')
+            . $modelLabel
             . ($this->chat->isStreaming() ? ' …' : '') . ' ';
         $aiStream = BlockWidget::default()
             ->borders(Borders::ALL)

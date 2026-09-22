@@ -12,6 +12,12 @@
 
 > 本轮主题：**AI V2** —— 把 AI 从「孤岛聊天框」接进工作台：代码上下文、只读工具 Agent loop、上下文压缩、对话持久化与 Markdown 渲染。
 
+### 修复（没选模型却显示模型名）
+
+- **一次都没选过 provider/模型，标题栏、状态栏、AI 空态就声称「正在用 OpenAI/gpt-4o-mini」**（`BUGFIXES` B14）：展示层拿 `ChatModel::spec() !== null` 当「用户选过模型」的判据，而 `spec()` 在未选时会**兜底到 `defaultId()`** —— 只要配了 provider 就恒非 null。新增 `ChatModel::hasSelection()`，三处展示改用它；未选时分别显示「`AI 对话`」「`AI=未选`」「未选模型 · Ctrl+P 选 Provider、Ctrl+N 选模型」。发送路径不变（未选时请求仍走默认 provider，那是实现细节）。
+- **⚠️ 判据是 `providerId !== null || model !== null`，不能只看 `providerId`**：`cycleModel()`（Ctrl+N）只写 `$model`、不写 `$providerId`（有意保留「Provider 还是默认那个」的语义），所以「从没选过 → 直接按 Ctrl+N」会得到 `providerId=null, model!=null` 这个合法状态。
+- 新增 `tests/ai_selection_unit.php`（未选三处都不出现模型名 / `useProvider` 后都出现 / **只 Ctrl+N 也算已选** / 反面对照），**四条反向注入全部实测可 FAIL**。原先靠「默认 provider 一定显示」当锚点的 `pty_provider_caps` / `pty_providers` / `provider_caps_unit` 已改为**显式选一次再断言**。
+
 ### 新增（编辑器多光标：多行同时编辑）
 
 - **Alt+↑ / Alt+↓** 在上/下一行加一个编辑光标，**Alt+点击**在点击处加一个；此后打字、退格、Delete、Enter、Tab/Shift+Tab 缩进都**同时作用于所有光标**；**Esc** 取消多光标回到单光标（单光标时 Esc 仍是原来的全局退出语义）。状态栏在 `文件=` 段追加「N 个光标」，否则用户不知道自己处于多光标态、也就想不到用 Esc 收掉。
@@ -163,6 +169,10 @@
 
 ### 测试
 
+- 新增 `tests/ai_selection_unit.php`（headless，`BUGFIXES` B14）：未选时标题栏/状态栏/空态**都不出现**模型名、`useProvider()` 后三处都出现、**只按 Ctrl+N（`cycleModel()`）也算已选**（它只写 `model`）、反面对照。四条反向注入全部实测可 FAIL（标题判据改回 `spec() !== null` / 状态栏判据改回 / `hasSelection()` 只看 `providerId` / 空态去掉未选分支）。
+- 三处「靠默认 provider 一定显示」当锚点的用例改为**显式选一次再断言**：`pty_provider_caps`（Tab×3 + Ctrl+P，**Ctrl+P 次数按当前配置里的 provider 个数算** —— 写死 1 次会在第二段落到 deepseek 上）、`pty_providers`（点 AI 输入框落焦再 Ctrl+P；它用 argv 打开了文件，编辑器**有 buffer** 时 Tab 被当缩进吃掉、切不到面板）、`provider_caps_unit`（`appWithChat()` 改为总是 `useProvider()`）。
+- ⚠️ 顺带把 `pty_provider_caps` 的**内联屏幕重建器**换成共享的 `tests/lib/pty_screen.php::vc_rebuild_screen`：前者多次重绘后会残留交错字符（实测把 `无工具` 拼成 `无M工具`、把状态栏两段叠成 `标签焦资点源AISTREAM`），导致断言无故失败；共享版逐行归一化、行间保留 `\n`，不会跨行拼出假阳性。
+- 新增 `tests/ai_selection_unit.php` 时踩到一个读屏幕的坑：宽字符占**两格**、第二格是空格，直接 `implode` 会把「AI 对话」拼成「AI 对 话 」，针永远匹配不上 —— 读网格必须先判宽度、跳过续格。
 - 新增 `tests/picker_unit.php`（headless）：点语言段弹列表 / 初始高亮落在当前值 / ↑↓ 环形 / Enter 应用（语言真的变）/ Esc 只关列表不退出 / **点不可点的段无反应** / 鼠标点列表项应用、点别处关闭 / **点主题段弹主题列表且切换真的生效** / **语言与主题段在 120 列下都必须可见**（宽度预算的回归守护）/ 浮层真的画在屏幕上且底边紧贴状态栏上一行 / 关闭时屏幕上没有它（阴性对照）。**八条反向注入全部实测可 FAIL**：段不声明 pick、`clickSegment` 不认 pick、Esc 不消费、浮层下移一格压住状态栏、鼠标命中行算错一格、主题段不声明 pick、整段删掉主题段、把 `app` 段优先级调回去（会把语言段挤出 120 列）。⚠️ 写这条时踩了三个坑：`findInGrid` 用 `strlen()` 当**格数**（多字节字符永远匹配不上）；「注入后变红」**也得确认是断言失败而不是崩溃**（第一次的「浮层位置」注入其实把面板挤出了视口、php-tui 直接抛 `Position` 越界）；**宽度预算那条断言最初用空态测**（`文件=—` 太窄、腾出的空间让退化观察不到），改成打开文件后才真正守住。
 - `tests/git_unit.php`：`Commit ▾` 的点击断言改为**从渲染帧逐格量出 `▾` 的列**（原先照抄产品代码的错公式，见 `BUGFIXES` E4）。
 - `tests/plugin_v11_unit.php`：`clickSegment()` 返回值形状变了（`?string` → 命中详情数组），4 条断言同步；「系统段不可点」改为「系统段不带插件命令（cmd）」（V1.2 起系统段可带自己的 `pick`）。
