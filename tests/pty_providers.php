@@ -6,7 +6,8 @@ declare(strict_types=1);
  *
  * 为什么必须走 pty：headless 已覆盖**语义**（合并规则 / 语法错保留原配置 / 热重载保住选择，
  * 见 `tests/provider_user_unit.php`），但这条链路的**接线**只有真实运行才验证得到：
- *   1) 启动时用户配置文件真的被读到，并一路显示到状态栏（`label/model` 段）；
+ *   1) 启动时用户配置文件真的被读到，并在**显式选中 provider 后**显示到状态栏（`label/model` 段）
+ *      —— D12 起「没选过就不显示模型名」，所以要先点 AI 面板 + Ctrl+P 选一次（见正文）；
  *   2) 在编辑器里对**这份文件**按 Ctrl+S 会走 EditorPanel 的保存钩子 → `App::reloadProviders()`
  *      → 状态栏出现重载回执（`file.save` 菜单路径与 Ctrl+S 是同一条路）。
  *
@@ -24,13 +25,23 @@ require __DIR__ . '/../vendor/autoload.php';
 require __DIR__ . '/lib/isolation.php';
 require __DIR__ . '/lib/pty_screen.php';
 
+use App\App;
 use App\Core\ConfigStore;
+use PhpTui\Tui\Display\Area;
 
 const W = 120;
 const H = 40;
 
 $cfgFile = vc_isolate_config('vc_providers_pty');     // 含 VICECODE_PROVIDERS_CONFIG
 $provPath = ConfigStore::providersPath();
+
+// 内置配置里的 provider 顺序：Ctrl+P 是**环形**的，从「未选」按 k 次落到 ids[k % n]，
+// 按 n 次正好回到 ids[0]（= 被用户配置改了 label 的那个 openai）。次数不能写死。
+$builtinCfg = require __DIR__ . '/../config/providers.php';
+$builtinIds = array_values(array_filter(
+    array_keys($builtinCfg),
+    static fn (string $k): bool => !str_starts_with($k, '@'),
+));
 
 // 用户配置：只覆盖内置 openai 的 label（其余字段沿用内置），这样
 // 「状态栏 AI 段」会显示 ZZGWONE/<内置默认模型>，无需按 Ctrl+P 就能观察到是否加载成功。
@@ -103,16 +114,40 @@ function check(bool $cond, string $msg): void
     }
 }
 
-// ── 1) 启动：用户配置已加载并显示在状态栏 ──
+// 面板中心（0-based → SGR 1-based），用来点某块面板落焦。
+$probe = new App();
+$pa = $probe->areas(Area::fromDimensions(W, H));
+$click = static function (Area $a) use ($feed): void {
+    $c = $a->position->x + intdiv($a->width, 2) + 1;
+    $r = $a->position->y + intdiv($a->height, 2) + 1;
+    $feed("\x1b[<0;{$c};{$r}M");
+    $feed("\x1b[<0;{$c};{$r}m");
+};
+
+// ── 1) 启动：用户配置已加载，且**显式选一次 provider 后**能在状态栏看见 ──
+//
+// ⚠️ 为什么不能只看首帧：断言的是「状态栏 AI 段显示用户配置的 label」，而 D12 起
+// **没显式选过 provider 就不显示模型名**（只显示「未选」）。所以必须先真的选一次。
+//
+// ⚠️ 为什么用点击而不是 Tab：本用例用 argv 打开了 provider 配置文件，编辑器里**有 buffer**，
+// 此时 completionContext() 返回 'editor' → Tab 被当作缩进吃掉，切不到别的面板。
 echo "== 真实 pty：启动即加载用户级 provider 配置 ==\n";
+$click($pa['ai_input']);                      // 点 AI 输入框落焦
+usleep(400000);
+for ($i = 0; $i < count($builtinIds); $i++) {  // 环形按 n 次 → 回到 ids[0]=openai
+    $feed("\x10");
+    usleep(400000);
+}
 $loaded = $waitFor('zzgwone', 8.0);          // 状态栏 AI 段：ZZGWONE/gpt-4o-mini
-check($loaded, '最终帧里状态栏 AI 段显示用户配置的 label（ZZGWONE）——用户文件在启动时真的被读到');
-// 阴性断言的正向锚点就是上一条；这里证明重载回执不是启动就有的
+check($loaded, '显式选中后状态栏 AI 段显示用户配置的 label（ZZGWONE）——用户文件在启动时真的被读到');
 check(!str_contains(vc_rebuild_screen($out, W, H), 'modelconfigreloaded'), '未保存前不出现「已重载」回执（回执只由保存触发）');
 
 // ── 2) Ctrl+S：保存这份文件 → 走热重载路径 ──
+// Ctrl+S 由 EditorPanel::onChar 处理，必须**编辑器焦点**（上一步把焦点点到 AI 了，点回来）。
 echo "== 真实 pty：编辑器里 Ctrl+S 保存该文件 → 热重载回执 ==\n";
-$feed("\x13");                               // 0x13 = Ctrl+S；openFile 已把焦点放在编辑器上
+$click($pa['editor']);
+usleep(400000);
+$feed("\x13");                               // 0x13 = Ctrl+S
 $reloaded = $waitFor('modelconfigreloaded', 8.0);
 check($reloaded, 'Ctrl+S 保存 provider 配置文件 → 状态栏出现「模型配置已重载」回执（热重载接线生效）');
 check(str_contains(vc_rebuild_screen($out, W, H), 'zzgwone'), '重载后 provider 仍指向用户配置（没把配置弄丢）');

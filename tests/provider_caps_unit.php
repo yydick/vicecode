@@ -195,9 +195,10 @@ function appWithChat(array $provider, ?string $model = null): App
     $app = new App();
     $chat = new ChatModel($app, new ProviderRegistry(['p' => $provider]));
     $app->chat = $chat;
-    if ($model !== null) {
-        $chat->useProvider('p', $model);
-    }
+    // ⚠️ 必须**显式选一次**：D12 起「没选过 provider/模型」时，状态栏与 AI 空态都
+    // 不显示模型名（也不列能力行）—— 本用例断言的是「选中后能看到能力」，所以要先选。
+    // 传 `null` 表示用该 provider 的默认模型（spec() 会兜底到配置里的 model）。
+    $chat->useProvider('p', $model);
     return $app;
 }
 

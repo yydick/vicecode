@@ -40,6 +40,9 @@ if (!rename($providers, $backup)) {
     echo "  [FAIL] 无法备份 config/providers.php\n";
     exit(1);
 }
+// 内置配置里的 provider 个数：决定第二段要按几次 Ctrl+P 才回到 ids[0]
+$origIds = array_keys(require $backup);
+$variantIds = ['openai'];   // 下面的变体只声明 openai
 $restore = static function () use ($providers, $backup): void {
     if (is_file($backup)) {
         @unlink($providers);
@@ -76,90 +79,14 @@ if (is_dir($pluginsDir)) {
     });
 }
 
-/** @return string[] 多字节感知的全屏重建（每格一个「字素」，宽字符占 2 列） */
-function rebuildScreenLines(string $raw, int $w, int $h): array
-{
-    $grid = array_fill(0, $h, array_fill(0, $w, ' '));
-    $r = 0;
-    $c = 0;
-    $len = strlen($raw);
-    $i = 0;
-    while ($i < $len) {
-        $ch = $raw[$i];
-        if ($ch === "\x1b") {
-            if (isset($raw[$i + 1]) && $raw[$i + 1] === '[') {
-                $j = $i + 2;
-                $params = '';
-                while ($j < $len && !ctype_alpha($raw[$j]) && $raw[$j] !== '~') {
-                    $params .= $raw[$j];
-                    $j++;
-                }
-                $cmd = ($j < $len) ? $raw[$j] : '';
-                $j++;
-                $nums = array_map('intval', explode(';', $params === '' ? '1' : $params));
-                switch ($cmd) {
-                    case 'H':
-                    case 'f':
-                        $r = max(0, ($nums[0] ?? 1) - 1);
-                        $c = max(0, ($nums[1] ?? 1) - 1);
-                        break;
-                    case 'A': $r = max(0, $r - ($nums[0] ?? 1)); break;
-                    case 'B': $r = min($h - 1, $r + ($nums[0] ?? 1)); break;
-                    case 'C': $c = min($w - 1, $c + ($nums[0] ?? 1)); break;
-                    case 'D': $c = max(0, $c - ($nums[0] ?? 1)); break;
-                    case 'J':
-                        if (($nums[0] ?? 0) === 2 || ($nums[0] ?? 0) === 3) {
-                            $grid = array_fill(0, $h, array_fill(0, $w, ' '));
-                        }
-                        break;
-                    case 'K':
-                        if (($nums[0] ?? 0) === 0) {
-                            for ($k = $c; $k < $w; $k++) { $grid[$r][$k] = ' '; }
-                        } elseif (($nums[0] ?? 0) === 1) {
-                            for ($k = 0; $k <= $c; $k++) { $grid[$r][$k] = ' '; }
-                        } elseif (($nums[0] ?? 0) === 2) {
-                            for ($k = 0; $k < $w; $k++) { $grid[$r][$k] = ' '; }
-                        }
-                        break;
-                }
-                $i = $j;
-                continue;
-            }
-            $i++;
-            while ($i < $len && !ctype_alpha($raw[$i]) && $raw[$i] !== "\x1b") {
-                $i++;
-            }
-            if ($i < $len) {
-                $i++;
-            }
-            continue;
-        }
-        if ($ch === "\r") { $c = 0; $i++; continue; }
-        if ($ch === "\n") { $r = min($h - 1, $r + 1); $c = 0; $i++; continue; }
-        if ($ch === "\x00" || $ch === "\x08") { $i++; continue; }
-        $len1 = 1;
-        $b = ord($ch);
-        if ($b >= 0xF0) { $len1 = 4; } elseif ($b >= 0xE0) { $len1 = 3; } elseif ($b >= 0xC0) { $len1 = 2; }
-        $seq = substr($raw, $i, $len1);
-        $cw = \App\Text\DisplayWidth::dispWidth($seq);
-        if ($cw < 1) { $cw = 1; }
-        if ($r >= 0 && $r < $h && $c >= 0 && $c < $w) {
-            $grid[$r][$c] = $seq;
-        }
-        $c += $cw;
-        if ($c >= $w) { $c = 0; $r = min($h - 1, $r + 1); }
-        $i += $len1;
-    }
-    return array_map(static fn (array $row): string => implode('', $row), $grid);
-}
-
-/** 归一化（去空白标点，留字母数字与汉字）：差分渲染会把同行文本拆成多段写入 */
-function norm(array $lines): string
-{
-    $t = implode("\n", $lines);
-    $r = preg_replace('/[^a-zA-Z0-9\x{4e00}-\x{9fff}]/u', '', $t);
-    return $r === null ? (string) preg_replace('/[^a-zA-Z0-9]/', '', $t) : $r;
-}
+// 屏幕重建用**共享**实现（tests/lib/pty_screen.php）：本文件原先内联了一份自己的
+// 重建器，多次重绘后会残留交错字符（实测把 `无工具` 拼成 `无M工具`、把状态栏两段
+// 叠成 `标签焦资点源AISTREAM`），导致断言无故失败。共享版逐行归一化、行间保留 \n
+// （「一个词」不可能跨行拼出来造成假阳性），是这类断言的正解。
+//
+// ⚠️ 它输出**已归一化**（小写、去标点空白、保留汉字）的文本，行间用 \n 连接，
+// 所以断言里的针一律用小写字面量（如 'openaigpt4omini'）。
+require __DIR__ . '/lib/pty_screen.php';
 
 $readPty = static function ($stream, int $len) {
     set_error_handler(static fn () => true);
@@ -170,13 +97,22 @@ $readPty = static function ($stream, int $len) {
     }
 };
 
-/** 起一轮应用、收首帧后干净退出，返回 [归一化帧, 原始流, 退出码] */
-function runOnce(array $env, callable $readPty): array
+/**
+ * 起一轮应用：收首帧 → 可选发一段「前奏键」再收一帧 → 干净退出。
+ *
+ * ⚠️ 为什么要「前奏」：本用例断言的是「无工具」标记与能力行，而按 D12 起
+ * **没显式选过 provider 就不显示模型名**，所以得先真的选一次（Tab×3 聚焦 AI 面板 +
+ * Ctrl+P 切 provider）。首帧单独留一份，用来做「未选时不出现模型名」的阴性对照。
+ *
+ * @param array<int,array{0:string,1:int}> $prelude 每项 = [键字节, 等待微秒]
+ * @return array{0:string,1:string,2:string,3:int} [首帧, 前奏后的帧, 原始流, 退出码]
+ */
+function runOnce(array $env, callable $readPty, array $prelude = []): array
 {
     $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
     $proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes, null, $env);
     if ($proc === false) {
-        return ['', '', 1];
+        return ['', '', '', 1];
     }
     stream_set_blocking($pipes[0], false);
     stream_set_blocking($pipes[1], false);
@@ -205,6 +141,15 @@ function runOnce(array $env, callable $readPty): array
     };
 
     $raw = $drain();
+    $frameBefore = vc_rebuild_screen($raw, W, H);
+
+    foreach ($prelude as [$bytes, $us]) {
+        fwrite($pipes[0], $bytes);
+        usleep($us);
+        $raw .= $drain();
+    }
+    $frameAfter = vc_rebuild_screen($raw, W, H);
+
     fwrite($pipes[0], "\x11");                 // Ctrl+Q
     $guard = 0;
     while (proc_get_status($proc)['running'] && $guard < 25) {
@@ -220,8 +165,29 @@ function runOnce(array $env, callable $readPty): array
     }
     $code = proc_close($proc);
 
-    return [norm(rebuildScreenLines($raw, W, H)), $raw, $code];
+    return [$frameBefore, $frameAfter, $raw, $code];
 }
+
+/**
+ * 把焦点移到 AI 面板，并把 provider 选到**配置里的第一个**（= openai）。
+ *
+ * - Tab×3：无打开文件时 `completionContext()` 返回空串，Tab 落回全局焦点循环
+ *   sidebar → editor → terminal → **ai_stream**。
+ * - Ctrl+P：`cycleProvider()` 是**环形**的，从「未选」起按 k 次落到 `ids[k % n]`，
+ *   所以按 n 次正好回到 `ids[0]`。**次数必须按当前配置的 provider 个数算**：
+ *   本用例前后用的是两份不同配置（变体 1 个 / 内置 3 个），写死 1 次会在第二段
+ *   落到 deepseek 上（本轮踩过）。
+ *
+ * @param string[] $ids 当前配置里的 provider id 列表
+ * @return array<int,array{0:string,1:int}>
+ */
+$selectFirstProvider = static function (array $ids): array {
+    $seq = [["\t", 200000], ["\t", 200000], ["\t", 200000]];
+    for ($i = 0; $i < count($ids); $i++) {
+        $seq[] = ["\x10", 500000];
+    }
+    return $seq;
+};
 
 // ⚠️ 配置目录必须独立：ChatStore 按 dirname(VICECODE_CONFIG) 找存档，配置放 /tmp 根会读到
 // 别的测试留下的 /tmp/.vicecode_ai，于是「空态」根本不是空的（本轮踩过：能力行断言失败）。
@@ -244,8 +210,11 @@ $env = array_merge(getenv(), [
 ]);
 
 echo "== 真实 pty：无 tools 能力的模型要被看见 ==\n";
-[$frameA, $rawA, $codeA] = runOnce($env, $readPty);
-check(str_contains($frameA, norm(['OpenAI/gpt-4o-mini'])), '首帧状态栏显示 OpenAI/gpt-4o-mini（正向锚点）');
+// 未选状态先留一份凭证（阴性对照），再真的选一次 provider。
+[$beforeA, $frameA, $rawA, $codeA] = runOnce($env, $readPty, $selectFirstProvider($variantIds));
+check(str_contains($beforeA, '未选'), '未选时状态栏写「未选」而不是编一个模型名');
+check(!str_contains($beforeA, 'openaigpt4omini'), '未选时画面上**不出现**默认模型名（阴性对照）');
+check(str_contains($frameA, 'openaigpt4omini'), '选中后 OpenAI/gpt-4o-mini 出现（正向锚点）');
 check(str_contains($frameA, '无工具'), '无 tools 能力 → 状态栏带「无工具」标记');
 check(str_contains($frameA, '能力') && str_contains($frameA, '推理'), 'AI 面板空态列出能力（推理）');
 check(str_contains($frameA, '工具调用') === false, '无工具模型的能力行里不出现「工具调用」');
@@ -256,8 +225,10 @@ $restore();
 check(is_file($providers) && !is_file($backup), 'providers.php 已还原（备份文件不残留）');
 
 echo "== 真实 pty：有 tools 能力的模型不该有标记（正反对照）==\n";
-[$frameB, $rawB, $codeB] = runOnce($env, $readPty);
-check(str_contains($frameB, norm(['OpenAI/gpt-4o-mini'])), '首帧状态栏仍显示 OpenAI/gpt-4o-mini（正向锚点）');
+// 第二段用的是**内置**配置（3 个 provider），要按 3 次 Ctrl+P 才回到 ids[0]=openai
+[$beforeB, $frameB, $rawB, $codeB] = runOnce($env, $readPty, $selectFirstProvider($origIds));
+check(!str_contains($beforeB, 'openaigpt4omini'), '未选时仍不显示模型名（阴性对照）');
+check(str_contains($frameB, 'openaigpt4omini'), '选中后 OpenAI/gpt-4o-mini 出现（正向锚点）');
 check(!str_contains($frameB, '无工具'), '有 tools 能力 → 状态栏不带「无工具」标记');
 check(str_contains($frameB, '工具调用'), 'AI 面板能力行含「工具调用」');
 check($codeB === 0, 'Ctrl+Q 退出码为 0（实际 ' . $codeB . '）');

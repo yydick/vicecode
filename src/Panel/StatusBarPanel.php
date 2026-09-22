@@ -223,12 +223,21 @@ final class StatusBarPanel
 
         // M5：Provider/模型。生成中带省略号（AI 面板标题只有一个点，容易忽略）。
         // 模型没声明 tools 能力时补一个短标记——否则用户会疑惑「为什么 Agent 工具从不触发」。
+        //
+        // 判据用 `hasSelection()` 而不是 `spec() !== null`：后者配了 provider 就恒真
+        // （`spec()` 兜底到 defaultId()），会把用户没选过的默认模型当成他的选择显示出来。
+        // 未选时给「未选」，而不是编一个模型名。（请求仍走默认 provider，那属实现细节。）
         $spec = $this->shell->chat->spec();
-        $ai = $spec === null
-            ? '—'
-            : $spec->label . '/' . $spec->model
+        $streaming = $this->shell->chat->isStreaming() ? ' …' : '';
+        if ($spec === null) {
+            $ai = '—';
+        } elseif (!$this->shell->chat->hasSelection()) {
+            $ai = $t('status.ai_unset') . $streaming;
+        } else {
+            $ai = $spec->label . '/' . $spec->model
                 . ($spec->supportsTools() ? '' : '·' . $t('status.no_tools'))
-                . ($this->shell->chat->isStreaming() ? ' …' : '');
+                . $streaming;
+        }
 
         // 模型策略段：只在配了策略时显示（`@strategies`）。
         // 它必须**常显**，而且要**说清现在听谁的**：自动选档生效时带「·自动」后缀，
