@@ -147,6 +147,13 @@ if ($uri === '/v1/chat/completions' && $method === 'POST') {
     if (is_string($logFile) && $logFile !== '') {
         @file_put_contents($logFile, (is_string($req['model'] ?? null) ? $req['model'] : '(none)') . "\n", FILE_APPEND);
     }
+    // MOCK_BODY_FILE：把**完整请求体**逐行（JSON 单行）追加。
+    // 与 Anthropic 端点（见下方 /v1/messages）同义——两个协议都接上，这个钩子才能通用。
+    // ⚠️ 断言"模型收到了什么"必须看**发出去的请求体**，只看回复文案会被"假数据源不看输入"骗过。
+    $bodyFile = getenv('MOCK_BODY_FILE');
+    if (is_string($bodyFile) && $bodyFile !== '') {
+        @file_put_contents($bodyFile, json_encode($req, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n", FILE_APPEND);
+    }
 
     // ── V2 场景开关（query 加不上——客户端 URL 是 base_url 拼的，故全走 env / 请求体判断）──
     $wantSummary = getenv('MOCK_SUMMARY') === '1';

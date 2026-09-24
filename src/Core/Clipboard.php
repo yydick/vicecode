@@ -12,8 +12,8 @@ namespace App\Core;
  *   终端异步把内容以转义序列经 stdin 回传，由 InputParser 旁路捕获后回调（见 EventLoop）。
  *   非 tty 没有系统剪贴板可读，requestRead 是 no-op，读取走 App 的内存剪贴板降级。
  *
- * 超长保护：部分终端对单次 OSC 52 有长度上限（tmux 约 100KB、某些模拟器更短），
- * base64 超过 4K 时切分多次写入，终端会把分块拼接成完整内容。
+ * 长度上限：单条 OSC 52 由终端决定上限（主流模拟器远大于 4K；tmux 约 100KB）。
+ * 不主动分块——xterm 规范中每条 OSC 52 是**替换**剪贴板而非追加，分块只会丢内容。
  */
 final class Clipboard
 {
@@ -27,14 +27,11 @@ final class Clipboard
         }
         if (stream_isatty(STDOUT)) {
             $b64 = base64_encode($text);
-            $chunk = 4096;
-            if (strlen($b64) <= $chunk) {
-                fwrite(STDOUT, "\x1b]52;c;" . $b64 . "\x07");
-            } else {
-                foreach (str_split($b64, $chunk) as $part) {
-                    fwrite(STDOUT, "\x1b]52;c;" . $part . "\x07");
-                }
-            }
+            // ⚠️ 必须一次性发完整 OSC 52。xterm 规范里每条 OSC 52 是**替换**剪贴板而非追加，
+            // 拆成多条（按 4K base64 分块）会只保留最后一块、其余静默丢失——长消息复制后粘贴出
+            // 半截乱码。单条上限由终端决定（主流模拟器均远大于 4K；tmux 约 100KB），超出是终端
+            // 限制，不应靠「分块」规避，分块反而制造了截断 bug。
+            fwrite(STDOUT, "\x1b]52;c;" . $b64 . "\x07");
             fflush(STDOUT);
             return;
         }
