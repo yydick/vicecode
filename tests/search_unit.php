@@ -15,6 +15,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_search');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 putenv('APP_LOCALE=zh_CN');
 
 use App\App;
@@ -30,6 +32,8 @@ use PhpTui\Term\Event\CharKeyEvent;
 use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\KeyCode;
 use PhpTui\Term\MouseEventKind;
+use PhpTui\Term\Event\MouseEvent;
+use PhpTui\Term\MouseButton;
 
 $failed = false;
 function check(bool $cond, string $msg): void
@@ -157,7 +161,7 @@ check($cs->matched === $max, '达 MAX_MATCHES 后停止摄入（matched 不再�
 check($cs->truncated === true, 'truncated 标记置位（界面需提示已截断）');
 
 // openHit：打开文件并把光标定位到 grep 行号（1-based → 0-based）
-$tmp = tempnam(sys_get_temp_dir(), 'vc_');
+$tmp = vc_tmp_file('vc_search_hit');
 file_put_contents($tmp, implode("\n", array_fill(0, 10, 'line')));
 $app->search->openHit($tmp, 5);
 check($app->buffer !== null && $app->buffer->path === $tmp, 'openHit 打开文件并切换当前 buffer');
@@ -262,7 +266,7 @@ check($app->message === $app->t('search.empty_query'), '空 query 回车提示�
 check($app->search->running === false, '空 query 回车未起进程');
 
 // 回车命中 → 打开文件并定位（R3 全链路：CodedKeyEvent → onKey → searchKey → triggerOrActivate → openHit）
-$tmp2 = tempnam(sys_get_temp_dir(), 'vc_');
+$tmp2 = vc_tmp_file('vc_search_hit2');
 file_put_contents($tmp2, implode("\n", array_fill(0, 8, 'row')));
 $app->search->query = 'needle';
 $app->search->editingQuery = false;       // 结果态：回车=激活当前行
@@ -274,6 +278,26 @@ $app->handle(CodedKeyEvent::new(KeyCode::Enter, 0), $vp);
 check($app->buffer !== null && $app->buffer->path === $tmp2, '回车命中 → 打开对应文件');
 check($app->buffer->cursorRow === 5, '回车命中 → 光标定位到行号 6（cursorRow 5）');
 unlink($tmp2);
+
+// ── 点搜索输入框必须把焦点交给侧栏 ──
+// 上面几条都用「默认焦点就是 sidebar」驱动，恰好绕开了这条路径：用户从编辑器/终端点进搜索框时
+// 焦点还在原面板，而 App::handleClick 在侧栏 onClick 返回 true 后会**提前 return**（不聚焦）
+// → 键入的字符落到原焦点面板，搜索框一个字都收不到。
+$appC = new App();
+$appC->sidebar->tabIndex = 2;
+$appC->focus('editor');                 // 模拟「刚从编辑器过来」
+$sbC = $appC->areas($vp)['sidebar'];
+$inputRow = $sbC->position->y + 3;      // tab 行(1) + 分隔线(1) + SEARCH_INPUT_ROW(0) + 边框(1)
+$inputCol = $sbC->position->x + 3;
+$appC->handle(
+    MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $inputCol, $inputRow, 0),
+    $vp
+);
+check($appC->focusPanel() === 'sidebar',
+    '点搜索输入框后焦点在侧栏（实际 ' . $appC->focusPanel() . '）');
+$appC->handle(CharKeyEvent::new('z', 0), $vp);
+check($appC->search->query === 'z',
+    '点输入框后键入进搜索框（实际 query=' . var_export($appC->search->query, true) . '）');
 
 // ─────────────── 7) 真实 grep（临时目录，验证命令与排除目录）───────────────
 echo "== 真实 grep ==\n";

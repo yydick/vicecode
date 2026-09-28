@@ -1,6 +1,6 @@
 # ViceCode BUG 修复清单
 
-> 覆盖范围：v0.0.1 定版前后（2026-08 ~ 2026-09）全部已修复缺陷，共 **24 个真实产品 BUG + 9 类测试伪失败 + 1 个测试自身缺陷 + 1 处 vendor 补丁**。
+> 覆盖范围：v0.0.1 定版前后（2026-08 ~ 2026-09）全部已修复缺陷，共 **28 个真实产品 BUG + 9 类测试伪失败 + 1 个测试自身缺陷 + 1 处 vendor 补丁**。
 >
 > 写这份清单有两个目的：
 > 1. **防止同类再犯** —— 每条都记「现象 → 根因 → 修复」，根因比现象值钱。
@@ -46,6 +46,40 @@
 - **现象**：命令行传文件名打开时，误把 `$argv[0]`（脚本自身路径）当待打开文件。
 - **修复**：argv 解析跳过 `$argv[0]`。
 - **防回归**：`tests/cli_dir.php`。
+
+#### A5. 编辑器回车无效 + 点侧栏搜索框/提交框打字不进去（三处，用户实测报障） `[本轮]`
+- **现象**（用户实测，一次报了两个）：① 编辑器里按回车**毫无反应**；② 搜索窗口"无法输入搜索内容"。
+  顺着 ② 复查又发现 ③：点 GIT 提交信息框同样打不进字。
+- **根因（三类，前两类都是老坑重演）**：
+  - **① 编辑器**：`EditorPanel::onKey` 里**没有 `KeyCode::Enter` 分支**。`onChar` 里那条
+    `"\r"` 分支在真实终端**永远不会走到**（终端发的是 `CodedKeyEvent(Enter)`）——
+    这与 A2（AI 面板回车发不出去）是**同一个坑**，当年只修了 AI 输入框，编辑器漏了。
+    为什么长期没暴露：`tests/m1_smoke.php` 只测了 `CharKeyEvent("\r")`（直接调 Buffer 的那几条更测不到），
+    编辑器键盘路径**从没走过 `App::handle` + `CodedKeyEvent(Enter)`**。
+  - **②③ 侧栏两个输入框**：`App::handleClick` 在侧栏 `onClick()` 返回 true 后**提前 return**，
+    **不会再调 `focus()`**。而 `SidebarPanel` 的 tab 行与目录树分支**都自己调了 `focus('sidebar')`**，
+    唯独 `searchClick` 与 `gitClick` 的输入框分支漏了 —— 它们只置内部状态就返回：
+    `searchClick` 只 `$s->editingQuery = true`；`gitClick` 更直接，注释写着
+    「输入框默认聚焦，点击即聚焦」——那个假设**只在焦点本来就在侧栏时成立**。
+    于是从编辑器/终端点进搜索框或提交框再打字，字符会落到**原焦点面板**（搜索框一个字都收不到）。
+    ⚠️ 两个方法的**文档注释都声称会聚焦**（`searchClick` 写着"输入框行：聚焦并转回编辑查询语义"），
+    代码里却没有 —— 注释与实现不一致，和 T6 是同一种"注释说了、代码没做"。
+  - 为什么长期没暴露：`tests/search_unit.php` 直接 `$app->sidebar->tabIndex = 2`
+    （**绕过了点击路径**），且该文件里所有交互断言都基于「默认焦点就是 sidebar」；
+    `tests/pty_search.php` 是**点 tab 行**进的搜索（那条分支恰好有聚焦），所以一直是绿的。
+    即"测试用了一条不会经过这个 bug 的入口"。
+- **修复**：
+  - `EditorPanel::onKey` 补 `KeyCode::Enter` → `insertNewline()` + `followBoth($buf, $textW)`。
+    ⚠️ 用**本方法算出的 `$textW`**，不是 `onChar` 依赖的 `$this->lastTextW` ——
+    后者只在渲染过才有值，键盘先于首帧到达时会是 0。
+  - `searchClick` / `gitClick` 的输入框分支补 `$this->shell->focus('sidebar')`。
+- **防回归**（三条都是**先写红再修**，即每条的"可失败"由修复前实测证明）：
+  `tests/m1_smoke.php`（`CodedKeyEvent(Enter)` 插入新行 + 光标下移）、
+  `tests/search_unit.php`（`focus('editor')` → 点输入框 → 断言焦点在侧栏 + 键入进 query）、
+  `tests/git_unit.php`（同款，断言键入进 commitMsg）。
+- **教训**：**"这个面板的回车/字符我修过了"必须按面板逐个确认** —— A2 修的是 AI 输入框，
+  编辑器与侧栏两个输入框当时都没查。同理，**点出来的输入框要自己聚焦**：
+  父级的 `handleClick` 一旦提前 return，就别指望有人替你 `focus()`。
 
 ---
 
@@ -123,6 +157,76 @@
 - **注**：pty 模式**不走** hScroll（仿真器按面板宽度折行，内容本来就不超宽），选区直接从可见网格取，所以只有 runner 模式（命令输出超长单行）会踩到。
 - **教训**：侧栏/GIT 是「命中列 − 偏移」，编辑器/终端选区是「屏幕列 **+** 偏移」——**同一个 hScroll，两个方向**。改之前先确认这一处是「屏幕 → 文本」还是「文本 → 屏幕」。
 
+#### B11. Markdown 里列表项 / 引用块内的**块级**子节点内容整段丢失 `[本轮]`
+- **现象**：AI 回复里带「列表 + 缩进代码块」或「引用块里放列表/代码」时，**内容凭空消失**——例如
+  `- 步骤一` 下面缩进的 ```php 代码块整块不见；`> - alpha\n> - beta` 只剩一个空的 `│ ` 行。
+  短文本、纯段落看不出来，只有嵌套块级结构才触发。
+- **根因**：`MarkdownFormatter` 的 `BlockQuote` / `renderListItem` 分支一律用
+  `renderInlines($child->children())` 展开子节点，**假设子节点都是行内**。但这两处的子节点是
+  **块级**：围栏/缩进代码的内容在 `getLiteral()`（`children()` 为空），列表/引用的子节点是
+  `ListItem` / 块节点（都不是 `AbstractInline`），于是 `renderInlines` 的 `foreach` 一个分支都
+  不命中 → **静默丢弃**（无任何报错）。
+- **修复**：两处都改为「Paragraph 走行内展开（保留引用正文色等既有语义），其余块级子节点
+  递归 `renderBlock()` 后逐行挂前缀」；列表项的标记前缀/续行对齐语义保持不变；空列表项补标记
+  兜底，避免 `- ` 这种空项在屏幕上消失。
+- **防回归**：`tests/ai_edge_unit.php`（列表内代码块 / 引用内代码块 / 引用内有序与无序列表 /
+  列表内引用 / 列表内标题 / 双层引用，共 7 例 + 既有排版零回归断言）。
+- **教训**：写 AST 渲染器时，**每一层的子节点类型都要先问清是块级还是行内**；块级节点用行内
+  展开器遍历是「静默丢内容」而不是报错，测试必须用嵌套结构样本，纯段落样本测不出来。
+
+#### B12. 极窄面板下前缀把首行撑宽 → 触发 php-tui 折行（幽灵行） `[本轮]`
+- **现象**：AI 面板被布局压到极窄（W < 前缀宽 `You: ` / `AI: ` = 5 列）时，首行 = 前缀 + 至少
+  1 列正文，**远超面板宽**；php-tui 的 `LineTruncator` 超宽会**折行**，把该行之后的整片内容
+  向下挤（即 B1「幽灵行」的同一机制），窄视口下消息流右侧还会出现别处的字符串。
+- **根因**：`pushTextRows()` / `pushMarkdownRows()` 用 `$bodyW = max(1, $W - 前缀宽)` 给正文留量，
+  但**前缀本身从不夹紧**——W 小于前缀宽时 `max(1, 负数)` 兜底成 1，首行宽度恒为「前缀 + 1」。
+- **修复**：前缀先按 `min(前缀宽, max(0, W - 2))` 截断（给正文留 2 列，保证 2 列宽的字素也放得下）
+  再算折行宽度；缩进沿用截断后的宽度，因此所有物理行恒 ≤ W。
+- **防回归**：`tests/ai_edge_unit.php`（W=2/3/4/5/6/8/10/16 下逐行断言行宽 ≤ W，样本含 CJK、
+  Markdown、超长工具调用参数与工具摘要行）。
+- **教训**：`max(1, W - 装饰宽)` 只是「别算出负数」，不等于「装饰本身合法」。**装饰件也要有
+  宽度上界**，否则它在窄屏下直接把行撑爆。
+
+#### B13. Markdown 折行把前缀劈成两半（`AI` / `:` 分处两行） `[本轮]`
+- **现象**：极窄宽度下（实测 W=6）Markdown 消息的首行渲染成「`AI`」独占一行、下一行以「`:`」
+  开头，前缀与正文被搅在一起；顺带首行能放的内容比应有的更少。
+- **根因**：`pushMarkdownRows()` 把前缀当成折行流的**第一个 span** 交给 `spanWrapDisp`，而流宽
+  `flowW = W - 缩进宽` 在前缀宽于它时（`缩进宽 > W/2`）会把前缀**从中间切开**；
+  `pushTextRows()` 一直是「前缀在流外」，两条路径语义不一致。
+- **修复**：统一为「前缀/缩进不进折行流」——正文单独按 `flowW` 折行，首物理行挂前缀、其余行挂
+  等宽缩进。行宽恒 ≤ 缩进 + flowW = W，前缀永远完整，两条路径语义一致。
+- **防回归**：`tests/ai_edge_unit.php`（W=6 极窄下「逐行剥掉 4 列前缀/缩进后拼接 == 逻辑行拼接」，
+  以及超长围栏在 W=40 下的同一不变量）。
+- **教训**：行首装饰（前缀/缩进）与正文应当**分开处理**：装饰进折行流，就等于允许它在任意位置
+  被切断。B9 是「宽度算错」，B13 是「装饰位置算错」，同一个装饰件的两种错法。
+
+---
+
+#### B14. 一次都没选过模型，标题栏/状态栏/空态就声称「正在用 OpenAI/gpt-4o-mini」 `[本轮]`
+- **现象**：全新环境（没按过 `Ctrl+P`/`Ctrl+N`）启动，AI 面板标题是
+  `AI 对话 · OpenAI/gpt-4o-mini`，状态栏是 `AI=OpenAI/gpt-4o-mini`，空态第一行也是
+  `OpenAI / gpt-4o-mini`。用户从没选过，界面却把一个具体的模型说成他的选择。
+- **根因**：展示层拿 `ChatModel::spec() !== null` 当「用户选过模型」的判据，而 `spec()` 在未选时
+  会**兜底到 `defaultId()`**（`ChatModel.php:178`）—— 只要 `config/providers.php` 里有 provider
+  它就恒非 null。设计意图本来就写在字段注释里（`// 空表示还没定，首次用时取默认`），
+  是展示层提前把「默认」当成了「用户的选择」。
+- **修复**：新增 `ChatModel::hasSelection()`，**三处展示**（`App::render()` 的 `$aiTitle`、
+  `StatusBarPanel` 的 `AI=` 段、`AiPanel::helpLines()` 空态）改用它；未选时分别显示
+  「`AI 对话`」「`AI=未选`」「未选模型 · Ctrl+P 选 Provider、Ctrl+N 选模型」。
+  发送路径**不变**：未选时请求仍走默认 provider（那是实现细节，不该当成用户的选择说出来）。
+- **⚠️ 判据必须是 `providerId !== null || model !== null`**，不能只看 `providerId`：`cycleModel()`
+  只写 `$model`、**不写** `$providerId`（它有意保留「Provider 还是默认那个」的语义），
+  所以「从没选过 → 直接按 Ctrl+N」会得到 `providerId=null, model!=null` 这个合法状态。
+- **防回归**：`tests/ai_selection_unit.php`（未选三处都不出现模型名 + `useProvider` 后都出现 +
+  **只 `cycleModel()` 也算已选** + 反面对照）。四条反向注入全部实测可 FAIL：标题判据改回
+  `spec() !== null` / 状态栏判据改回 / `hasSelection()` 只看 `providerId` / 空态去掉未选分支。
+  另外 `tests/pty_provider_caps.php`、`tests/pty_providers.php`、`tests/provider_caps_unit.php`
+  原先都**靠「默认 provider 一定显示」当锚点**，已改为显式选一次再断言。
+- **教训**：**兜底值不是用户的选择**。一个「未设置就用默认」的读取器（`spec()`）天然不能兼任
+  「用户设置过没有」的判据 —— 两者需求相反，硬用会让界面替用户表态。展示层要的是「已知」，
+  就该单独暴露一个「已知性」查询，而不是拿解析结果的非空去近似。
+  同类坑还有：`hasKey()` 也不能当判据（它答的是「能不能用」，不是「选没选」）。
+
 ---
 
 ### C. 集成与外部命令
@@ -155,8 +259,223 @@
 #### D4. 外部上报值（cwd / 文件名 / 分支）夹带控制字符 `[@3ff7e1c]`
 - **现象**：shell 经 OSC 报来的 cwd 若含 `\n` / `\r` / ESC 序列（路径可含任意字节，程序也能伪造 OSC），这些字符**不显示却仍被 `dispWidth` 算作 1 列**，固定宽度的状态栏因此少显内容、文本被莫名截断。
 - **修复**：`DisplayWidth::stripControl()`（字节级剔 `\x00-\x1F\x7F`，不加 `/u`，非法 UTF-8 也不会让 preg 返回 null），在状态栏组装前净化 cwd / 文件名 / 分支名。
-- **注**：php-tui 渲染时会丢弃控制字符，所以**布局不会被 ESC 注入破坏**（实测 `\e[2J` 也不会清屏）—— 这条修的是宽度计算与显示不一致，不是安全漏洞。
+- **注**：本条修的是**宽度计算与显示不一致**（控制字符不显示却占 1 列）。
+  ⚠️ 原文还写过「php-tui 渲染时会丢弃控制字符，所以不是安全漏洞」——**这条结论在 D5 被实测推翻**：
+  php-tui 会把 span 文本逐字写进终端，`ESC]52;…BEL` 能原样到达终端。请勿再据该结论放过净化。
 - **防回归**：`tests/m6_unit.php`（断言状态栏文本不含控制字符、净化后可见文本连续）。
+
+#### D5. AI 回复 / `@文件` / 工具结果里的控制字符原样写进终端（终端转义注入）`[本轮]`
+- **现象**：模型回复（或 `@文件`、工具读到的文件内容）里若含 `ESC ] 52 ; c ; <base64> BEL`，会被
+  **原样写进终端**——xterm 等终端会照做，等于把**系统剪贴板**交给模型输出或一个被读入的文件；
+  同理 `ESC [ 2 J` 可清屏、其它 CSI 可挪光标改颜色。TAB 另有一害：终端按 8 列制表位展开，
+  而 `dispWidth()` 只按 1 列计，两者不一致 → 该行内容错位、被挤到别的行上（实测同一行拆成两行）。
+- **根因**：内容从 `ChatModel` 直接进 `AiPanel` 的 span 文本，中间**没有任何净化**；而 span 文本是
+  逐字写进终端的。D4 当时记过「php-tui 会丢弃控制字符」，本轮**实测不成立**：把净化改成恒等函数后，
+  pty 字节流里能抓到完整的 `ESC]52;c;…BEL`（取证见下）。
+- **修复**：新增 `DisplayWidth::sanitizeContent()`（TAB 先展开为 4 空格，再剔除**除 `\n` 外**的 C0
+  与 `\x7F`），在 `AiPanel::pushTextRows()` / `pushMarkdownRows()`（覆盖全部消息正文、工具调用参数、
+  工具摘要、错误行）与 `inputContent()`（粘贴进来的内容）入口统一净化。Markdown 必须在**解析前**
+  净化（保留 `\n`，块结构不受影响），逻辑行缓存键也基于净化后的文本。
+- **防回归**：headless `tests/ai_edge_unit.php`（span 里无 ESC / TAB / 其它 C0，且正文不丢）；
+  pty `tests/pty_ai_inject.php`（mock 回复里带 OSC 52 载荷与 TAB：累计字节流里既无带 ESC 的 OSC
+  载荷、也无**任何**裸 TAB，同时正文标记仍在）。**反向验证**：把 `sanitizeContent()` 改成恒等函数，
+  该 pty 测试必须 FAIL（实测能抓到 `ESC]52;…BEL`）。
+- **教训**：**凡是外部/模型给的文本进终端，都要过控制字符净化**。`stripControl()`（状态栏外部值，
+  D4）与 `sanitizeContent()`（保留换行的内容，本条）是两个场景的两个工具，不能互相替代；
+  且「框架会帮我们丢掉控制字符」这类假设**必须用 pty 字节流证实**，读代码推断不算数。
+
+#### D6. 每开一次交互终端，`/tmp` 里就永久多一个 `vicetui_rc_*` `[本轮]`
+- **现象**：`/tmp/vicetui_rc_XXXXXXXX` 越积越多（本机一天跑批 + 手工用应用后攒了 33 个），
+  每个 190 字节，内容就是 bash `--rcfile` 用的那段集成脚本（stty + source ~/.bashrc + cwd 上报钩子）。
+- **根因**（两个叠加，缺一不可）：
+  1. `TerminalPanel::pollPty()` 在 shell 退出（Ctrl+D / `exit`）时**直接 `$this->pty = null`**，
+     丢掉实例却不调 `shutdown()` —— 而只有 `PtyProcess::shutdown()` 会 `unlink()` 那个 rc 文件。
+     用户每退一次 shell 就漏一个；`PtyProcess` 也没有 `__destruct` 兜底。
+  2. `PtyProcess::shutdown()` 开头的 `if (!is_resource($this->proc)) { … return; }` **提前返回**时
+     跳过了 rc 文件清理，于是「进程句柄已回收」这条路径也漏。
+- **修复**：`TerminalPanel` 新增 `dropPty()`（**先 `shutdown()` 再置空**），
+  `pollPty()` / `startPty()` 失败分支 / `restoreSession()` 失败分支 / `shutdown()` 四处统一走它；
+  `PtyProcess::shutdown()` 抽出 `cleanupRcFile()`，早退分支**也**调用（幂等）。
+- **防回归**：`tests/pty_interactive.php` `pty_persist.php` `pty_session.php` `pty_alt_screen.php`
+  （断言"运行前后 `/tmp/vicetui_rc_*` 数量不变"）。**反向验证**：不调 `dropPty()`（改回 `= null`）时
+  四个测试各至少新增 1 个残留文件（其中 `pty_alt_screen` +3）。
+- **注**：这条**不会**留下孤儿 shell —— 因为它的触发场景是「shell 自己先退出了」（Ctrl+D / `exit`），
+  漏的只是文件。**「shell 还活着时退出」是另一条路径，会漏一个活着的孤儿 shell**，见 D7。
+  不要把这两条混成一件事：D6 的位置是**正常退出**链路，D7 的位置是**异常退出**链路。
+
+#### D7. 交互 shell 还活着时异常退出 → 留下**活着的孤儿 shell** + rc 临时文件 `[本轮]`
+- **现象**：开着交互终端（shell 活着）时应用异常退出，那个 bash 会**继续活着**（实测每次运行漏 1 个，
+  `Ps` 状态、被 reparent 到 init、一直占着 pty），同时 `/tmp/vicetui_rc_*` 也留下。
+  **它扛得住 SIGTERM**（交互式 bash 忽略 SIGTERM），只有 SIGKILL 能收掉 —— 所以这些孤儿会一直堆着。
+- **根因**：子进程回收只挂在 `Lifecycle::quit()` 的关闭闭包上（`chat/search/terminal->shutdown()`），
+  而**只有正常退出（Ctrl+Q 等）会经过它**。`bin/vicecode.php` 的 `start()` 里那个 finally
+  只做了 `saveConfig()` + `restoreTerminal()`（那是当年修「崩溃后终端废掉」时加的，同样出于
+  「所有退出路径都要覆盖」的考虑，却漏了资源回收）→ 未捕获异常等路径上没人杀 pty 子进程。
+  ⚠️ 曾以为「pty 主端关闭时内核会发 SIGHUP 兜底」——**实测不成立**，bash 照活。
+- **修复**：`App::shutdownResources()`（**幂等**，`$resourcesDown` 闸住：正常路径由 Lifecycle 调、
+  异常路径由 finally 调，只真正回收一次），并把 `bin/vicecode.php` 的 finally 改成
+  `saveConfig()` → `shutdownResources()` → `restoreTerminal()`。
+- **防回归**：`tests/pty_crash.php` 新增场景 B —— 注入的 `throw` 不在启动时抛，而是**等 F2 把 shell
+  起起来之后**（以「`/tmp/vicetui_rc_*` 出现」为 shell 起没起的判据）再抛，然后断言
+  「rc 文件数不增加」+「`bash --rcfile` 进程数不增加」。**反向验证**：摘掉 finally 里的
+  `shutdownResources()` 后两条断言都 FAIL（rc 0→1、孤儿进程 +1）。
+  该用例同时补了正向锚点「shell 真的起来了」，否则阴性断言是空转。
+
+#### D8. 非 tty 的 stdin → 启动即 `PHP Fatal error` + exit 255（顶层 catch 接不住协程异常） `[本轮]`
+- **现象**：`vicecode </dev/null`（或把 stdin 重定向/管道）时，进程喷一屏 PHP 堆栈并以 **255** 退出：
+  `PHP Fatal error: Uncaught RuntimeException: Could not get stty settings in …/SttyRawMode.php:33`。
+- **根因**（两层，缺一不可）：
+  1. php-tui 取 raw mode 靠 `stty -g` 探测，**非 tty 时 stty 必然失败** →
+     `vendor/php-tui/term/src/RawMode/SttyRawMode.php:33` 抛 `RuntimeException`；
+  2. `bin/vicecode.php` 顶层的 `catch (Throwable)` **挂在 `Swoole\Coroutine\run()` 外面**，
+     而 **`run()` 内部抛出的异常不会传播给调用者**（实测：外层 catch 形同虚设，异常直接变成
+     `PHP Fatal error: Uncaught`，`reportFatal` 的人话提示根本没机会跑）。
+- **修复**（三处，各管一段）：
+  1. **非 tty 前置守卫**（`start()` 之前、协程之外）：`stream_isatty(STDIN)` 为假时经 `reportFatal()`
+     给「需要交互式终端：stdin 不是 TTY」并 exit 1 —— 发生在**任何终端操作之前**（不进
+     alternate screen、不跑 stty）；
+  2. **try/catch 挪进协程闭包内部**：协程内捕获 → `$fatal` 带出 → 协程外统一 `reportFatal()`。
+     于是**任何**启动/运行期异常都是一行人话 + exit 1，而不是 PHP Fatal 堆栈；
+  3. ⚠️ 只做 2 会让进程**挂住**：`Coroutine\run()` 必须等容器内**所有**子协程结束才返回，
+     而读键协程还挂在 `while (!$app->quit)` 里 → 异常永远报告不出去。故在 `start()` 的 `catch` 里
+     补 `$app->quit = true;` 再上抛（实测 `pty_crash` 场景 B 的退出码由 **-1** 变 **1**）。
+- **防回归**：新增 `tests/pty_notty.php`（两个底座分支 × 6 条：恰为 1 退出 / 人话提示 /
+  不喷 `Fatal error`·`Uncaught`·`Stack trace` / 不进 alternate screen），并把 `tests/pty_crash.php`
+  两处断言收紧为「**恰为 1**」+「不含 Fatal/Uncaught」。
+- **反向验证**（三组注入，均实测）：① 摘掉非 tty 守卫 → 只红「说清是交互式终端」1 条
+  （其余仍绿：协程内 catch 兜住了 stty 异常，只是提示不针对该场景）；
+  ② 把 catch 换回 `run()` 外面 → 场景 A 红 3 条（实测 exit 255 + 打出 `Uncaught`）；
+  ③ 去掉异常路径的 `$app->quit = true` → 场景 B 红 2 条（实测 -1：进程挂住到被 SIGKILL）。
+- **注**：非 tty 的 stdin 在本项目里**从来没被覆盖过** —— 所有跑 `bin/vicecode.php` 的测试都用
+  `['pty']` 描述符（stdin 是 tty）。所以这条 bug 是在 pty 测试全绿的情况下长期存活的。
+- **同轮澄清的一件"不是 bug"**：`bin/vicecode.php` 读键处那个 `fread() === '' → EOF → break` 分支，
+  原是候选 ⑤「终端关闭会挂住」的修复点，**实测证伪**：pty 主端关闭后 `waitEvent` **永远返回 false**
+  （60/60 轮纯超时）、`stream_select` 报 0、`feof`/`meta.eof` 恒 false、非阻塞 `fread` 返回空串
+  （与 EAGAIN 不可区分）、**连阻塞 `fread` 都永久挂住** → 该分支实为**死代码**；
+  而**真实**终端关闭（`pty.fork()` 带 controlling terminal）内核直接 **SIGHUP 终止**进程，不会挂住。
+  （顺带实测到一条**真的**泄漏：SIGHUP 不执行 finally，交互 shell 开着时关终端会残留
+  `/tmp/vicetui_rc_*` —— 见下条 D9。）
+  - 取证探针（不参与跑批）：`tests/probe_pty_eof.php`（pty 对端消失各信号对比）、
+    `tests/probe_pty_sighup.py`（真 controlling terminal + SIGHUP；需 python3 —— PHP 没有
+    setsid/TIOCSCTTY 入口）。
+
+#### D9. 终端关闭（SIGHUP）→ 交互 shell 的 rc 临时文件永久残留 `[本轮]`
+- **现象**：开着交互终端（F2 起了 shell）时关掉终端窗口，`/tmp/vicetui_rc_*` 每关一次 **+1**
+  （实测 0 → 1）。此时**没有**孤儿 shell —— 交互 bash 与应用同进程组，被内核的 SIGHUP 一起收走。
+- **根因**：rc 临时文件只在「应用正常退出」与「走 `start()` 的 finally」时被删（D6/D7 修的正是这两条），
+  而**终端关闭是内核直接发 SIGHUP 终止进程**，`finally` 不执行 → 没人删。SIGKILL 同理。
+  这是 D6/D7 之后的**第三条退出路径：信号终止**。
+- **修复（换思路：不再枚举退出路径）**：让 **bash 读完 rc 就自删** ——
+  `PtyProcess::buildIntegrationRc()` 在 rc 的**最后一行**追加 `command rm -f -- <自身路径>`。
+  文件寿命因此只剩毫秒级，之后**任何**退出路径（正常 / 异常 / SIGHUP / SIGKILL / 掉电）都不可能残留，
+  也就不必再去补第三条、第四条路径。
+  - **为何安全**：`unlink` 只摘掉目录项，bash 此时**已持有该 fd**，仍能继续读到 EOF；且这行是最后一行，
+    执行到它时后面已无内容。实测（pty.fork + 手写 rc）：bash 照常起、提示符正常、命令正常执行。
+  - `PtyProcess::cleanupRcFile()` 保留作兜底（bash 没起来 / `proc_open` 失败时仍由应用侧删）。
+- **判据变化的连锁**：rc 文件只在毫秒级窗口内存在 → **不能再拿「rc 文件出现」当「shell 起来了」的证据**
+  （30ms 轮询会偶发看不到）。`tests/pty_crash.php` 场景 B 的 shell 启动判据已改为
+  「`bash --rcfile` **进程数**增加」；其余测试的「rc 数量不增加」断言仍然成立（而且更强）。
+- **防回归**：新增 `tests/pty_rc_cleanup.php` —— 真实 pty 起 shell → 断言 rc 已自删 →
+  发 SIGHUP → 断言仍不残留；带两条正向锚点（应用起来了 / shell 起来了 / SIGHUP 真的送到了），
+  并自行清理它制造的那条孤儿 bash（真实场景由内核一起收走，本用例只给应用发信号）。
+  **反向验证**：把自删行注释掉 → 两条核心断言都 FAIL（`vicetui_rc_*：0 → 1`），正是用户报的现象。
+
+#### D10. **不可捕获的致命错误**下终端不还原 → 鼠标上报灌进用户的 shell `[本轮]`
+- **现象**（用户实测上报）：跑完 `php bin/vicecode.php <大目录>` 后回到 shell，**每动一下鼠标**
+  就有一串 `35;57;39M35;57;38M…` 被 shell 当命令读，刷出成片的 `-bash: 35: command not found`。
+  用户的第一反应是「OOM 了么？」
+- **先证伪 OOM**（结论：不是 OOM，三条独立证据）：
+  1. `dmesg` 里 OOM-kill 记录 **0 条**（内核没杀过进程）；
+  2. 用那个目录（626MB / 18854 个文件）启动并退出，**峰值 RSS 仅 43.8 MB**，
+     而 `memory_limit=2048M`，差 46 倍；
+  3. 连续渲染 4000 帧，`gc_status()` 显示自动 GC 正常触发（runs 0→4），
+     内存**锯齿波动、峰值稳定在 7.6 MB**，不增长。
+     附带纠正一个中途的误判：单看 `memory_get_usage()` 会得到「每帧 +3232 字节」，
+     但那 1200 个循环 `gc_collect_cycles()` 一收就回到起点以下 —— 是**可回收的循环垃圾**，
+     不是泄漏。**判内存问题必须看自动 GC 下的长跑曲线，不能只看累计差值。**
+- **根因**：`bin/vicecode.php` 的终端还原（离开备用屏 / 关鼠标 / 显示光标）**只挂在
+  `start()` 的 `finally`** 上。而 PHP 的**致命错误**（`E_ERROR` / `E_PARSE` /
+  `E_CORE_ERROR` / `E_COMPILE_ERROR` / `E_USER_ERROR` / 内存耗尽）**不执行 `finally`**。
+  实测（两行脚本即可复现）：内存耗尽与未捕获 `Error` 下 `finally` 都不跑，
+  而 `register_shutdown_function` **都跑**。
+  于是进程一死于致命错误，终端就留在 raw mode + alternate screen + **鼠标上报开着**；
+  备用屏还开着并不妨碍 bash 打印提示符，所以用户看到的是「正常提示符 + 鼠标乱码」。
+  （`ESC [ <` 被终端当控制序列吃掉，只剩 `b;x;yM` 的数字部分显示出来 —— 这就是那串乱码的真身。）
+- **修复**：把收尾（落盘偏好 + 回收资源 + 还原终端）抽成**一份**闭包，`Shutdown::register()`
+  注册进去，由 `finally` 与顶层 `register_shutdown_function` **两条路径共用**，
+  `Shutdown::run()` 幂等（第二次直接返回）—— 幂等这条必须守住，否则就是 D3 重演（还原序列发两遍）。
+  - **注册时机比想象中要紧**：第一版把注册放在 `$term->flush()` 之后，结果场景 C 直接红 ——
+    「raw mode 已生效、收尾还没挂上」那个窗口里的致命错误依然留烂摊子。
+    改为**在 `enableRawMode()` 之前注册**，并用 `$terminalTouched` 标志精确界定「有没有东西要还原」
+    （未动过终端时退出不需要还原，`disableRawMode()` 也不该去还原一份没改过的 stty 设置）。
+  - 顺手补上**致命错误落盘**（`<配置目录>/.vicecode_fatal.log`）+ 一句自救提示
+    （`reset` / `stty sane`）：还原终端只能止血，用户还得知道"为什么死"。
+    原先那行 `PHP Fatal error:` 打在 alternate screen 上，一还原就被冲掉 ——
+    用户报这个 bug 时，正是因为没有这行日志，只能看到终端乱掉。
+- **防回归**：`tests/pty_crash.php` **场景 C**（注入 `E_USER_ERROR`，与内存耗尽同类：
+  都不可被 try/catch 捕获、都不走 finally）断言致命错误后**仍**发出
+  `?1049l` / `?1000l` / `?25h`，并且**只发一次**，以及日志落盘 + 自救提示。
+  三条**反向注入**都实测可 FAIL 并入账：
+  ① 去掉落盘 → 日志断言红；② 让还原在 finally 里再发一遍 → 「只发一次」断言红（实际 2 次）；
+  ③ 拿掉 shutdown 兜底 → 场景 C 三条还原断言全红（实际 0 次）。
+- **教训**：**`finally` ≠ "所有退出路径"**。PHP 里这是三类性质不同的退出：
+  正常返回 / 可捕获异常（`finally` 管）、致命错误（只有 shutdown 函数管）、
+  **信号终止**（SIGTERM/SIGHUP 需装信号处理器，**SIGKILL 谁都管不了**）。
+  本项目已经在 D6→D7→D9→D10 上连着踩了四次「又发现一条没枚举到的退出路径」，
+  所以判据应当是「**这条路径能不能被覆盖**」而不是「我已经枚举完了几条」。
+
+#### D11. 信号终止（SIGTERM/SIGHUP/SIGINT）→ 终端不还原**且**没有任何日志 `[本轮]`
+- **现象**：与 D10 的表象完全一样（终端留在 raw + 备用屏 + 鼠标上报，用户回到 shell
+  后看到 `-bash: 35: command not found`），但比 D10 更糟：**连日志都没有**，
+  所以事后完全查不出「发生过」。
+- **根因**：D10 修的是「致命错误不执行 `finally`」，靠 `register_shutdown_function` 兜底 ——
+  可**信号根本不走 shutdown function**。没有装 handler 时，信号的默认动作是
+  「进程立即终止」：既不执行 shutdown function、也不走 finally；而
+  `error_get_last()` 是 null（**信号不是 error**）→ 连日志分支都进不去。
+  实测（`tests/probe_signals.php`，现已升格为 `tests/pty_signals.php`）：
+  SIGTERM / SIGHUP / SIGINT 三种信号下，`?1000l` / `?1049l` / `?25h` **一条都不发**、日志**不写**。
+- **修复**：
+  1. `Shutdown::installSignalHandlers()` 装 SIGTERM / SIGHUP / SIGINT，**在终端被改动之前**调用
+     （保证「刚进 raw mode 就被 kill」也覆盖得到）。handler 里做与其它路径同一份收尾
+     （`Shutdown::run()`，幂等），写一行「被信号终止：SIGTERM（终端已还原）」进日志，
+     再让进程按信号终止。
+  2. **⚠️ handler 里绝不能写 `exit(128 + $sig)`**：协程内 Swoole 会把 `exit()` 转成
+     `Swoole\ExitException`，被顶层 `catch (Throwable)` 接住后走 `reportFatal` → **退出码变成 1**、
+     还多打一句「异常退出：swoole exit」（实测）；非协程内它也不是「被信号终止」，
+     只是「正常退出、码为 128+n」。正解是**恢复默认处置 + 重发信号**
+     （`pcntl_signal($sig, SIG_DFL); posix_kill(getmypid(), $sig);` 然后**直接返回**）：
+     handler 执行期间该信号被内核屏蔽，重发的那个在 handler 返回后**立刻**投递，
+     进程遂按默认处置终止 —— 实测两种底座都得到 `signaled=true, termsig=15/1/2`。
+     不重发则默认动作被吞掉，进程会变得**杀不死**。
+  3. 用 **pcntl**（而非 `Swoole\Process::signal`）：pcntl + `pcntl_async_signals(true)`
+     在两种底座下行为一致，且信号一到就能分发，不依赖事件循环正在跑。
+     没有 pcntl 的构建直接跳过（该类死亡无覆盖，但不引入新行为）。
+  4. 补**「本次会话还活着」标记**（`<配置目录>/.vicecode_alive`）：启动时写、
+     **只有正常退出**才删；下次启动发现残留就写一条 WARN 日志并在状态栏提示。
+     它覆盖的是**连信号 handler 都够不到**的那类死亡 —— **SIGKILL、段错误**：
+     进程没有任何机会执行代码，标记是唯一能证明「上次是异常结束」的东西。
+     - 标记里带 pid 并做存活检查：否则同时开两个 ViceCode 时，先启动那个的**正常**退出
+       会被误报成「上次异常结束」。
+     - 只在 `start()` 正常返回之后 `clearAlive()`（异常路径在上面的 `catch` 里已上抛，
+       走不到那一行）—— 用控制流本身区分正常/异常，不额外传标志。
+- **防回归**：`tests/pty_signals.php`（真实 pty）。三个信号各自断言
+  还原三连 + 日志记到信号名 + `signaled=true, termsig=对应信号` + 存活标记残留；
+  另加**非 Swoole 底座**（`TUI_USE_SWOOLE=0`）的 SIGTERM 一例（两种底座退出路径不同，
+  历史上各自出过不一样的问题）；再加「残留标记 → 下次启动写 WARN」。
+  **反面对照**必须有：正常退出（Ctrl+Q）断言退出码 0、存活标记**被清掉**、不产生日志 ——
+  少了它，「标记残留」那几条断言可能只是恒真。
+  四条**反向注入**都实测可 FAIL：① 不装 handler → 三个信号的还原断言全红；
+  ② 正常退出不清标记 → 反面对照红；③ 启动不写标记 → 「标记残留」三条红；
+  ④ `staleAlive()` 恒返回 null → WARN 断言红。
+- **教训**：**「验证方式本身」也会骗人**。至少三次栽在测试自己身上：
+  ① 发完信号**立刻**读 `proc_get_status()`，`?1049l` 是在 handler 里"还原之后、重发之前"
+     打出来的，此刻进程还活着 → 被我们 SIGKILL，`termsig` 永远是 9；
+  ② 在读循环里取过一次状态、循环外**又取一次** —— PHP 的语义是「首次报告未运行的那次调用
+     带正确 exitcode，之后再调得到 -1」，于是 `signaled` 恒为 false（**我自己的调试脚本**
+     就踩了这个，差点据此得出"非协程底座不生效"的错误结论）；
+  ③ `?1049h` 一出现就发按键：此后应用还要建 Display / 起读键协程，期间的 termios 变更
+     会把 pty 待读输入冲掉 → **丢键**（表现为 Ctrl+Q 无反应、只能 SIGKILL，看起来像产品 bug）。
+  共同点：**先把观测手段验证一遍，再拿它下结论。**
 
 ---
 
@@ -181,6 +500,16 @@
 - **修复**：段结构新增可选 `pfix`（不参与截断的标签前缀，如 `目录=`）与可截断的 `t`（值本身）。塞不下时 `truncateValue()` 按剩余空间截成 `目录=…/尾部`（`DisplayWidth::mbTailDisp()` 取尾部、保留字素边界）；只有剩余宽度 < `MIN_TRUNC`(12) 时才整段丢弃。
 - **防回归**：`tests/m6_unit.php`「长值截断 + 外部值净化」段（超长 cwd 不被 dropped、保留尾部、不超宽；40 列时仍整段丢弃）。
 - **注意**：`join()` 必须拼 `pfix . t`，且 **t 为空时段整体跳过** —— 否则「非终端焦点」时会露出一个空的 `目录=`。
+
+#### E4. GIT「Commit ▾」的三角**点了没反应** `[本轮]`
+- **现象**：点 GIT 面板里 `Commit ▾` 按钮**右边那个三角**，下拉菜单不弹；点按钮主体却是正常的（提交/提示「提交信息为空」）。用户报的就是这个。
+- **根因**：**渲染与命中判定各算了一遍位置，而且算法不同**。
+  - 渲染：`mbPadDisp(' Commit ' . $arrow, $innerW)` —— `' Commit '` 是 8 列，所以 `▾` 画在 **inner 第 8 列**（绝对 `innerX + 8`）。
+  - 命中：`commitArrowX = $innerX + max(0, $innerW - 1)` —— 写成了**面板最右一列**。
+  - 两者差了大半个面板宽度；点屏幕上真正的 ▾ 永远不满足 `$col >= commitArrowX - 1`，于是落进 `else` 分支去 `commit()`。
+- **修复**：把按钮文案提成常量 `GIT_COMMIT_LABEL = ' Commit '`，**渲染与命中判定共用**它算列（`commitArrowX = innerX + dispWidth(GIT_COMMIT_LABEL)`，并按 `innerW` 夹紧）。同类漂移在同一个方法里已经有一处正确示范（标题行 `+ -` 的列就是从 `innerW` 反推、与渲染一致），这次只是把按钮这处也对齐。
+- **防回归**：`tests/git_unit.php` —— 断言改成**从渲染帧逐格量出 `▾` 的列**再点。这一步是关键：原先测试是**照抄产品代码那条错公式**（`innerX + innerW - 1`）算列的，于是「代码以为 ▾ 在最右」与「测试也在最右点」两边一致地错、测试一直绿。**测试与实现共用同一个假设时，测试就没有独立价值了。**
+- **教训**：凡是「画在一处、点判定在另一处」的坐标，必须**共用同一份几何**（本项目里 `gitRects()` / `PickerOverlay::geometry()` 就是为此存在）；测试则要**从渲染结果反推**坐标，而不是复述公式。
 
 ---
 
@@ -276,6 +605,163 @@
 - **为何长期没发现**：全量跑批一直显示"全绿"，没人会怀疑某个测试**根本没能力失败**。
 - **如何防扩散**：已做「强制失败注入」校验 —— 按每个测试各自的失败变量名（`$failed` / `$ok` / `$totalFailed` / `$hasClock`）注入必失败值，确认退出码非 0。**新增测试后应复跑此校验。**
 
+#### T2. 51 个测试的配置不隔离：串档 + 依赖开发机家目录 `[本轮]`
+- **现象一（串档）**：测试用 `tempnam(sys_get_temp_dir(), …)` 或 `sys_get_temp_dir().'/x.json'` 当
+  `VICECODE_CONFIG`。存档路径是 `dirname(VICECODE_CONFIG)/.vicecode_ai`，而这两种写法的 `dirname()`
+  都落在 `/tmp` 根 → 全体测试**共用 `/tmp/.vicecode_ai`**。`aiPersist` 默认开启、`App` 构造末尾会
+  `ChatModel::restore()`，于是后跑的测试**恢复了前一个测试的对话**（「空态不是空的」、断言行号整体
+  平移），且随跑批顺序偶发。**25 个测试**中招。
+- **现象二（依赖开发机家目录）**：另有一批测试建了 `App` 却**完全不设** `VICECODE_CONFIG`，
+  `ConfigStore` 回落到真实 `~/.vicerc`，插件配置回落到 `~/.vicecode.plugins.json`。
+  **测定手法**：不动真实 home，用 `HOME=<毒化目录>` 跑对照组（毒化 home 放一份非默认布局+其它主题
+  语言的 `~/.vicerc` 与一份带 tool_calls 的 `~/.vicecode_ai`，另跑空 home 作 CONTROL）。
+  结果：CONTROL 25/25 全过，POISON **挂 6 个** ——
+  `m6_unit`（主题环起点）、`menu_dropdown`（菜单标签）、`pty_git`（GIT tab 全挂）、
+  `ai_hscroll`（折行宽 430≠500）、`sidebar_hscroll`（折叠命中列）、`m1_edge`（翻页边界）。
+  即这些断言**只在本机配置下成立**。本机 `~/.vicerc` 本来就是 `aiInputHeight=8`（默认 5）、
+  `sidebarWidth=30`，所以这层依赖**早就在生效**，只是差异还没大到把断言顶翻。
+- **修复**：新增 `tests/lib/isolation.php`：
+  `vc_isolate_config('tag')`（独占目录，**同时**隔离 `VICECODE_CONFIG` 与 `VICECODE_PLUGINS_CONFIG`，
+  shutdown 自动清理；pty 用例把返回路径塞进子进程 env，父子同源）、
+  `vc_tmp_file()` / `vc_tmp_dir()`（替代裸 `tempnam`，退出时自动删）。
+  51 个测试改用它，**41 处 `tempnam` 全部收编**。
+- **同一轮挖出的两个次生缺陷**：`pty_ai_v2` 手写的清理只 `rmdir` 空的 `src/`（目录非空 → 静默失败，
+  目录连同存档永久留下）；`command_palette_unit` 的 `/tmp/vc_palette_<pid>` 压根没有清理。
+- **探针纪律**：`glob("$dir/*")` **不匹配点号开头的文件**，头一版清理器因此一个文件都没删掉、
+  `rmdir` 静默失败，跑批后 `/tmp` 留了 15 个残留目录 —— **清理/遍历这类"看不到报错"的收尾动作，
+  必须跑完用 `ls` 实地确认**。
+- **防回归**：毒化 HOME 复跑 POISON **归零**（天然的"反向可失败"证据）；跑批后
+  `/tmp` 零残留、无 `/tmp/.vicerc`/`.vicecode_ai`/`.vicecode_session`/`.vicecode.plugins.json`。
+
+#### T3. `pty_search` 三连：假阴性 + 僵尸断言 + 假阳性 `[本轮]`
+- **复现**：连续跑全量批，第 2 轮抓到（此前约 5 轮里挂 2 轮；`run_tests.sh` 只给退出码，
+  失败详情里能看出挂在哪条）：
+  ```
+  [OK]   SEARCH tab 显示输入占位提示
+  [FAIL] 键入进搜索框（捕获关键词 MARKER）      ← 假阴性
+  [OK]   R2：搜索结果在真实终端中出现              ← 却是"假过"
+  [OK]   R2：有命中时不显示「无匹配结果」           ← 恒真（没测到任何东西）
+  ```
+- **三个独立的毛病**（都在同一个用例里，性质完全不同）：
+  1. **假阴性**：「键入进搜索框」用 `waitForAny(..., 3000)` 断言 3s 内出现，而同一批里
+     搜索本身是成功的 —— 只是**负载高时应用慢半拍**才把那一行渲染出来。窗口短不是"更严格"，
+     是更脆。改成 8s 条件等待，且断言落在**重建后的最终帧**上。
+  2. **僵尸断言**：本用例**没设 `APP_LOCALE`**、界面是默认 `zh_CN`，而「不显示无匹配结果」
+     查的是英文 `nomatches`/`noresults` —— **那串英文永远不可能出现，断言恒为真**。
+     实测证明：把状态行注入成恒定「无匹配结果」后，这条英文断言照样 PASS。
+  3. **假阳性**：「结果出现」查 `zzuniquemarker`，而**输入框里就有这个词** —— 就算搜索一行
+     结果都没渲染，断言也会过。实测证明：注入「结果列表不渲染」后，旧的 `zzuniquemarker`
+     断言会 PASS。改成只可能来自结果列表的**命中行内容**（`// ZZUNIQUEMARKER_LINE`
+     归一化后 `zzuniquemarkerline`，比查询词多一个 `line`），并另加一条「命中统计可见」辅证。
+- **正确的断言姿势**（三条一起改）：一切断言都建在**重放后的最终帧**上
+  （`tests/lib/pty_screen.php`），而不是累积流 —— 差分渲染只重发变化格、同一行还会被拆成多次
+  「定位+写入」，中间任何一帧渲染过的东西都永久留在累积流里，**阴性断言**尤其会被它污染。
+  同时在切换 tab 之后加 `waitQuiet()`（等解析器安静）再键入，避免新字节与上一步半截 SGR 序列抢解析。
+- **注入验证**（三条断言各自的牙齿都验过）：
+  | 注入 | 预期 | 实测 |
+  | --- | --- | --- |
+  | A. 「搜索中」那一帧也渲染「无匹配结果」（中间帧污染） | 新写法不受影响 | 5 条断言**全绿**；把阴性断言临时改回**累积流**风格 → **FAIL**（证明必须用最终帧） |
+  | B. 最终状态错（有命中却渲染「无匹配结果」） | 阴性断言必须 FAIL | 新断言 **FAIL**；同一状态旧**英文**断言 **PASS**（僵尸实证） |
+  | C. 结果列表不渲染 | 命中行锚点必须 FAIL | **FAIL**（`命中行=无 统计=有`）；旧的 `zzuniquemarker` 断言会 PASS（假阳性实证） |
+- **教训**：**阴性断言要问三件事** —— ①它断言的是"最终状态"还是"历史流"？②那个串在当前语言包下
+  真的会出现吗（本用例默认 zh_CN，却写了英文串）？③有没有别的地方也带着这个串（输入框/状态栏消息
+  都能让"结果出现"假过）。三问任一没答，断言就可能永远绿着。
+- **同类第二例（`pty_m6`，同一轮发现）**：它断言「滚到底后 AI 分组的 Ctrl+P / Ctrl+N 进入视口」，
+  用的是**差分累积流** —— 差分流只重发变化格，滚到底时 `ctrlp` 那几格恰好没被重发 → 假失败。
+  重建最终帧的实测数据完全相反：默认视口帧 `ctrlp=0,ctrln=0`、滚到底帧 `ctrlp=1,ctrln=1,ctrlr=1`。
+  改为对重建帧断言后通过，并顺手加了「滚到底能看到新增的 Ctrl+R」。
+  同一条纪律：**判"屏上有什么"一律重建最终帧**；且**段名是本地化的**（zh 下是「焦点=」而不是
+  `focus`），锚点要挑与语言无关的（值里的标识符 `AI_INPUT`、或 app 标题 `ViceCode`）。
+
+#### T4. `pty_crash.php` 场景 A 的断言查了一个**恒为空串**的变量 `[本轮]`
+- **现象**（D8 修复时才暴露）：场景 A 的「异常被顶层捕获并报错」写作
+  `str_contains($err, 'crash injected') || str_contains($out, 'Uncaught')`，
+  而 `runInPty()` 的第 3 个返回值**恒为 `''`**（`return [$code, $out . $err, ''];`）
+  → 前半段永假，这条断言其实一直靠 `$out` 里含 `"Uncaught"` 才「通过」。
+- **为什么长期没暴露**：D8 之前 Swoole 分支的异常确实是 `PHP Fatal error: Uncaught …`，
+  `"Uncaught"` 稳定出现 —— 断言用**框架的报错字样**蒙对了。D8 把提示改成人话（`reportFatal`）后
+  `"Uncaught"` 不再出现，假断言立刻变红。
+- **修复**：`runInPty()` 第 3 个返回值改回 `$err` 本身；断言只读 `$out`（stdout+stderr 并集）并改查
+  `crash injected`，另加「不含 `Fatal error`/`Uncaught`」「exit **恰为 1**」两条。
+- **教训**：断言里出现**框架/上游的报错字样**（`Uncaught` / `Fatal error`）是危险信号 ——
+  它测的是「谁报的错」而不是「错误有没有被我们处理」；提示文案一改，断言就失去意义。
+  另外：**`[$a, $b, $c] = f()` 里那个从没被赋过真实值的变量，要当场追一下**（本例是返回值恒空串）。
+
+#### T5. 菜单脚本项一直显示字面量 `策略：{label}`（闭包少声明参数，PHP 静默丢弃实参）`[本轮]`
+- **现象**：配了 `@strategies` 后，菜单「AI」组里的策略项文案是 `策略：{label}`，占位符**从未被替换**。
+- **根因**：`MenuBarPanel::definitions()` 里的翻译闭包写作 `$t = fn(string $k): string => $this->shell->t($k);`
+  —— **只声明了一个参数**。PHP 对"多传的实参"**不报错也不警告**（用户态函数的额外实参只是被忽略），
+  于是 `$t('ai.strategy_item', ['label' => $st->label])` 的 `['label' => …]` 被静默丢掉，
+  `Translator::t()` 拿到的 `$params` 为空 → 原样返回含 `{label}` 的模板。
+- **为什么长期没暴露**：这条路径只有**配了 `@strategies` 的菜单文案**会走到；`strategy_unit` /
+  `kind_route_unit` 只断言菜单项的 `action`（`ai.strategy:<name>`），从不看 `label`。
+  即"断言挑了一个不会带上这个 bug 的字段"。
+- **修复**：闭包改为 `fn(string $k, array $params = []): string => $this->shell->t($k, $params);`。
+- **防回归**：`tests/route_offpeak_unit.php` 的菜单段新增两条断言——菜单项 label 里**必须有策略名**、
+  且**不得残留 `{label}`**。两条都用注入验证过可失败（把闭包参数改回去即双红）。
+- **教训**：本项目里 `$t(...)` 的写法有两种（`App::t(string, array)` 与各处只收 key 的闭包）。
+  **凡是给同一个模板传了参数，就要回头确认那个闭包收不收 `$params`** —— 这类"多传参数被吞"
+  的 bug 没有报错、没有日志，只有把**渲染结果**拿来断言才抓得到。
+
+#### T6. 上下文压缩的摘要请求是**空请求**：没带历史、也没带指令，会静默覆盖真实历史 `[本轮]`
+- **现象**（推断 → 证伪 → 修）：超阈值自动压缩或手动 `compactNow` 之后，历史被一条
+  `[历史摘要] …` 顶掉，但那条"摘要"与旧对话**毫无关系**。真实端点上表现为**静默的数据损失**。
+- **根因**：`ChatModel::beginCompact()` 把历史挪进 `$preCompact` 后执行 `$this->messages = []`，
+  随即 `startRequest()` —— 而 `startRequest()`（`:710`）只做一件事：追加
+  `['role' => 'assistant', 'content' => '']`。于是发出去的请求体是
+  `{"model":"…","stream":true,"messages":[{"role":"assistant","content":""}]}`：
+  **既没有旧历史，也没有"请总结"的指令**。`beginCompact()` 的注释写着"当前历史换成『摘要指令』
+  单条消息"，但那条指令**从未被构造过**（全文搜索 `总结`/`Summarize` 无命中）。
+  真实端点上这等于让模型**续写一个空的 assistant 消息**，续写文本被 `finishCompact()` 当成摘要
+  写入 `[历史摘要] …`，`$preCompact` 随后被丢弃。
+- **为什么长期没暴露**：mock 端点的 `MOCK_SUMMARY=1` **无条件**回固定文案（`examples/sse_server.php:145`），
+  **完全不看请求体**；`tests/ai_compact_unit.php:135` 只断言回复里含 `摘要：`。
+  即"假数据源不看输入，于是任何输入都能通过"。
+- **证伪证据**（探针记请求体，不是读代码推断）：压缩请求的 `messages` 条数 = **1**，
+  唯一一条是 `role=assistant, content=""`。修复后同一探针显示压缩请求是 `role=user`、
+  正文含旧历史特征串与指令。
+- **修复**：`beginCompact()` 构造真正的单条 user 消息 —— 指令（i18n `ai.compact_instruction`）
+  + 旧历史文本化（新类 `ConversationTranscript::render()`，纯静态函数、可直测）。
+- **防回归**：新增断言**必须看请求体**（mock 现在也按输入判断），而不是只看回复文案 ——
+  否则假数据源不看输入的坑会原样复现。
+- **教训**：**"假数据源不看输入"会让整条链路的断言失去意义**。凡是断言"模型收到了什么"，
+  就必须让假端点**依赖输入**，或（更好）直接断言**发出去的请求体**。
+
+#### T7. 压缩摘要请求带着完整的 tools 定义（纯文本任务却给了模型调工具的机会）`[本轮]`
+- **现象**（写 Anthropic 端到端时对请求体做断言才看见）：摘要请求的 `tools` 键非空（实测 2 个，
+  与普通对话请求完全一样）。摘要是一段纯文本，带工具定义既是白烧 token，又给了模型
+  「回一个 `tool_use` 当摘要」的机会 —— 那个 `tool_use` 会被 `finishCompact()` 当成摘要写进
+  `[历史摘要] …`，然后 `$preCompact` 被丢弃，后果与 T6 同级。
+- **根因**：`ChatModel::startRequest()` 里 `$tools = $spec->supportsTools() ? AiTools::toolDefs() : null;`
+  —— 只看**模型能力**，不看**这次请求是不是摘要**。`beginCompact()` 虽然置了 `$this->compacting = true`，
+  但这个标志在 `startRequest()` 里从未被读过。
+- **为什么长期没暴露**：T6 的探针只看 `messages` 条数与内容，从不看还有哪些键；
+  旧 mock 的 `MOCK_SUMMARY` 也不看 `tools` 有没有——又一个"断言挑了个看不到这个 bug 的字段"。
+- **修复**：`$tools = (!$this->compacting && $spec->supportsTools()) ? … : null;`。
+- **防回归**：`tests/anthropic_e2e_unit.php` 第 3 节断言摘要请求 `!array_key_exists('tools', $body)`。
+  反向注入（去掉 `!$this->compacting`）已验证该断言会 FAIL。
+- **教训**：**同一段"组请求"的代码被两种语义共用时（对话 vs 摘要），要逐字段问"这个字段对这次请求成立吗"**，
+  而不是只看"模型支持不支持"。
+
+#### T8. 尾部空 assistant 占位符被当成真实内容发出去（Anthropic 下会 400）`[本轮]`
+- **现象**（推断）：Anthropic provider 原样保留内部占位符后，请求以
+  `{"role":"assistant","content":""}` 结尾。Anthropic 的 `text` 块**最小长度是 1**，
+  真实端点上极可能直接 400；即便被接受，也把一个纯内部实现细节泄露到了协议层。
+- **根因**：`ChatModel::startRequest()` 每次都在末尾追加 `['role'=>'assistant','content'=>'']`
+  （好让流式 delta 有地方落，这是**内部约定**）。OpenAI 兼容端点对"尾部预填充 assistant"是宽容的
+  （既有实现一直这么发、没出过问题），于是这个约定被当成了协议的一部分。协议转换时（`toMessages`）
+  没有把它识别为占位符。
+- **为什么长期没暴露**：OpenAI 路径宽容 → 一直绿；mock 端点也不校验"末尾 assistant 是否为空"。
+  即**上游的宽容掩盖了协议层的不干净**。
+- **修复**：`AnthropicProvider::toMessages()` 丢掉「`role=assistant` 且 `content === ''` 且**没有
+  `tool_calls`**」的消息；丢掉后请求正好以 user 结尾（官方期望的"生成下一轮"形状）。
+  **带 `tool_calls` 的空 assistant 不算占位符**，必须保留（否则 `tool_use`/`tool_result` 成对约束被破）。
+- **防回归**：`tests/anthropic_unit.php` 三条断言 —— 空占位符被丢 + 请求以 user 结尾 +
+  wire 上没有空 `content`；另有两条**反面对照**（带 tool_calls 的空 assistant 保留、
+  有正文的 assistant 保留）。
+- **教训**：**"上游宽容"不等于"我们发对了"**。换协议时要重新审一遍**每一处内部约定**
+  （占位符、私有键、空值），它们往往没写在任何接口文档里，只在原实现的容忍范围内活着。
+
 ## 四、已知 vendor 补丁
 
 ### `php-tui/term` — `EventParser::advance()` 空行冲刷
@@ -309,19 +795,23 @@
 | GIT 面板 | `git_unit` `pty_git` `sidebar_hscroll`（深路径横滚 + 行首图标命中） |
 | Search | `search_unit` `pty_search` |
 | AI / 流式 | `ai_unit` `ai_copy_unit` `ai_hscroll`（超长消息折行 + 横滚上界） `pty_ai`（≥200 列） |
-| 终端 / PTY | `interactive_term_unit` `hscroll_unit`（超长输出横滚 + 选区抓取） `selection_unit` `pty_term` `pty_interactive` `pty_session` `pty_persist` `pty_alt_screen` `pty_scroll` |
+| AI 内容渲染 / Markdown / 不可信内容 | `ai_md_unit`（Markdown 元素与 spanWrapDisp 不变量）`ai_edge_unit`（块级嵌套内容不丢 / 控制字符净化 / 极窄宽度行宽上界 / 超长围栏拼接不变量）`pty_ai_inject`（终端转义注入，mock 回复带 OSC 52 + TAB） |
+| 模型策略 / 折扣时段降档 | `strategy_unit`（策略解析与四类拒绝）`kind_route_unit`（按任务类型自动选档 / 人工优先）`offpeak_unit`（窗口语法与判定纯函数，含跨天 × days × tz）`route_offpeak_unit`（cost 排序、候选预筛、kinds 优先、菜单与状态栏标记）`pty_strategy` `pty_offpeak`（真实请求打到哪一档，靠 mock 日志断言调用序列） |
+| 终端 / PTY | `interactive_term_unit` `hscroll_unit`（超长输出横滚 + 选区抓取） `selection_unit` `pty_term` `pty_interactive` `pty_session` `pty_persist` `pty_alt_screen` `pty_scroll` `pty_rc_cleanup`（rc 临时文件读完自删 + SIGHUP 不残留） |
 | 布局 / 拖拽 | `r5_unit` `pty_r5` |
 | 配置持久化 | `r7_unit` `pty_r7` |
 | 菜单 / 快捷键 | `menu_unit` `menu_dropdown` `m6_unit` `pty_menu` |
 | 插件 | `plugin_unit` `pty_plugin` |
 | 剪贴板 / 选择 | `clipboard_unit` `selection_unit` |
 | 语言包 | `i18n_parity` |
-| 崩溃与还原 | `pty_crash` |
+| 崩溃与还原 | `pty_crash`（含**场景 B**：交互 shell 活着时崩溃 → 终端还原 + 资源回收 + 无孤儿进程；异常必须走 `reportFatal` 人话 + **恰为 1** 退出） |
+| 启动入口 / stdin 形态 | `pty_crash`（pty 正常路径 + 崩溃路径）`pty_notty`（**非 tty stdin** → 人话 + exit 1 + 不进 alternate screen）`cli_dir`（启动参数解析） |
 | 极小视口 | `m1_edge`（已含退化尺寸至 1×1） |
 
 > `tests/` 下带 `probe` 字样的文件是**探索性探针，不是测试**，不参与验收（`run_tests.sh` 会跳过）：
 > `m2_probe_runner`、`sse_probe*`、`probe_edge_deep`（长 cwd × 视口宽度扫描 / 30 层深树）、
-> `probe_tree_hscroll`（侧栏横滚命中与行文本）。探针用来**先看事实再决定改不改**，结论要落到正式测试里。
+> `probe_tree_hscroll`（侧栏横滚命中与行文本）、`probe_ai_edge`（Markdown 块级丢失 / 控制字符透传 /
+> 极窄宽度行宽的取证）。探针用来**先看事实再决定改不改**，结论要落到正式测试里。
 
 ## 六、验收纪律（从上述 bug 中提炼）
 

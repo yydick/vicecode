@@ -14,9 +14,12 @@ declare(strict_types=1);
  * 运行：timeout 120 php tests/pty_hscroll_key.php
  */
 
+require __DIR__ . '/lib/isolation.php';
+
 $env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40', 'APP_LOCALE' => 'en']);
-// 隔离配置：pty 退出会写 ~/.vicerc，落到临时文件避免污染真实家目录配置。
-$env['VICECODE_CONFIG'] = tempnam(sys_get_temp_dir(), 'vc_hkcfg');
+// 隔离配置：pty 退出会写 ~/.vicerc，须落到**独占目录**避免污染真实家目录配置；
+// 也不用 tempnam——它的 dirname 是 /tmp，父子进程都会去读 /tmp/.vicecode_ai（对话存档）。
+$env['VICECODE_CONFIG'] = vc_isolate_config('vc_hkey_pty');
 
 /** ANSI 屏幕重建：同 tests/pty_r5.php，剥转义后只保留字母数字与汉字做归一化比对 */
 function rebuildScreen(string $raw, int $w, int $h): string
@@ -139,7 +142,7 @@ function check(bool $cond, string $msg): void
 // 实测编辑器可见宽度约 13 列；ScrollLeft=40 时可见窗口约 [40,53)，恰好覆盖第 44 列，
 // 故 10 次 Shift+→（scrollLeft 0→40）可把标记滚入视口，10 次 Shift+← 滚出。
 $line = str_repeat('x', 44) . 'MARK' . str_repeat('x', 40);
-$tf = tempnam(sys_get_temp_dir(), 'vc_hk');
+$tf = vc_tmp_file('vc_hk');
 file_put_contents($tf, $line);
 
 $SR = "\x1b[1;2C"; // Shift+Right

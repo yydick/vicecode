@@ -21,6 +21,7 @@ chdir(__DIR__ . '/..');
 // idx 变成 12，硬编码坐标随即失效。这里直接读 $tree->visible()（与渲染同款），按 product
 // SidebarPanel::content() 的 offset 规则算屏幕行，目录增删都不再影响坐标。
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 use App\App;
 use PhpTui\Tui\Display\Area;
 
@@ -57,7 +58,7 @@ $rSrc = $rowOf('src');        // 顶层目录（有子目录）
 $rBin = $rowOf('bin');        // 顶层目录（只有文件，稳定）
 $rDocs = $rowOf('.docs');     // 顶层目录
 
-$env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40', 'VICECODE_CONFIG' => tempnam(sys_get_temp_dir(), 'vc_mouse')]);
+$env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40', 'VICECODE_CONFIG' => vc_isolate_config('vc_mouse_pty')]);
 
 /** 归一化：剥 ANSI，只留字母数字与汉字（差分渲染会把整词拆成逐格写入） */
 function normalize(string $raw): string

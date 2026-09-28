@@ -10,6 +10,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_coroutine');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 
 use App\App;
 

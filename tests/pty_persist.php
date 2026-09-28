@@ -15,13 +15,24 @@ declare(strict_types=1);
  * 运行：timeout 90 php tests/pty_persist.php
  */
 
-$cfgFile = tempnam(sys_get_temp_dir(), 'vc_pscfg');
+require __DIR__ . '/lib/isolation.php';
+
+// 独占配置目录：tempnam 的 dirname 是 /tmp，父子进程会一起读 /tmp/.vicecode_ai（对话存档）
+$cfgFile = vc_isolate_config('vc_persist_pty');
 $env = array_merge(getenv(), [
     'COLUMNS' => '120',
     'LINES' => '40',
     'APP_LOCALE' => 'zh_CN',
     'VICECODE_CONFIG' => $cfgFile,
 ]);
+
+// ⚠️ 自造 HOME：交互式 shell 会 source `$HOME/.bashrc`，开发机那份要加载 nvm + conda（数秒），
+// 而 TerminalPanel 会把握手前的按键攒到提示符出现再补发 —— 用真实 rc 会让「打字→出结果」的
+// 窗口随负载抖动、偶发假红。本用例验的是终端管线，不该被用户 rc 的启动速度牵着走。
+$home = vc_tmp_dir('vc_persist_home');
+file_put_contents($home . '/.bashrc', "PS1='ready$ '\n");
+$env['HOME'] = $home;
+$env['SHELL'] = '/bin/bash';
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
 $proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes, null, $env);
 if ($proc === false) {

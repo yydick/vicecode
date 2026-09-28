@@ -6,9 +6,10 @@
     "license": "MIT",
     "require": {
         "php": ">=8.3",
+        "ext-swoole": "*",
+        "league/commonmark": "^2.10",
         "php-tui/php-tui": "^0.2",
-        "scrivo/highlight.php": "^9.18",
-        "ext-swoole": "*"
+        "scrivo/highlight.php": "^9.18"
     },
     "autoload": {
         "psr-4": {

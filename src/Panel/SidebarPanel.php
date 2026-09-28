@@ -8,6 +8,7 @@ use App\Explorer\FileTree;
 use App\Explorer\TreeNode;
 use App\Git\GitClient;
 use App\Git\GitModel;
+use App\Plugin\PluginInterface;
 use App\Search\SearchRow;
 use App\Text\DisplayWidth;
 use PhpTui\Term\Event\CodedKeyEvent;
@@ -55,7 +56,15 @@ final class SidebarPanel
     // gitContent 之前的固定两行：tab 行 + 分隔线（SidebarPanel::content 总是先渲染），
     // 故 gitContent 的实际屏幕行 = sidebar 顶 + 1(上边框) + 此偏移 + 行常量。
     private const GIT_CONTENT_OFFSET = 2;
-
+    /**
+     * Commit 按钮的固定文案前缀（后面接 ▾ / ▴）。
+     *
+     * ⚠️ 渲染与**命中判定**必须共用这一份常量：命中列曾经写成 `innerX + innerW - 1`
+     * （面板最右一列），而按钮其实画在左边 `' Commit '`（8 列）之后 —— 于是点屏幕上
+     * 真正的 ▾ 毫无反应（落进 else 去 commit，空消息还提示「提交信息为空」）。
+     * 更麻烦的是当时测试也照抄了同一个错公式，两边一致地错、一直绿。
+     */
+    private const GIT_COMMIT_LABEL = ' Commit ';
     // Search tab 内部分区行（inner 行号，0-based，相对 searchContent 起始）
     private const SEARCH_INPUT_ROW = 0;   // 查询输入框
     private const SEARCH_STATUS_ROW = 1;  // 状态行（搜索中 / N 个匹配 / 无结果 / 出错）
@@ -259,11 +268,11 @@ final class SidebarPanel
                 }
             }
         } else {
-            foreach ($this->shell->plugins as $p) {
+            foreach ($this->shell->allPlugins as $p) {
                 $cfg = $this->shell->pluginEffectiveConfig($p);
                 $cfgStr = $cfg === [] ? $this->shell->t('plugins.no_config')
                     : implode(' ', array_map(static fn($k, $v): string => $k . '=' . $v, array_keys($cfg), $cfg));
-                $text = '» ' . $p->id() . ' [' . $this->shell->t('plugins.enabled') . '] ' . $cfgStr;
+                $text = '» ' . $p->id() . ' [' . $this->pluginStatusLabel($p) . '] ' . $cfgStr;
                 if ($w($text) > $max) {
                     $max = $w($text);
                 }
@@ -360,7 +369,7 @@ final class SidebarPanel
 
         // 行3：Commit ▾ 按钮（REVERSED 表示可点击；▾ 展开下拉）
         $arrow = $git->dropdownOpen ? '▴' : '▾';
-        $btn = DisplayWidth::mbPadDisp(' Commit ' . $arrow, $innerW);
+        $btn = DisplayWidth::mbPadDisp(self::GIT_COMMIT_LABEL . $arrow, $innerW);
         $lines[] = Line::fromSpans(Span::styled($btn, Style::default()->addModifier(Modifier::REVERSED)));
 
         // 下拉菜单：覆盖从标题行起，点击项触发对应动作
@@ -543,6 +552,20 @@ final class SidebarPanel
     }
 
     /** Search tab 各可点击元素的屏幕坐标（渲染与命中测试共用，保证一致） */
+    /** 当前 tab 的**输入行**矩形（Tab 补全浮层要贴在这一行上）；非输入类 tab 返回 null。 */
+    public function inputRowArea(Area $sb): ?Area
+    {
+        if ($this->tabIndex === 2) {
+            $r = $this->searchRects($sb);
+            return Area::fromScalars($r['innerX'], $r['inputY'], max(1, $r['innerW']), 1);
+        }
+        if ($this->tabIndex === 1) {
+            $r = $this->gitRects($sb);
+            return Area::fromScalars($r['innerX'], $r['inputY'], max(1, $r['innerW']), 1);
+        }
+        return null;
+    }
+
     private function searchRects(Area $sb): array
     {
         $innerX = $sb->position->x + 1;
@@ -571,6 +594,10 @@ final class SidebarPanel
         $row = $pos->y;
 
         if ($row === $r['inputY']) {
+            // ⚠️ 必须自己聚焦：App::handleClick 在侧栏 onClick 返回 true 后会**提前 return**，
+            // 不会再走 focus()。少了这一句，从编辑器/终端点进搜索框时焦点还在原面板，
+            // 键入的字符会落到那边，搜索框一个字都收不到（注释里写的"聚焦"原本并没有做）。
+            $this->shell->focus('sidebar');
             $s->editingQuery = true;
             return true;
         }
@@ -633,7 +660,7 @@ final class SidebarPanel
                 $this->movePluginSelection(1);
                 return true;
             case KeyCode::Enter:
-                $plugins = $this->shell->plugins;
+                $plugins = $this->shell->allPlugins;
                 if (isset($plugins[$this->pluginSel])) {
                     $this->shell->pluginsPanel->open();
                 }
@@ -643,11 +670,14 @@ final class SidebarPanel
         }
     }
 
-    /** 扩展(插件) tab 内容：列出已加载插件及其有效配置；Enter/点击打开配置浮层。 */
+    /**
+     * 扩展(插件) tab 内容：列出**全部**已加载插件（含被禁用者，否则禁用后无从恢复）、
+     * 其启用状态与有效配置；↑/↓ 选择，Space 切换启用/禁用，Enter/点击打开配置浮层。
+     */
     private function pluginsContent(Area $sidebar, array &$lines): void
     {
         $innerW = max(0, $sidebar->width - 2);
-        $plugins = $this->shell->plugins;
+        $plugins = $this->shell->allPlugins;
         if ($plugins === []) {
             $lines[] = Line::fromSpans(Span::styled(
                 $this->shell->t('plugins.no_plugins'),
@@ -678,10 +708,13 @@ final class SidebarPanel
             $tickStr = $tick !== null ? "tick={$tick}s" : 'tick=none';
             $sel = $i === $this->pluginSel;
             $marker = $sel ? '» ' : '  ';
-            $text = $marker . $p->id() . '  [' . $this->shell->t('plugins.enabled') . ' · ' . $tickStr . ']  ' . $cfgStr;
+            $text = $marker . $p->id() . '  [' . $this->pluginStatusLabel($p) . ' · ' . $tickStr . ']  ' . $cfgStr;
+            // 选中反显优先；禁用项以弱化样式区分（状态字样同时保留，不靠颜色单独承载语义）
             $style = $sel
                 ? Style::default()->addModifier(Modifier::REVERSED)
-                : Style::default();
+                : ($this->shell->pluginIsEnabled($p->id())
+                    ? Style::default()
+                    : $this->shell->theme->style('dim'));
             $lines[] = Line::fromSpans(Span::styled(DisplayWidth::mbSubDisp($text, $this->hScroll, $innerW), $style));
             $this->maxHScroll = max($this->maxHScroll, DisplayWidth::dispWidth($text));
         }
@@ -747,7 +780,7 @@ final class SidebarPanel
             'innerW' => $innerW,
             'inputY' => $y(self::GIT_INPUT_ROW),
             'commitY' => $y(self::GIT_COMMIT_ROW),
-            'commitArrowX' => $innerX + max(0, $innerW - 1),
+            'commitArrowX' => $innerX + min(DisplayWidth::dispWidth(self::GIT_COMMIT_LABEL), max(0, $innerW - 1)),
             'headerY' => $y(self::GIT_HEADER_ROW),
             'headerPlusX' => $innerX + max(0, $innerW - 3),   // 标题行 '+' 在倒数第 3 列
             'headerMinusX' => $innerX + max(0, $innerW - 1),  // 标题行 '-'/'⟳' 在末列
@@ -810,7 +843,10 @@ final class SidebarPanel
         }
 
         if ($row === $r['inputY']) {
-            return true; // 输入框默认聚焦，点击即聚焦
+            // ⚠️ 与 searchClick 同一个坑：App::handleClick 在侧栏 onClick 返回 true 后提前 return，
+            // 不会聚焦侧栏。「输入框默认聚焦」只在焦点本来就在侧栏时成立 —— 从编辑器点过来就不成立了。
+            $this->shell->focus('sidebar');
+            return true;
         }
 
         if ($row === $r['commitY']) {
@@ -911,7 +947,7 @@ final class SidebarPanel
         if ($this->tabIndex === 3) {
             if ($pos->y >= $sb->position->y + 3) {
                 $idx = ($pos->y - ($sb->position->y + 3)) + $this->pluginOffset;
-                $plugins = $this->shell->plugins;
+                $plugins = $this->shell->allPlugins;
                 if (isset($plugins[$idx])) {
                     $this->pluginSel = $idx;
                     $this->shell->pluginsPanel->open();
@@ -1157,12 +1193,38 @@ final class SidebarPanel
     /** 扩展(插件) tab 列表选择移动（钳到合法范围；无插件时不越界） */
     private function movePluginSelection(int $delta): void
     {
-        $n = count($this->shell->plugins);
+        $n = count($this->shell->allPlugins);
         if ($n === 0) {
             $this->pluginSel = 0;
             return;
         }
         $this->pluginSel = max(0, min($n - 1, $this->pluginSel + $delta));
+    }
+
+    /** 扩展(插件) tab 当前选中插件的 id（无插件返回 null） */
+    public function selectedPluginId(): ?string
+    {
+        $p = $this->shell->allPlugins[$this->pluginSel] ?? null;
+        return $p?->id();
+    }
+
+    /** 扩展(插件) tab 按 Space 的终点：翻转当前选中插件的启用状态 */
+    public function toggleSelectedPlugin(): bool
+    {
+        $id = $this->selectedPluginId();
+        if ($id === null) {
+            return false;
+        }
+        $this->shell->togglePlugin($id);
+        return true;
+    }
+
+    /** 插件启用状态文案（启用/禁用）——UI 与 hScroll 宽度计算共用同一份，避免两处漂移 */
+    private function pluginStatusLabel(PluginInterface $p): string
+    {
+        return $this->shell->pluginIsEnabled($p->id())
+            ? $this->shell->t('plugins.enabled')
+            : $this->shell->t('plugins.disabled');
     }
 
     // ── 内部 ────────────────────────────────────────

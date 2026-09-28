@@ -4,11 +4,13 @@ declare(strict_types=1);
 /**
  * 命令面板（F1 唤出）headless 单测：开/关、过滤、Backspace、选中执行、Esc 关闭、渲染冒烟。
  *
- * 脚手架：VICECODE_PLUGINS_DIR 指向 tmp 空目录，保证命令清单只有系统 17 项（无插件组，含插件面板浮层），
+ * 脚手架：VICECODE_PLUGINS_DIR 指向 tmp 空目录，保证命令清单只有系统 31 项（含 AI 组与面板显隐 4 项、无插件组），
  * 断言可确定化。运行：php tests/command_palette_unit.php
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_palette');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 
 use App\App;
 use PhpTui\Term\Event\CharKeyEvent;
@@ -17,7 +19,7 @@ use PhpTui\Term\Event\FunctionKeyEvent;
 use PhpTui\Term\KeyCode;
 use PhpTui\Tui\Display\Area;
 
-$base = sys_get_temp_dir() . '/vc_palette_' . getmypid();
+$base = vc_tmp_dir('vc_palette');   // 自动清理：原先用 sys_get_temp_dir()+'/vc_palette_<pid>' 从不删，每次跑批留一个
 @mkdir($base . '/plugins', 0777, true);
 putenv('VICECODE_PLUGINS_DIR=' . $base);
 
@@ -38,8 +40,8 @@ $app = new App();
 echo "== 唤起与关闭 ==\n";
 $app->handle(FunctionKeyEvent::new(1), $vp);
 check($app->palette->isOpen(), 'F1 打开命令面板');
-check($app->palette->totalCount() === 17, '命令清单为系统 17 项（无插件组，含插件面板浮层，实际 ' . $app->palette->totalCount() . '）');
-check($app->palette->matchCount() === 17, '空过滤时展示全部 17 项');
+check($app->palette->totalCount() === 31, '命令清单为系统 31 项（含 AI 组 10 项 + 面板显隐 4 项、无插件组，实际 ' . $app->palette->totalCount() . '）');
+check($app->palette->matchCount() === 31, '空过滤时展示全部 31 项');
 
 // 再按 F1 收起
 $app->handle(FunctionKeyEvent::new(1), $vp);
@@ -52,8 +54,9 @@ foreach (str_split('terminal') as $ch) {
     $app->handle(CharKeyEvent::new($ch), $vp);
 }
 check($app->palette->filterText() === 'terminal', '过滤串拼接正确（terminal）');
-check($app->palette->matchCount() === 1, '过滤 terminal 只剩 1 项（实际 ' . $app->palette->matchCount() . '）');
-check($app->palette->selectedId() === 'view.focus.terminal', '唯一匹配即 view.focus.terminal');
+// B16 起 `terminal` 还命中「隐藏/显示终端」「最大化/还原终端」与 view.focus.terminal 共 3 项
+check($app->palette->matchCount() === 3, '过滤 terminal 收敛到 3 项（实际 ' . $app->palette->matchCount() . '）');
+check($app->palette->selectedId() === 'view.focus.terminal', '高亮首项仍是 view.focus.terminal');
 
 // Backspace 缩短过滤串
 $app->handle(CodedKeyEvent::new(KeyCode::Backspace), $vp);

@@ -22,6 +22,7 @@ declare(strict_types=1);
 chdir(__DIR__ . '/..');
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 
 use App\App;
 use PhpTui\Tui\Display\Area;
@@ -183,7 +184,7 @@ $env = array_merge(getenv(), [
     'COLUMNS' => '120',
     'LINES' => '40',
     'APP_LOCALE' => 'zh_CN',
-    'VICECODE_CONFIG' => tempnam(sys_get_temp_dir(), 'vc_ptyh'),
+    'VICECODE_CONFIG' => vc_isolate_config('vc_sbh_pty'),   // 独占配置目录，勿用 tempnam（dirname 会是 /tmp）
 ]);
 
 $seq = static function (array $clicks, int $extraShiftRight = 0) use ($click, $SR, $rowL, $rowInner, $colArrowD0, $colArrowD1): array {

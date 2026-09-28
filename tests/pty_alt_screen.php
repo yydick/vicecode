@@ -17,6 +17,8 @@ declare(strict_types=1);
  * 运行：timeout 150 php tests/pty_alt_screen.php
  */
 
+require __DIR__ . '/lib/isolation.php';
+
 function normalize(string $raw): string
 {
     $s = (string) preg_replace('/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\\\)/', '', $raw);
@@ -90,9 +92,13 @@ function runApp(string $bin, array $env, array $descs, array $seq): array
 $bin = __DIR__ . '/../bin/vicecode.php';
 
 // 准备一个 30 行带标记的文件
-$cfgFile = tempnam(sys_get_temp_dir(), 'vc_altcfg_');
+// 配置须放**独占目录**：tempnam 的 dirname 是 /tmp，父子进程都会去读 /tmp/.vicecode_ai（对话存档）
+$cfgFile = vc_isolate_config('vc_altscr_pty');
+// 防回归（BUGFIXES D6）：三轮（vim/less/top 各一次应用运行）都不该在 /tmp 留下 pty rc 文件。
+// 本用例对 D6 最敏感——修复前它一次跑批就漏 3 个。
+$rcBefore = count((array) glob(sys_get_temp_dir() . '/vicetui_rc_*'));
 file_put_contents($cfgFile, (string) json_encode(['persistSession' => false]));
-$file = tempnam(sys_get_temp_dir(), 'vc_altfile_');
+$file = vc_tmp_file('vc_altfile');   // 纯数据文件（走 vc_tmp_file 才会退出时自动清理）
 $lines = [];
 for ($i = 1; $i <= 30; $i++) {
     $lines[] = 'ALT_LINE_' . str_pad((string) $i, 3, '0', STR_PAD_LEFT) . ' content here marker_' . $i;
@@ -106,6 +112,14 @@ $env = array_merge(getenv(), [
     'VICECODE_CONFIG' => $cfgFile,
     'TERM' => 'xterm-256color',
 ]);
+
+// ⚠️ 自造 HOME：交互式 shell 会 source `$HOME/.bashrc`，开发机那份要加载 nvm + conda（数秒），
+// 而 TerminalPanel 会把握手前的按键攒到提示符出现再补发 —— 用真实 rc 会让「打字→出结果」的
+// 窗口随负载抖动、偶发假红。本用例验的是终端管线，不该被用户 rc 的启动速度牵着走。
+$home = vc_tmp_dir('vc_altscreen_home');
+file_put_contents($home . '/.bashrc', "PS1='ready$ '\n");
+$env['HOME'] = $home;
+$env['SHELL'] = '/bin/bash';
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
 
 // 进 pty 捕获态的通用前缀
@@ -183,6 +197,9 @@ $fatalT = str_contains($rt['out'], 'Fatal error') || str_contains($rt['out'], 'U
 check($rt['code'] === 0, "干净退出 exit=$rt[code]");
 check(!$fatalT, '无 Fatal / Uncaught（动态刷新不崩溃）');
 check(str_contains($nt, 'toprestoreok'), '退 top 后 shell 仍交互（TOP_RESTORE_OK）');
+// D6 防回归：三轮运行后 /tmp 不应多出 vicetui_rc_*（修复前每轮 +1，共 +3）
+$rcAfter = count((array) glob(sys_get_temp_dir() . '/vicetui_rc_*'));
+check($rcAfter <= $rcBefore, sprintf('三轮运行后 /tmp 未残留 pty rc 文件（vicetui_rc_*：%d → %d）', $rcBefore, $rcAfter));
 
 @unlink($cfgFile);
 @unlink($file);

@@ -13,6 +13,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_git');   // 否则 new App() 会读开发机真实 ~/.vicerc（布局/主题/语言）
 putenv('APP_LOCALE=zh_CN');
 
 use App\App;
@@ -162,6 +164,7 @@ check(str_contains($text4, '提交信息'), 'GIT tab 渲染提交信息输入框
 echo "== R5 可视化交互 ==\n";
 use PhpTui\Term\Event\MouseEvent;
 use PhpTui\Term\MouseEventKind;
+use App\Text\DisplayWidth;
 use PhpTui\Term\MouseButton;
 
 $app2 = new App();
@@ -179,12 +182,42 @@ $app2->git->commitMsg = '';
 $app2->handle(CodedKeyEvent::new(KeyCode::Enter, 0), $vp);
 check(str_contains($app2->message, '提交信息'), '空消息 Enter 提交被拒（提示）');
 
+// a2) 点提交信息输入框必须把焦点交给侧栏
+// 上面用的都是「焦点本来就在侧栏」的路径。用户从编辑器/终端点进提交框时焦点还在原面板，
+// 而 App::handleClick 在侧栏 onClick 返回 true 后**提前 return**（不聚焦），gitClick 的
+// 输入框分支又写着「输入框默认聚焦，点击即聚焦」——那个假设在别的面板聚焦时不成立，
+// 于是键入的字符落到原焦点面板，提交框一个字都收不到。
+$appG = new App();
+$appG->sidebar->tabIndex = 1;
+$appG->focus('editor');                 // 模拟「刚从编辑器过来」
+$sbG = $appG->areas($vp)['sidebar'];
+$msgRow = $sbG->position->y + 1 + 2 + 2;   // 上边框 + tab/分隔偏移 + GIT_INPUT_ROW
+$msgCol = $sbG->position->x + 3;
+$appG->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $msgCol, $msgRow, 0), $vp);
+check($appG->focusPanel() === 'sidebar',
+    '点提交信息输入框后焦点在侧栏（实际 ' . $appG->focusPanel() . '）');
+$appG->handle(CharKeyEvent::new('f', 0), $vp);
+check($appG->git->commitMsg === 'f',
+    '点提交框后键入进提交框（实际 ' . var_export($appG->git->commitMsg, true) . '）');
+
 // b) 鼠标点 Commit ▾ 展开下拉；菜单含四项
+// ⚠️ 列号**必须从渲染帧里量出来**，不能照抄产品代码里的公式。
+// 本次 bug 正是「测试与产品代码用了同一个错误公式」（都以为 ▾ 在面板最右一列）：
+// 两边一致地错，于是测试一直绿，而屏幕上真正画着 ▾ 的那一列点了毫无反应。
 $sb = $app2->areas($vp)['sidebar'];
-$arrowCol = $sb->position->x + 1 + max(0, ($sb->width - 2) - 1);
 $arrowRow = $sb->position->y + 1 + 2 + 3; // 上边框+tab/分隔偏移+GIT_COMMIT_ROW
+$frameB = TuiBuffer::empty($vp);
+$renderer->render($renderer, $app2->render($vp), $frameB, $frameB->area());
+$commitRowText = $frameB->toLines()[$arrowRow] ?? '';
+$arrowByte = strpos($commitRowText, '▾');
+$arrowCol = $arrowByte === false
+    ? -1
+    : DisplayWidth::dispWidth(substr($commitRowText, 0, $arrowByte));
+check($arrowCol >= 0, '前置：能在渲染帧的 Commit 行上定位到 ▾（实际列 '
+    . var_export($arrowCol, true) . '，行文本 ' . var_export($commitRowText, true) . '）');
 $app2->handle(MouseEvent::new(MouseEventKind::Down, MouseButton::Left, $arrowCol, $arrowRow, 0), $vp);
-check($app2->git->dropdownOpen, '点 Commit ▾ 展开下拉菜单');
+check($app2->git->dropdownOpen, '点 Commit ▾ 展开下拉菜单（列号取自渲染帧，实际 '
+    . var_export($arrowCol, true) . '）');
 $bufferD = TuiBuffer::empty($vp);
 $renderer->render($renderer, $app2->render($vp), $bufferD, $bufferD->area());
 $textD = implode("\n", $bufferD->toLines());

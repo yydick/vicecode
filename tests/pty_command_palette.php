@@ -16,6 +16,7 @@ declare(strict_types=1);
 
 chdir(__DIR__ . '/..');
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 
 const W = 120;
 const H = 40;
@@ -150,7 +151,7 @@ $env = array_merge(getenv(), [
     'LINES' => (string) H,
     'TERM' => 'xterm-256color',
     'VICECODE_PLUGINS_DIR' => $base,
-    'VICECODE_CONFIG' => tempnam(sys_get_temp_dir(), 'vc_pal'),
+    'VICECODE_CONFIG' => vc_isolate_config('vc_pal_pty'),   // 独占配置目录，勿用 tempnam（dirname 会是 /tmp）
 ]);
 
 echo "== 真实 pty：F1 唤起命令面板浮层 ==\n";

@@ -5,6 +5,9 @@ namespace App;
 
 use Throwable;
 use App\Core\Config;
+use App\Core\CompletionItem;
+use App\Core\CompletionState;
+use App\Core\StatusPicker;
 use App\Core\KeyBindings;
 use App\Core\KeyInput;
 use App\Core\Lifecycle;
@@ -15,6 +18,7 @@ use App\Core\ConfigStore;
 use App\Core\Theme;
 use App\Editor\Buffer;
 use App\Ai\ChatModel;
+use App\Ai\FileCompletion;
 use App\Git\GitModel;
 use App\I18n\Translator;
 use App\Panel\AiPanel;
@@ -35,6 +39,8 @@ use App\Search\SearchModel;
 use App\Terminal\KeyToPty;
 use App\Text\DisplayWidth;
 use App\Text\SpanClip;
+use App\Widget\CompletionOverlay;
+use App\Widget\PickerOverlay;
 use PhpTui\Term\Event\CharKeyEvent;
 use PhpTui\Term\Event\CodedKeyEvent;
 use PhpTui\Term\Event\FunctionKeyEvent;
@@ -118,6 +124,13 @@ class App
     /** 未保存确认状态机：null=无；['kind'=>'quit'|'close','path'=>?string] */
     public ?array $confirm = null;
 
+    /**
+     * 资源是否已回收（`shutdownResources()` 的幂等闸）。
+     * 正常退出由 `Lifecycle` 的关闭闭包调用，异常退出由 `bin/vicecode.php` 的 `finally` 兜底，
+     * 两条路径都可能到，必须只真正回收一次。
+     */
+    private bool $resourcesDown = false;
+
     /** 编辑器面板（行号 + 高亮 + 光标 + 多 Buffer 标签） */
     public EditorPanel $editor;
 
@@ -162,6 +175,33 @@ class App
     /** 粘贴目标面板（tty 异步读取时暂存，响应回来即插入该面板）；null=无进行中的粘贴 */
     private ?string $pasteTarget = null;
 
+    /**
+     * Tab 补全状态（候选 / 选中项 / 被补全前缀的起点）+ 候选来源注册表。
+     *
+     * 内建一个 `@文件` 路径 provider；插件（可选能力 `completions()`）在
+     * `rebuildPluginRegistrations()` 里追加、禁用即重建成不含它的表。
+     */
+    private CompletionState $completion;
+
+    /**
+     * 「刚接受过一次补全」的一次性抑制标志。
+     *
+     * 接受之后输入末尾仍是被补全的那个 token（`@README.md`），而它**依然满足前缀匹配** ——
+     * 于是本次按键末尾的 `syncCompletion()` 会立刻把候选又弹回来，刚关掉就重现，像没生效。
+     * 抑制一次即可：用户再敲一个字前缀就变了，该弹自然会弹。
+     */
+    private bool $completionJustAccepted = false;
+
+    /**
+     * 状态栏可点段弹出的选项列表（语言 / 主题）。null = 关着；有实例就是开着。
+     *
+     * 锚点是**被点段在状态栏里的相对列**（不是屏幕列）：窗口 resize 后状态栏位置会变，
+     * 存屏幕列会错位，存相对列则每次渲染现算。
+     */
+    private ?StatusPicker $picker = null;
+
+    private int $pickerAnchorX0 = 0;
+
     /** 帮助页覆盖层（M6 R2）：全屏居中，打开期间独占键盘 */
     public HelpPanel $help;
 
@@ -190,9 +230,18 @@ class App
     public StatusBarPanel $statusBar;
 
     /**
-     * 已加载的插件（V1：运行时动态加载，目录扫描 plugins 下各子目录的 plugin.json + 运行时 require）。
+     * **全部**已加载的插件（V1：运行时动态加载，目录扫描 plugins 下各子目录的 plugin.json + 运行时 require）。
      * 由 PluginLoader 在构造末尾填充；插件文件不在 composer autoload 内，
-     * 产品版由内嵌 Zend 运行时解释（见 project_plugin.md）。
+     * 产品版由内嵌 Zend 运行时解释（见 docs/plugins.md §6「加载机制与容错」）。
+     * 含被用户禁用（`<id>.enabled=false`）的插件——插件页/侧栏要列出它们才能再打开。
+     * @var list<\App\Plugin\PluginInterface>
+     */
+    public array $allPlugins = [];
+
+    /**
+     * **启用**的插件子集（= allPlugins 过滤掉 `<id>.enabled=false` 者）。
+     * 状态栏段、tick 周期、命令、自定义面板一律只看这一份，因此「禁用」天然意味着
+     * 不注入任何段/命令/面板，而无需在每个消费点各写一次判断。
      * @var list<\App\Plugin\PluginInterface>
      */
     public array $plugins = [];
@@ -224,6 +273,10 @@ class App
 
     public function __construct()
     {
+        // Tab 补全：先建状态机 + 登记内建 provider（插件 provider 在下面 rebuildPluginRegistrations 里追加）
+        $this->completion = new CompletionState();
+        $this->registerBuiltinCompletions();
+
         // R7：从 ~/.vicerc 加载持久化偏好。优先级 env > 配置文件 > 默认；
         // 配置文件缺失/损坏时 ConfigStore::load 返回空数组，下面全部走默认分支。
         $locDir = __DIR__ . '/../config/locales';
@@ -251,6 +304,7 @@ class App
         $this->git = new GitModel($this);
         $this->search = new SearchModel($this);
         $this->chat = new ChatModel($this);
+        $this->chat->restore(); // V2：恢复上次对话（ai.persist 开才生效，失败静默）
         $this->help = new HelpPanel($this);
         $this->menuBar = new MenuBarPanel($this);
         $this->pluginsPanel = new PluginsPanel($this);
@@ -258,9 +312,7 @@ class App
         $this->panelHost = new PluginPanelHost($this);
         $this->clip = new Clipboard();        // 注意不能用 static fn：静态闭包不绑定 $this，回调里取不到 terminal
         $this->lifecycle = new Lifecycle($this, function (): void {
-            $this->chat->shutdown();
-            $this->search->shutdown();
-            $this->terminal->shutdown();
+            $this->shutdownResources();
         });
         // 退出时若开启持久化，shutdown 闭包会经 terminal->saveSession() 存盘；
         // 这里在构造末尾尝试恢复上次的 pty 会话（开启且存在快照时）。
@@ -274,40 +326,145 @@ class App
         // VICECODE_PLUGINS_DIR 可把插件根目录指到别处（测试用；仿 ConfigStore::pluginsPath()
         // 的 env 覆盖惯例）—— 这样测试能在 tmp 下造命令型插件而不污染 plugins/。
         $pluginBase = getenv('VICECODE_PLUGINS_DIR');
-        $this->plugins = PluginLoader::load(
+        $this->allPlugins = PluginLoader::load(
             (is_string($pluginBase) && $pluginBase !== '') ? $pluginBase : __DIR__ . '/..'
         );
         // 插件配置注入：VSCode 式「插件声明默认（configDefaults）+ 用户配置覆盖」。
         // 可选能力——插件若实现 configure()/configDefaults() 则注入合并后的配置，否则跳过
         // （不影响未实现它们的插件）。用户配置来自插件专用文件 ConfigStore::loadPlugins()。
+        // 注意：配置注入对**全部**插件做（含被禁用的），这样它们被重新启用时配置已经就绪。
         $userPlugins = ConfigStore::loadPlugins();
         $this->userPluginConfig = $userPlugins;
-        foreach ($this->plugins as $plugin) {
-            $defaults = method_exists($plugin, 'configDefaults')
-                ? $plugin->configDefaults()
-                : [];
-            $user = $userPlugins[$plugin->id()] ?? [];
-            if (is_array($user) && method_exists($plugin, 'configure')) {
-                $plugin->configure(array_merge($defaults, $user));
+        foreach ($this->allPlugins as $plugin) {
+            if (method_exists($plugin, 'configure')) {
+                $plugin->configure(array_merge(
+                    $this->pluginDefaults($plugin),
+                    $this->pluginUserOverrides($plugin->id())
+                ));
             }
         }
-        // 命令在**装载期**注册一次即可（不重新 require 插件，重注册只会产生 duplicate 冲突）
-        $this->registerPluginCommands();
-        // 面板同样在装载期汇聚一次（与命令同机制：冻结快照，之后每帧只读）
-        $this->collectPluginPanels();
+        // 启用集 + 注册表：命令/菜单/面板都在装载期一次性冻结（每帧只读）。
+        $this->rebuildActivePlugins();
+        $this->rebuildPluginRegistrations();
         $this->emitPluginEvent('app.ready');
+    }
+
+    /**
+     * 组装**内建**的补全 provider。
+     *
+     * 与插件 provider 分开写在两处，是因为生命周期不同：内建的在构造期注册一次就固定，
+     * 插件的随 `rebuildPluginRegistrations()` 重建（启用/禁用、Ctrl+S 热重载）。
+     * 两者都只是 `CompletionState` 里的一张回调表，核心不区分来源。
+     */
+    private function registerBuiltinCompletions(): void
+    {
+        $files = new FileCompletion();
+        $this->completion->addProvider([$files, 'provide']);
+    }
+
+    /** 插件声明的默认配置；未实现 configDefaults() 返回空数组。@return array<string,mixed> */
+    private function pluginDefaults(\App\Plugin\PluginInterface $p): array
+    {
+        if (!method_exists($p, 'configDefaults')) {
+            return [];
+        }
+        $d = $p->configDefaults();
+        return is_array($d) ? $d : [];
+    }
+
+    /**
+     * 用户对某插件的配置覆盖（~/.vicecode.plugins.json 的 `<id>` 段），**剔除核心保留键 `enabled`**——
+     * 启用状态归核心管，不该混进插件自己的配置（否则 configure() 会收到一个它不认识的键，
+     * 插件页展示的"有效配置"也会多出一行噪音）。
+     * @return array<string,mixed>
+     */
+    private function pluginUserOverrides(string $id): array
+    {
+        $sec = $this->userPluginConfig[$id] ?? null;
+        if (!is_array($sec)) {
+            return [];
+        }
+        unset($sec['enabled']);
+        return $sec;
+    }
+
+    /** 该插件是否启用（缺省启用；`<id>.enabled=false` 关闭） */
+    public function pluginIsEnabled(string $id): bool
+    {
+        return ConfigStore::pluginEnabled($this->userPluginConfig, $id);
+    }
+
+    /** 由 allPlugins ∩ 启用状态重算启用的插件子集（保持装载顺序） */
+    private function rebuildActivePlugins(): void
+    {
+        $this->plugins = array_values(array_filter(
+            $this->allPlugins,
+            fn(\App\Plugin\PluginInterface $p): bool => $this->pluginIsEnabled($p->id())
+        ));
+    }
+
+    /**
+     * 重建装载期冻结的插件注册表（命令 / 快捷键 / 冲突 / 菜单快照 / 自定义面板）。
+     *
+     * 供两处调用：构造末尾一次；以及运行时启用状态变化后重算（热启用/禁用即靠这个生效）。
+     * 每次都先清空再重注册——否则禁用后旧命令仍留在菜单里，而重新启用又会被判成 duplicate。
+     * 不重新 require / new 插件实例（保住插件自身运行期状态），只针对**当前启用子集**重建。
+     */
+    private function rebuildPluginRegistrations(): void
+    {
+        $this->pluginCommands = [];
+        $this->pluginShortcuts = [];
+        $this->pluginConflicts = [];
+        $this->pluginPanels = [];
+        $this->pluginMenuSnapshot = [];
+        $this->registerPluginCommands();     // 内含 rebuildPluginMenuSnapshot()
+        $this->collectPluginPanels();
+        $this->rebuildCompletionProviders();
+    }
+
+    /**
+     * 重建补全 provider 表 = **内建 + 当前启用的插件**。
+     *
+     * 与其它插件注册表同一条纪律：整体重建（不是增量增删）、只遍历启用子集 ——
+     * 于是「禁用某插件」在下一次重建后自然不再贡献候选，不需要额外清理逻辑。
+     *
+     * 每个插件 provider 都包了 try/catch：候选是**每次按键**都要重算的，
+     * 插件抛异常不该让编辑器废掉（与 Loader「单个插件失败只跳过它」同一取向）。
+     * 顺带过滤掉非 CompletionItem 的返回值 —— 插件是外部代码，返回脏类型不该变成 TypeError 崩掉。
+     */
+    private function rebuildCompletionProviders(): void
+    {
+        $this->completion->resetProviders();
+        $this->registerBuiltinCompletions();
+        foreach ($this->plugins as $p) {
+            if (!method_exists($p, 'completions')) {
+                continue;
+            }
+            $this->completion->addProvider(
+                static function (string $ctx, string $text, int $cursor, string $prefix) use ($p): array {
+                    try {
+                        $items = $p->completions($ctx, $text, $cursor, $prefix);
+                    } catch (Throwable) {
+                        return [];
+                    }
+                    if (!is_array($items)) {
+                        return [];
+                    }
+                    return array_values(array_filter($items, static fn ($i): bool => $i instanceof CompletionItem));
+                }
+            );
+        }
     }
 
     /**
      * 计算单个插件的「有效配置」= 默认(configDefaults) ∩ 用户 ~/.vicecode.plugins.json 覆盖。
      * 与构造期注入、reloadPluginConfig 用的是同一套合并逻辑，供 PluginsPanel / SidebarPanel 展示当前生效值。
+     * 不含核心保留键 `enabled`（启用状态另以状态标注展示）。
      * @return array<string,mixed>
      */
     public function pluginEffectiveConfig(\App\Plugin\PluginInterface $p): array
     {
-        $defaults = method_exists($p, 'configDefaults') ? $p->configDefaults() : [];
-        $user = $this->userPluginConfig[$p->id()] ?? [];
-        return is_array($user) ? array_merge($defaults, $user) : $defaults;
+        return array_merge($this->pluginDefaults($p), $this->pluginUserOverrides($p->id()));
     }
 
     /**
@@ -320,7 +477,7 @@ class App
         $path = ConfigStore::pluginsPath();
         if (!is_file($path)) {
             $data = [];
-            foreach ($this->plugins as $p) {
+            foreach ($this->allPlugins as $p) {
                 $cfg = $this->pluginEffectiveConfig($p);
                 if ($cfg !== []) {
                     $data[$p->id()] = $cfg;
@@ -332,21 +489,97 @@ class App
     }
 
     /**
+     * 在 ViceCode 自己的编辑器里打开**用户级模型（provider）配置文件**
+     * （`~/.vicecode.providers.php`，与内置 `config/providers.php` 分离）。
+     *
+     * 文件不存在时先写一份**带注释的空白模板**（`return [];`，行为与没有该文件一致），
+     * 避免用户面对一个空文件不知从何写起；里面写的是教怎么覆盖/追加，而不是把当前生效配置
+     * 抄进去——那会变成"冻结当前版本"、把以后的内置更新盖掉。
+     */
+    public function openProvidersConfig(): void
+    {
+        $path = ConfigStore::providersPath();
+        if (!is_file($path)) {
+            ConfigStore::saveProviders(ConfigStore::providersTemplate());
+        }
+        $this->editor->openFile($path);
+    }
+
+    /**
+     * 重载 provider 配置（用户文件改完保存即生效，无需重启）。
+     *
+     * 与插件那边同一条纪律：`Ctrl+S` 与菜单保存都落在 EditorPanel 的保存钩子里，
+     * 那里判「存的是不是这份配置文件」→ 调本方法，所以两条保存路径行为一致。
+     */
+    public function reloadProviders(): void
+    {
+        $this->chat->reloadProviders();
+        $err = $this->chat->providersUserError();
+        $this->setMessage($err === null
+            ? $this->t('ai.providers_reloaded')
+            : $this->t('ai.providers_bad', ['kind' => $err]));
+    }
+
+    /**
      * 重新加载插件配置（VSCode「重载窗口」的平替，但无需退出进程）。
-     * 重读专用插件配置文件（与 ~/.vicerc 分离），按「默认 ∩ 用户覆盖」重新注入每个插件。
+     * 重读专用插件配置文件（与 ~/.vicerc 分离），按「默认 ∩ 用户覆盖」重新注入每个插件，
+     * 并重算启用集与注册表——所以用户直接在配置文件里改 `"enabled": false` 再 Ctrl+S，
+     * 与在插件页按 Space 切换是**同一条生效路径**。
      */
     public function reloadPluginConfig(): void
     {
-        $userPlugins = ConfigStore::loadPlugins();
-        $this->userPluginConfig = $userPlugins;
-        foreach ($this->plugins as $plugin) {
-            $defaults = method_exists($plugin, 'configDefaults') ? $plugin->configDefaults() : [];
-            $user = $userPlugins[$plugin->id()] ?? [];
-            if (is_array($user) && method_exists($plugin, 'configure')) {
-                $plugin->configure(array_merge($defaults, $user));
+        $this->userPluginConfig = ConfigStore::loadPlugins();
+        foreach ($this->allPlugins as $plugin) {
+            if (method_exists($plugin, 'configure')) {
+                $plugin->configure(array_merge(
+                    $this->pluginDefaults($plugin),
+                    $this->pluginUserOverrides($plugin->id())
+                ));
             }
         }
+        $this->rebuildActivePlugins();
+        $this->rebuildPluginRegistrations();
         $this->emitPluginEvent('config.reloaded');
+    }
+
+    /**
+     * 启用/禁用单个插件：落盘 → 立即热生效（重算启用集与注册表），无需重启。
+     * 被禁用的插件仍留在 $allPlugins（插件页/侧栏照旧列出，可再打开），只是不再注入
+     * 状态栏段 / tick / 命令 / 自定义面板。
+     */
+    public function setPluginEnabled(string $id, bool $enabled): void
+    {
+        ConfigStore::savePluginEnabled($id, $enabled);
+        $sec = $this->userPluginConfig[$id] ?? null;
+        if (!is_array($sec)) {
+            $sec = [];
+        }
+        $sec['enabled'] = $enabled;
+        $this->userPluginConfig[$id] = $sec;
+        $this->rebuildActivePlugins();
+        $this->rebuildPluginRegistrations();
+        $this->emitPluginEvent('config.reloaded');
+    }
+
+    /** 翻转单个插件的启用状态（插件页/侧栏按 Space 的终点） */
+    public function togglePlugin(string $id): bool
+    {
+        $on = !$this->pluginIsEnabled($id);
+        $this->setPluginEnabled($id, $on);
+        // 静默切换会让用户不确定「到底生效没有」——给一条明确回执
+        $this->setMessage($this->t($on ? 'plugins.toggled_on' : 'plugins.toggled_off', ['id' => $id]));
+        return $on;
+    }
+
+    /** 按 id 找插件（含被禁用者）；找不到返回 null */
+    public function pluginById(string $id): ?\App\Plugin\PluginInterface
+    {
+        foreach ($this->allPlugins as $p) {
+            if ($p->id() === $id) {
+                return $p;
+            }
+        }
+        return null;
     }
 
     // ── V1.1：插件命令注册与执行 ──────────────────────────────
@@ -703,6 +936,106 @@ class App
         }
     }
 
+    // ── 面板显隐 / 终端最大化（B16）─────────────────────
+
+    /**
+     * 当前**可见**的面板 key 列表（顺序沿用 `PANELS`）。
+     *
+     * `App::PANELS` 常量**不动**（大量测试按它取 focusIndex，改动面太大）：可见性是叠加在
+     * 它之上的一层过滤，Tab 循环与焦点回落都走这里。中列至少留一段（最大化时是终端），
+     * 所以这个列表永远非空。
+     * @return list<string>
+     */
+    public function visiblePanels(): array
+    {
+        $centerKeys = LayoutFactory::centerKeys($this->layout);
+        $out = [];
+        foreach (self::PANELS as $k) {
+            $visible = match ($k) {
+                'sidebar' => $this->layout->sidebarVisible,
+                'editor', 'terminal' => in_array($k, $centerKeys, true),
+                default => $this->layout->aiVisible,   // ai_stream / ai_input
+            };
+            if ($visible) {
+                $out[] = $k;
+            }
+        }
+        return $out;
+    }
+
+    /** 在**可见**面板间循环切焦点（$dir = +1 下一个 / -1 上一个） */
+    public function focusNext(int $dir): void
+    {
+        $vis = $this->visiblePanels();
+        if ($vis === []) {
+            return;
+        }
+        $i = array_search($this->focusPanel(), $vis, true);
+        if ($i === false) {
+            $this->focus($vis[0]);
+            return;
+        }
+        $n = count($vis);
+        $this->focus($vis[(($i + $dir) % $n + $n) % $n]);
+    }
+
+    /**
+     * 焦点落在被隐藏的面板上时，向后找最近的可见面板（找不到再向前）。
+     * 隐藏面板后必须调一次，否则焦点会停在一个不存在的地方：按键发给它、屏幕上却没有它。
+     */
+    private function ensureFocusVisible(): void
+    {
+        $vis = $this->visiblePanels();
+        if ($vis === [] || in_array($this->focusPanel(), $vis, true)) {
+            return;
+        }
+        $n = count(self::PANELS);
+        for ($d = 1; $d < $n; $d++) {
+            $k = self::PANELS[($this->focusIndex + $d) % $n];
+            if (in_array($k, $vis, true)) {
+                $this->focus($k);
+                return;
+            }
+        }
+        $this->focus($vis[0]);
+    }
+
+    /**
+     * 显隐/最大化开关。$k ∈ sidebar | ai | terminal | terminal_max。
+     *
+     * 隐藏时顺手清掉矩形缓存（`areaKey`）：布局变了但视口没变，缓存不失效就会继续按旧布局
+     * 做命中测试 —— 表现是「点了没反应 / 点到别处」。同 `updateDrag()` 末尾的做法。
+     */
+    public function togglePanel(string $k): void
+    {
+        $c = $this->layout;
+        switch ($k) {
+            case 'sidebar':
+                $c = $c->withSidebarVisible(!$c->sidebarVisible);
+                break;
+            case 'ai':
+                $c = $c->withAiVisible(!$c->aiVisible);
+                break;
+            case 'terminal':
+                $visible = !$c->terminalVisible;
+                // 隐藏终端就谈不上「最大化」：一并收掉，避免留下自相矛盾的状态
+                $c = $c->withTerminalVisible($visible)
+                    ->withTerminalMaximized($visible ? $c->terminalMaximized : false);
+                break;
+            case 'terminal_max':
+                // 最大化隐含「终端可见」：终端被隐藏时按一下应当把它显出来并最大化，
+                // 否则这个菜单项点了看不到任何变化（比"什么都不做"更糟）。
+                $c = $c->withTerminalVisible(true)->withTerminalMaximized(!$c->terminalMaximized);
+                break;
+            default:
+                return;
+        }
+        $this->layout = $c;
+        $this->areaKey = '';
+        $this->ensureFocusVisible();
+        $this->setMessage($this->layoutSummary());
+    }
+
     /**
      * V1.1：向所有实现了可选方法 `onEvent(PluginEvent $e): void` 的插件广播应用事件。
      *
@@ -762,6 +1095,28 @@ class App
         $this->lifecycle->requestQuit();
     }
 
+    /**
+     * 回收子进程与落盘，**幂等**，任何退出路径都可调用。
+     *
+     *  - 正常退出：`Lifecycle::quit()` 的关闭闭包（构造时注入）调用本方法；
+     *  - 异常/其它退出：`bin/vicecode.php` 的 `start()` finally 调用本方法兜底。
+     *
+     * 为什么必须两条路都挂：只靠 Lifecycle 的话，一旦走到没经过它的退出路径（未捕获异常
+     * 最常见），pty/shell 子进程就没人收——只能等内核在 pty 主端关闭时发 SIGHUP 兜底
+     * （那是运气，不是我们的代码），且 bash `--rcfile` 的临时文件也不会被删。
+     * 收尾内容：停 AI 流、停搜索、停终端（存会话 + 杀 pty + 删 rc 文件）。
+     */
+    public function shutdownResources(): void
+    {
+        if ($this->resourcesDown) {
+            return;
+        }
+        $this->resourcesDown = true;
+        $this->chat->shutdown();
+        $this->search->shutdown();
+        $this->terminal->shutdown();
+    }
+
     /** 请求关闭某个 buffer（dirty 时先弹确认；编辑器 Ctrl+W 走这里） */
     public function requestClose(string $path): void
     {
@@ -797,6 +1152,7 @@ class App
      */
     public function areas(Area $vp): array
     {
+        $this->lastVp = $vp; // attach 动作（按键/菜单路径）没有 vp 参数，记下最近视口
         $key = sprintf(
             '%d:%d:%d:%d',
             $vp->position->x,
@@ -840,6 +1196,38 @@ class App
         if ($this->panelHost->isOpen()) {
             $overlays[] = $this->panelHost->widget($vp->width, $vp->height);
         }
+        // Tab 补全候选：贴在正在输入的那一行上（透明的局部覆盖，底层输入框仍看得见）。
+        // 放在最后 = 压在最上层：模态浮层打开时它已被 syncCompletion() 关掉，不会互相打架。
+        if ($this->completion->isActive()) {
+            $anchor = $this->completionAnchor($this->areas($vp));
+            $widget = $anchor === null ? null : CompletionOverlay::widget(
+                $this->completion->items(),
+                $this->completion->selected(),
+                $anchor,
+                $vp->width,
+                $vp->height,
+                $this->theme,
+            );
+            if ($widget !== null) {
+                $overlays[] = $widget;
+            }
+        }
+        // 状态栏可点段的选项列表（语言 / 主题）：贴状态栏上方，最后画 = 压在最上层。
+        if ($this->picker !== null) {
+            $status = $this->areas($vp)['status'] ?? null;
+            if ($status !== null) {
+                $widgetP = PickerOverlay::widget(
+                    $this->picker,
+                    $status->position->x + $this->pickerAnchorX0,
+                    $status->position->y,
+                    $vp->width,
+                    $this->theme,
+                );
+                if ($widgetP !== null) {
+                    $overlays[] = $widgetP;
+                }
+            }
+        }
         if ($overlays === []) {
             return $base;
         }
@@ -855,111 +1243,153 @@ class App
 
         // 渲染前把文本选择矩形注入编辑/终端面板（content() 内部做反显高亮）。
         // 归一化矩形 [r0,c0,r1,c1]；无选择时传 null 清掉上一帧高亮。
-        if ($this->select !== null && $this->select['panel'] === 'editor') {
+        // 隐藏的面板不注入：它这一帧根本不渲染，注入反而会让选区状态指向不存在的矩形。
+        $centerKeys = LayoutFactory::centerKeys($this->layout);
+        $mainKeys = LayoutFactory::mainKeys($this->layout);
+        $hasSidebar = in_array('sidebar', $mainKeys, true);
+        $hasAi = in_array('ai', $mainKeys, true);
+        $hasEditor = in_array('editor', $centerKeys, true);
+        $hasTerminal = in_array('terminal', $centerKeys, true);
+
+        if ($this->select !== null && $this->select['panel'] === 'editor' && $hasEditor) {
             $this->editor->setSelection($this->normalizeRect($this->select));
         } else {
             $this->editor->setSelection(null);
         }
-        if ($this->select !== null && $this->select['panel'] === 'terminal') {
+        if ($this->select !== null && $this->select['panel'] === 'terminal' && $hasTerminal) {
             $this->terminal->setSelection($this->normalizeRect($this->select));
         } else {
             $this->terminal->setSelection(null);
         }
 
+        // ⚠️ 面板 widget **只构造可见的**：content() 不是纯函数 —— 编辑器每帧在里面更新
+        // 横滚边界、终端在聚焦首帧会真的起 shell；而且隐藏面板的 `$a['...']` 根本不存在。
+        // 段数/顺序一律以 mainKeys()/centerKeys() 为准，与 split() 切出的矩形天然一一对应。
+
         // ── Sidebar ──
-        $sidebarInner = $this->sidebar->content($a['sidebar'], $focus === 'sidebar');
-        $sidebar = BlockWidget::default()
-            ->borders(Borders::ALL)
-            ->borderStyle($this->borderStyle($focus === 'sidebar'))
-            ->titles(Title::fromString(' ' . $this->i18n->t('panel.sidebar') . ' '))
-            ->widget($sidebarInner);
+        $sidebarWidget = null;
+        if ($hasSidebar) {
+            $sidebarWidget = BlockWidget::default()
+                ->borders(Borders::ALL)
+                ->borderStyle($this->borderStyle($focus === 'sidebar'))
+                ->titles(Title::fromString(' ' . $this->i18n->t('panel.sidebar') . ' '))
+                ->widget($this->sidebar->content($a['sidebar'], $focus === 'sidebar'));
+        }
 
         // ── Editor ──
         // 先算 content()（内部每帧更新 hLeft/hRight 横向滚动边界指示），再据此拼标题，
         // 避免标题指示比正文晚一帧。
-        $editorWidget = $this->editor->content($a['editor'], $focus === 'editor');
-        $editorTitle = ' ' . $this->i18n->t('panel.editor') . ' ';
-        if ($this->buffer !== null) {
-            $name = basename((string) $this->buffer->path);
-            $flag = $this->buffer->dirty ? ' ' . $this->i18n->t('status.dirty') : '';
-            $hint = '';
-            if ($this->editor->hLeft) {
-                $hint .= '‹';   // ‹ 左侧还有隐藏内容（已横滚）
+        $editorWidget = null;
+        if ($hasEditor) {
+            $editorInner = $this->editor->content($a['editor'], $focus === 'editor');
+            $editorTitle = ' ' . $this->i18n->t('panel.editor') . ' ';
+            if ($this->buffer !== null) {
+                $name = basename((string) $this->buffer->path);
+                $flag = $this->buffer->dirty ? ' ' . $this->i18n->t('status.dirty') : '';
+                $hint = '';
+                if ($this->editor->hLeft) {
+                    $hint .= '‹';   // ‹ 左侧还有隐藏内容（已横滚）
+                }
+                if ($this->editor->hRight) {
+                    $hint .= '›';   // › 右侧还有隐藏内容
+                }
+                $editorTitle = ' ' . $this->i18n->t('panel.editor') . ': ' . $name . $flag
+                    . ($hint !== '' ? ' ' . $hint : '') . ' ';
             }
-            if ($this->editor->hRight) {
-                $hint .= '›';   // › 右侧还有隐藏内容
-            }
-            $editorTitle = ' ' . $this->i18n->t('panel.editor') . ': ' . $name . $flag
-                . ($hint !== '' ? ' ' . $hint : '') . ' ';
+            $editorWidget = BlockWidget::default()
+                ->borders(Borders::ALL)
+                ->borderStyle($this->borderStyle($focus === 'editor'))
+                ->titles(Title::fromString($editorTitle))
+                ->widget($editorInner);
         }
-        $editor = BlockWidget::default()
-            ->borders(Borders::ALL)
-            ->borderStyle($this->borderStyle($focus === 'editor'))
-            ->titles(Title::fromString($editorTitle))
-            ->widget($editorWidget);
 
-        // ── Terminal（M2 命令运行器 / 交互式 PTY）──
-        $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
-        if ($this->terminal->mode === 'pty') {
-            $termTitle = ' ' . $this->i18n->t('term.interactive') . ' ';
-            if ($this->terminal->isCaptured()) {
+        // ── Terminal（默认交互式 PTY / shell 退出后回落命令运行器）──
+        // 标题**不**随默认模式变化：pty 下只有「捕获中」才值得写出来（那是用户唯一看不出
+        // 来的状态，其余靠面板底部的提示行说明）。默认态标题保持「终端」，与改动前一致。
+        $terminalWidget = null;
+        if ($hasTerminal) {
+            $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
+            if ($this->terminal->mode === 'pty' && $this->terminal->isCaptured()) {
                 $termTitle = ' ' . $this->i18n->t('term.interactive') . ' · ' . $this->i18n->t('term.captured') . ' ';
+            } elseif ($this->terminal->mode === 'runner' && $this->terminal->isRunning()) {
+                $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' · ' . $this->i18n->t('term.running') . ' ';
             }
-        } elseif ($this->terminal->isRunning()) {
-            $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' · ' . $this->i18n->t('term.running') . ' ';
+            $terminalWidget = BlockWidget::default()
+                ->borders(Borders::ALL)
+                ->borderStyle($this->borderStyle($focus === 'terminal'))
+                ->titles(Title::fromString($termTitle))
+                ->widget($this->terminal->content($a['terminal'], $focus === 'terminal'));
         }
-        $terminal = BlockWidget::default()
-            ->borders(Borders::ALL)
-            ->borderStyle($this->borderStyle($focus === 'terminal'))
-            ->titles(Title::fromString($termTitle))
-            ->widget($this->terminal->content($a['terminal'], $focus === 'terminal'));
 
+        $centerWidgets = [];
+        foreach ($centerKeys as $k) {
+            $centerWidgets[] = $k === 'editor' ? $editorWidget : $terminalWidget;
+        }
         $center = GridWidget::default()
             ->direction(Direction::Vertical)
             ->constraints(...LayoutFactory::centerConstraints($this->layout))
-            ->widgets($editor, $terminal);
+            ->widgets(...$centerWidgets);
 
         // ── AI Stream ──
         // 标题带上当前 Provider/模型：切换后要能立刻看见生效的是谁
         // （输入面板只有 1 行可用，放不下独立的状态行）
+        //
+        // ⚠️ 判据是 `hasSelection()` 而不是 `$spec !== null`：后者在配了 provider 时**恒真**
+        // （`spec()` 会兜底到 defaultId()），于是用户一次都没选过，标题也会声称正在用某个模型。
+        // 「还没选」时只显示面板名 —— 请求仍然走默认 provider，但那是实现细节，不该当成
+        // 用户的选择说出来（要选的话有 Ctrl+P / Ctrl+N）。
         $spec = $this->chat->spec();
-        $aiTitle = ' ' . $this->i18n->t('panel.ai_chat')
-            . ($spec !== null ? ' · ' . $spec->label . '/' . $spec->model : '')
-            . ($this->chat->isStreaming() ? ' …' : '') . ' ';
-        $aiStream = BlockWidget::default()
-            ->borders(Borders::ALL)
-            ->borderStyle($this->borderStyle($focus === 'ai_stream'))
-            ->titles(Title::fromString($aiTitle))
-            ->widget($this->ai->streamContent(
-                max(0, ($a['ai_stream']->width ?? 0) - 2),
-                max(0, ($a['ai_stream']->height ?? 0) - 2),
-            ));
+        $modelLabel = $spec !== null && $this->chat->hasSelection()
+            ? ' · ' . $spec->label . '/' . $spec->model
+            : '';
+        $ai = null;
+        if ($hasAi) {
+            $aiTitle = ' ' . $this->i18n->t('panel.ai_chat')
+                . $modelLabel
+                . ($this->chat->isStreaming() ? ' …' : '') . ' ';
+            $aiStream = BlockWidget::default()
+                ->borders(Borders::ALL)
+                ->borderStyle($this->borderStyle($focus === 'ai_stream'))
+                ->titles(Title::fromString($aiTitle))
+                ->widget($this->ai->streamContent(
+                    max(0, ($a['ai_stream']->width ?? 0) - 2),
+                    max(0, ($a['ai_stream']->height ?? 0) - 2),
+                ));
 
-        // ── AI Input ──
-        // 输入框内部 = 框高 - 上下边框(2)，恒为输入内容（默认 3 行）。
-        // 工具栏（发送/换行/清空）用图标放在顶边框右对齐，不占用输入行。
-        $aiInput = BlockWidget::default()
-            ->borders(Borders::ALL)
-            ->borderStyle($this->borderStyle($focus === 'ai_input'))
-            ->titles(
-                Title::fromString(' ' . $this->i18n->t('panel.ai_input') . ' '),
-                Title::fromString($this->ai->toolbarTitleString())->horizontalAlignment(HorizontalAlignment::Right),
-            )
-            ->widget($this->ai->inputContent(
-                max(0, ($a['ai_input']->width ?? 0) - 2),
-                max(0, ($a['ai_input']->height ?? 0) - 2),
-            ));
+            // ── AI Input ──
+            // 输入框内部 = 框高 - 上下边框(2)，恒为输入内容（默认 3 行）。
+            // 工具栏（发送/换行/清空）用图标放在顶边框右对齐，不占用输入行。
+            $aiInput = BlockWidget::default()
+                ->borders(Borders::ALL)
+                ->borderStyle($this->borderStyle($focus === 'ai_input'))
+                ->titles(
+                    Title::fromString(' ' . $this->i18n->t('panel.ai_input') . ' '),
+                    Title::fromString($this->ai->toolbarTitleString())->horizontalAlignment(HorizontalAlignment::Right),
+                )
+                ->widget($this->ai->inputContent(
+                    max(0, ($a['ai_input']->width ?? 0) - 2),
+                    max(0, ($a['ai_input']->height ?? 0) - 2),
+                ));
 
-        $ai = GridWidget::default()
-            ->direction(Direction::Vertical)
-            ->constraints(...LayoutFactory::aiConstraints($this->layout))
-            ->widgets($aiStream, $aiInput);
+            $ai = GridWidget::default()
+                ->direction(Direction::Vertical)
+                ->constraints(...LayoutFactory::aiConstraints($this->layout))
+                ->widgets($aiStream, $aiInput);
+        }
 
         // ── 主区 ──
+        $mainWidgets = [];
+        foreach ($mainKeys as $k) {
+            $mainWidgets[] = match ($k) {
+                'sidebar' => $sidebarWidget,
+                'ai' => $ai,
+                default => $center,
+            };
+        }
         $main = GridWidget::default()
             ->direction(Direction::Horizontal)
             ->constraints(...LayoutFactory::mainConstraints($this->layout))
-            ->widgets($sidebar, $center, $ai);
+            ->widgets(...$mainWidgets);
 
         // ── StatusBar ──
         // 传入可视宽度：状态栏要在放不下时**按优先级丢弃**低优先级段，
@@ -1041,23 +1471,134 @@ class App
         $ids = Theme::ids();
         $cur = array_search($this->theme->id, $ids, true);
         $next = $ids[(($cur === false ? 0 : $cur) + 1) % count($ids)];
-        $this->theme = Theme::byId($next);
+        $this->setTheme($next);
+    }
+
+    /**
+     * 切到指定主题（`cycleTheme()` 与状态栏的选项列表共用）。
+     *
+     * 抽出来是为了让「换主题要做的副作用」（重建 Theme + 让所有 buffer 重算高亮）只有一处：
+     * 两处各写一遍，早晚会漏掉其中一个。
+     */
+    public function setTheme(string $id): void
+    {
+        $this->theme = Theme::byId($id);
         foreach ($this->editor->buffers() as $buf) {
             $buf->hlRev = -1; // 强制下一帧重算高亮
         }
         $this->setMessage($this->t('status.theme') . '=' . $this->t($this->theme->label));
     }
 
-    // ── 语言（顶部菜单「视图 → 语言」）────────────────────
+    // ── 状态栏可点段：选项列表（语言 / 主题）──────────────
 
-    /** 在可用语言间环形切换；setMessage 提示当前语言。 */
-    public function toggleLocale(): void
+    /** 当前的选项列表（null = 关着）；测试与渲染用。 */
+    public function picker(): ?StatusPicker
     {
-        $langs = $this->i18n->available();
-        $cur = array_search($this->i18n->locale(), $langs, true);
-        $next = $langs[(($cur === false ? 0 : $cur) + 1) % count($langs)];
-        $this->i18n->setLocale($next);
-        $this->setMessage($this->t('status.lang') . '=' . $next);
+        return $this->picker;
+    }
+
+    /**
+     * 打开某个状态栏段的选项列表。返回 false = 该段没有列表（调用方据此不消费这次点击）。
+     *
+     * 数据源集中在这里：语言取 `Translator::available()`，主题取 `Theme::ids()`。
+     * 锚点用**被点段在状态栏里的相对列**（`segmentX0`）—— 存屏幕列的话窗口一 resize 就错位。
+     */
+    public function openPicker(string $id): bool
+    {
+        $p = match ($id) {
+            'locale' => StatusPicker::locales(
+                $this->i18n->available(),
+                $this->locale(),
+                $this->t('picker.locale')
+            ),
+            'theme' => StatusPicker::themes(
+                Theme::ids(),
+                $this->theme->id,
+                $this->t('picker.theme'),
+                fn(string $tid): string => $this->t(Theme::byId($tid)->label)
+            ),
+            default => null,
+        };
+        if ($p === null) {
+            return false;
+        }
+        $this->picker = $p;
+        $this->pickerAnchorX0 = $this->statusBar->segmentX0($id) ?? 0;
+        return true;
+    }
+
+    public function closePicker(): void
+    {
+        $this->picker = null;
+    }
+
+    /** 把当前高亮项应用下去（语言 / 主题），然后关闭。 */
+    public function applyPicker(): void
+    {
+        $p = $this->picker;
+        $opt = $p?->selected();
+        $this->closePicker();
+        if ($p === null || $opt === null) {
+            return;
+        }
+        if ($p->id === 'locale') {
+            $this->i18n->setLocale($opt['value']);
+            $this->setMessage($this->t('status.lang') . '=' . $opt['value']);
+        } elseif ($p->id === 'theme') {
+            $this->setTheme($opt['value']);
+        }
+    }
+
+    /** 列表开着时的按键：↑↓ 移动、Enter 应用、Esc 关闭。返回 true = 已消费。 */
+    private function pickerKey(CodedKeyEvent $e): bool
+    {
+        if ($this->picker === null) {
+            return false;
+        }
+        switch ($e->code) {
+            case KeyCode::Up:
+                $this->picker->move(-1);
+                return true;
+            case KeyCode::Down:
+                $this->picker->move(1);
+                return true;
+            case KeyCode::Enter:
+                $this->applyPicker();
+                return true;
+            case KeyCode::Esc:
+                $this->closePicker();
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** 列表开着时的鼠标：点列表项 = 应用；点别处 = 关闭。 */
+    private function pickerMouse(MouseEvent $e, array $a, Area $vp): void
+    {
+        $p = $this->picker;
+        $status = $a['status'] ?? null;
+        if ($p === null || $status === null) {
+            $this->closePicker();
+            return;
+        }
+        $g = PickerOverlay::geometry(
+            $p,
+            $status->position->x + $this->pickerAnchorX0,
+            $status->position->y,
+            $vp->width
+        );
+        if ($g !== null
+            && $e->row > $g['top'] && $e->row < $g['top'] + $g['panelH'] - 1   // 去掉上下边框
+            && $e->column >= $g['startX'] && $e->column < $g['startX'] + $g['panelW']) {
+            $idx = $g['offset'] + ($e->row - $g['top'] - 1);
+            if (isset($p->options[$idx])) {
+                $p->sel = $idx;
+                $this->applyPicker();
+                return;
+            }
+        }
+        $this->closePicker();
     }
 
     // ── 菜单动作（顶部菜单栏每项都对应这里一个真实方法）──
@@ -1065,6 +1606,16 @@ class App
     /** 执行菜单项 action（见 MenuBarPanel::definitions 的 action 字段）。 */
     public function menuAction(string $id): void
     {
+        // 模型策略的动作带后缀（`ai.strategy:<name>`，策略是用户配置出来的、数量不定），
+        // 所以用前缀分派，不能写成 case。
+        if (str_starts_with($id, 'ai.strategy:')) {
+            $this->chat->applyStrategy(substr($id, strlen('ai.strategy:')));
+            return;
+        }
+        if ($id === 'ai.strategy_auto') {
+            $this->chat->useAutoStrategy();
+            return;
+        }
         switch ($id) {
             case 'file.open':
                 $this->focus('sidebar');
@@ -1083,7 +1634,9 @@ class App
                 $this->lifecycle->requestQuit();
                 break;
             case 'view.theme':
-                $this->cycleTheme();
+                // 菜单是「挑一个」的语境 → 开选项列表；Ctrl+T 仍是快速循环（快捷键适合循环，
+                // 菜单适合给列表 —— 两者并存不冲突）
+                $this->openPicker('theme');
                 break;
             case 'view.focus.editor':
                 $this->focus('editor');
@@ -1098,7 +1651,20 @@ class App
                 $this->focus('ai_stream');
                 break;
             case 'view.lang':
-                $this->toggleLocale();
+                $this->openPicker('locale');
+                break;
+            // 面板显隐 / 终端最大化（B16）：只做菜单与命令面板入口，**不加 Ctrl 快捷键**（用户定的）
+            case 'view.toggle_sidebar':
+                $this->togglePanel('sidebar');
+                break;
+            case 'view.toggle_ai':
+                $this->togglePanel('ai');
+                break;
+            case 'view.toggle_terminal':
+                $this->togglePanel('terminal');
+                break;
+            case 'view.toggle_terminal_max':
+                $this->togglePanel('terminal_max');
                 break;
             case 'term.cancel':
                 $this->terminal->cancel();
@@ -1111,6 +1677,32 @@ class App
                 break;
             case 'help.about':
                 $this->help->openAbout();
+                break;
+            case 'ai.explain':
+            case 'ai.comment':
+            case 'ai.refactor':
+            case 'ai.unittest':
+                $this->aiQuickAction(substr($id, 3)); // 去掉 'ai.' 前缀
+                break;
+            case 'ai.tool_mode':
+                $this->chat->setToolAutoRun(!$this->chat->toolAutoRun());
+                $this->setMessage($this->t($this->chat->toolAutoRun() ? 'ai.tool_mode_auto' : 'ai.tool_mode_confirm'));
+                break;
+            case 'ai.clear':
+                $this->chat->clear();
+                $this->ai->resetScrollState();
+                $this->setMessage($this->t('ai.cleared'));
+                break;
+            case 'ai.compact_now':
+                $this->chat->compactNow();
+                break;
+            case 'ai.providers_config':
+                $this->openProvidersConfig();
+                break;            case 'ai.attach_selection':
+                $this->aiAttachSelection();
+                break;
+            case 'ai.attach_file':
+                $this->aiAttachCurrentFile();
                 break;
             case 'plugins.open':
                 $this->pluginsPanel->open();
@@ -1130,7 +1722,58 @@ class App
         }
     }
 
+    /**
+     * 事件入口：先按既有逻辑分发，再**统一重算一次补全候选**。
+     *
+     * 为什么收口成一次调用：输入可能被很多条路径改动（字符追加、退格、粘贴、发送后清空…），
+     * 逐条去挂 `syncCompletion()` 一定会漏掉一条。放在入口末尾则「任何按键之后候选都跟得上」，
+     * 且顺序天然正确 —— 先让按键生效，再据此算前缀。
+     */
     public function handle(\PhpTui\Term\Event $event, Area $vp): void
+    {
+        $this->handleEvent($event, $vp);
+        $this->syncCompletion();
+    }
+
+    /**
+     * 自动捕获判据：这个事件算不算「用户在终端里打字」。
+     *
+     * 刻意**只认**不带 Ctrl/Alt 的可打印字符与回车：
+     *  - Tab / BackTab 必须留给焦点切换 —— 若被吞进捕获，焦点一到终端就再也出不来；
+     *  - Esc 留给「退出应用」的全局语义（非捕获 pty 下 Esc = 退出，见 handleCoded）；
+     *  - ↑↓/PgUp/PgDn/Home/End 留给 pty 回退滚动（TerminalPanel::onKey）；
+     *  - Ctrl+字母 / Alt+字母不是「开始打字」的信号（且大写字母带 SHIFT 仍要能捕获，
+     *    故只排 CONTROL|ALT，不排 SHIFT）；
+     *  - **`?`（帮助键）例外**：它是全局浮层键，且捕获态的按键会全部转发给 shell
+     *    （见下面的捕获分支）—— 若这里也把它当「开始打字」，那么只要终端聚焦且 shell 活着，
+     *    帮助页就**再也打不开**（默认态正是如此）。
+     *
+     * 代价（已知且接受）：Backspace / Ctrl+D / `?` 作为**第一个**按键不会触发自动捕获。
+     */
+    private function isAutoCaptureKey(\PhpTui\Term\Event $event): bool
+    {
+        if ($event instanceof CodedKeyEvent) {
+            return $event->code === KeyCode::Enter;
+        }
+        if (!$event instanceof CharKeyEvent) {
+            return false;
+        }
+        if (($event->modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT)) !== 0) {
+            return false;
+        }
+        if ($event->char === KeyBindings::HELP_KEY) {
+            return false;
+        }
+        // 回车在某些解析路径下是 CharKeyEvent("\r") 而非 CodedKeyEvent(Enter)
+        // （TerminalPanel::onChar 也同时认这两种，口径保持一致）。
+        // isPrintable 对 \r(13)/\n(10) 返回 false，故必须单独放行。
+        if ($event->char === "\r" || $event->char === "\n") {
+            return true;
+        }
+        return KeyInput::isPrintable($event->char);
+    }
+
+    private function handleEvent(\PhpTui\Term\Event $event, Area $vp): void
     {
         // 未保存确认进行中：拦截所有输入，只响应 y/n/Esc（及 Ctrl+Q 视为确认）
         if ($this->confirm !== null) {
@@ -1151,6 +1794,30 @@ class App
         }
 
         $a = $this->areas($vp);
+
+        // 终端聚焦时，先把「交互 shell 是否已经退出」同步掉（见 TerminalPanel::syncShellState）。
+        // 一次 stdin 读取里可能连着好几个按键；不在这里同步的话，shell 退出这件事要等主循环
+        // 下一轮 poll 才知道，中间那几个键会被喂给已经死掉的 pty 而**静默丢掉**。
+        if ($this->focusPanel() === 'terminal') {
+            $this->terminal->syncShellState();
+        }
+
+        // 状态栏可点段的选项列表（语言 / 主题）打开期间独占按键：↑↓ 移动、Enter 应用、Esc 关闭。
+        // 放在菜单/命令面板等模态之前 —— 它是「点状态栏」那一次交互的延续，按键不该漏到面板；
+        // 但**功能键放行**（F10/F1/F2 照常生效），只是顺手把列表收掉。
+        if ($this->picker !== null) {
+            if ($event instanceof FunctionKeyEvent) {
+                $this->closePicker();
+            } elseif ($event instanceof MouseEvent) {
+                $this->handleMouse($event, $a, $vp);
+                return;
+            } elseif ($event instanceof CharKeyEvent) {
+                return;   // 纯选择：别把字符顺手打进编辑器
+            } elseif ($event instanceof CodedKeyEvent) {
+                $this->pickerKey($event);   // 认得的键已消费，认不得的也吞掉
+                return;
+            }
+        }
 
         // F10 激活/收起菜单栏：真实 pty 下是 **FunctionKeyEvent**（独立类，带 number 属性），
         // 不是 CodedKeyEvent——php-tui 把 F1..F12 都归到 FunctionKeyEvent(number=N)，
@@ -1283,6 +1950,29 @@ class App
             return; // 其余键一律吞掉：浮层是模态的
         }
 
+        // 终端默认就是交互式 pty：聚焦时敲第一个**可打印字符/回车**即自动进入捕获并把该键
+        // 转发给 shell，用户不必先按 F2。
+        //
+        // 只认可打印字符与回车（见 isAutoCaptureKey）：Tab / Esc / 方向键 / PgUp 等仍是应用
+        // 导航键 —— 否则焦点一到终端就被锁死，用户再也 Tab 不出去（这是本设计最容易踩的坑）。
+        if ($this->focusPanel() === 'terminal'
+            && $this->terminal->mode === 'pty'
+            && !$this->terminal->isCaptured()
+            && $this->isAutoCaptureKey($event)) {
+            // ⚠️ 必须在这里就把 shell 起好：正常路径是「聚焦后的首帧渲染」起 shell，
+            // 而触发捕获的这个键就在本帧的事件里 —— 等渲染完再转发，这个键已经没了
+            // （实测一次性灌 `ll\r`：首轮只处理事件不渲染，三个字节全丢）。
+            if (isset($a['terminal'])) {
+                $this->terminal->ensurePtyStarted($a['terminal']);
+            }
+            $this->terminal->enterCapture();
+            $bytes = KeyToPty::encode($event);
+            if ($bytes !== null) {
+                $this->terminal->sendToPty($bytes);
+            }
+            return;
+        }
+
         // 交互式 PTY 捕获态：终端面板聚焦且已捕获时，除 F2/Esc 退出键外，
         // 所有按键经 KeyToPty 编码后转发给 PTY（由真实 shell / 全屏程序解释），
         // 不再走下面的面板导航分发。
@@ -1348,6 +2038,13 @@ class App
                 $this->requestPaste();
                 return;
             }
+            // Ctrl+E：解释代码（AI 快捷动作）。**仅编辑器焦点**——终端里 Ctrl+E 是
+            // 行尾键必须交回 pty，AI 输入框有自己的按键语义，两边都不抢。
+            if (($event->modifiers & KeyModifiers::CONTROL) && strtolower($event->char) === 'e'
+                && $this->focusPanel() === 'editor') {
+                $this->aiQuickAction('explain');
+                return;
+            }
             // AI 输入/消息流：键入进输入框；Ctrl+P 切 Provider、Ctrl+N 切模型、
             // Ctrl+L 清空 —— 消息流聚焦时也要能用（不要求在输入框才能切）。
             $f = $this->focusPanel();
@@ -1407,6 +2104,14 @@ class App
                     $this->search->query .= $ch;
                     $this->search->editingQuery = true;
                 }
+                return;
+            }
+            // 扩展(插件) tab 交互：Space 切换选中插件的启用/禁用（无需进浮层）。
+            // 空格在 EventParser 里是普通可打印字符（CharKeyEvent(' ')），不是 Coded 键，
+            // 所以只能在这里拦。其余字符保持原有行为（落到下面，包括 'q' 退出）。
+            if ($this->focusPanel() === 'sidebar' && $this->sidebar->tabIndex === 3
+                && $event->char === ' ' && !($event->modifiers & KeyModifiers::CONTROL)) {
+                $this->sidebar->toggleSelectedPlugin();
                 return;
             }
             if (strtolower($event->char) === 'q') {
@@ -1477,6 +2182,12 @@ class App
         if ($e->kind === MouseEventKind::Down) {
             // 任何新点击先清掉上一次文本选择高亮（选区在 Up 后保留显示，直到下次点击）。
             $this->select = null;
+            // 状态栏可点段的选项列表开着时：点列表项 = 应用、点别处 = 关闭。
+            // 必须在菜单栏/状态栏其它点击判定**之前**：列表浮在上面，点哪里都先归它处理。
+            if ($this->picker !== null) {
+                $this->pickerMouse($e, $a, $vp);
+                return;
+            }
             // 菜单栏点击：菜单打开时点下拉条目/空白关闭；关闭时点菜单标签激活。
             // 菜单栏在第 0 行，与 PANELS 各面板不重叠（split 已把它切到独立区域）。
             if ($this->menuBar->isOpen()) {
@@ -1488,22 +2199,41 @@ class App
                     return;
                 }
             }
-            // V1.1 状态栏插件段点击。**放在 tryStartDrag 之前**做双重保险：
-            // 状态栏行本就不在拖拽区间（mainTop..status.y-1），先判就彻底不会和拖拽争。
+            // V1.1/V1.2 状态栏可点段：插件段执行命令，系统段弹出选项列表（语言 / 主题）。
+            // **放在 tryStartDrag 之前**做双重保险：状态栏行本就不在拖拽区间
+            // （mainTop..status.y-1），先判就彻底不会和拖拽争。
             // 命中判据是 StatusBarPanel 最后一帧的 placed，与取舍同源（被丢弃的段不可点）。
             if (isset($a['status']) && $e->row === $a['status']->position->y) {
-                $fq = $this->statusBar->clickSegment($e->column - $a['status']->position->x);
-                if ($fq !== null && $this->runPluginCommand($fq)) {
-                    return;
+                $hit = $this->statusBar->clickSegment($e->column - $a['status']->position->x);
+                if ($hit !== null) {
+                    if ($hit['cmd'] !== null && $this->runPluginCommand($hit['cmd'])) {
+                        return;
+                    }
+                    if ($hit['pick'] !== null && $this->openPicker($hit['pick'])) {
+                        return;   // 锚点由 openPicker 从 segmentX0 取，与命中同源
+                    }
                 }
             }
             // 分隔条拖拽优先于普通点击：命中任一条分隔条就进入拖拽，不触发聚焦/打开。
             if ($this->tryStartDrag($e, $a)) {
                 return;
             }
+            $pos = new Position($e->column, $e->row);
+            // Alt+点击（编辑器内容区）= 加一个编辑光标（多行同时编辑）。
+            // ⚠️ 必须在下面「记选区锚点」**之前** return：否则松手时会被当成拖选去复制到剪贴板，
+            // 加光标的同时还多出一个选区（两种语义撞在一起）。
+            if (($e->modifiers & KeyModifiers::ALT) !== 0
+                && isset($a['editor'])
+                && $this->editor->isSelectableAt($pos, $a['editor'])) {
+                $this->select = null;
+                if (!$this->editor->addCursorAtClick($pos, $a['editor'])) {
+                    // 落在主光标行 / 已有光标的行 → 不新增，退回普通点击（移动主光标、聚焦）
+                    $this->handleClick($e, $a);
+                }
+                return;
+            }
             // 文本选择锚点：在编辑器内容区 / 终端区内按下左键即记锚点；随后若发生 Drag
             // 则拉出选区，Up 时复制。纯点击（无 Drag）在 finishSelect 里清掉，不影响聚焦。
-            $pos = new Position($e->column, $e->row);
             if (isset($a['editor']) && $this->editor->isSelectableAt($pos, $a['editor'])) {
                 $this->select = ['panel' => 'editor', 'aRow' => $e->row, 'aCol' => $e->column, 'bRow' => $e->row, 'bCol' => $e->column];
             } elseif (isset($a['terminal']) && $a['terminal']->containsPosition($pos)) {
@@ -1525,59 +2255,76 @@ class App
         // 面板在拖拽轴上的最小可点击尺寸：小于它的面板，其拖拽容差带会吞掉整个内部，
         // 导致"点中间反而拖不动、无法聚焦"。此时把点击交给焦点逻辑；从相邻的大面板一侧仍可拖动调整。
         $min = 2 * $tol + 1;
-        $mainTop = $a['sidebar']->position->y;
+        // ⚠️ 被隐藏的面板在 $a 里**根本不存在**（split 不返回它），所以每条分隔条都要先确认
+        // 它两侧的面板都在 —— 否则隐藏侧栏/AI/终端后点一下就是 Undefined array key。
+        if (!isset($a['status'])) {
+            return false;
+        }
+        $mainTop = isset($a['sidebar']) ? $a['sidebar']->position->y
+            : (isset($a['editor']) ? $a['editor']->position->y
+                : (isset($a['terminal']) ? $a['terminal']->position->y
+                    : (isset($a['ai_stream']) ? $a['ai_stream']->position->y : 0)));
         $mainBottom = $a['status']->position->y; // 状态栏起始 = 主区底部
 
-        // 竖分隔条①：侧栏右边界（x = sidebar.x + sidebar.width）
-        $sidebarEdge = $a['sidebar']->position->x + $a['sidebar']->width;
-        if (abs($e->column - $sidebarEdge) <= $tol
-            && $e->row >= $mainTop && $e->row < $mainBottom) {
-            $key = $e->column <= $sidebarEdge ? 'sidebar' : 'editor';
-            if ($a[$key]->width > $min) {
-                $this->drag = ['which' => 'sidebar', 'horizontal' => false];
-                return true;
+        // 竖分隔条①：侧栏右边界（x = sidebar.x + sidebar.width）——两侧都得在
+        if (isset($a['sidebar'])) {
+            $sidebarEdge = $a['sidebar']->position->x + $a['sidebar']->width;
+            if (abs($e->column - $sidebarEdge) <= $tol
+                && $e->row >= $mainTop && $e->row < $mainBottom) {
+                $key = $e->column <= $sidebarEdge ? 'sidebar' : (isset($a['editor']) ? 'editor' : 'terminal');
+                if (isset($a[$key]) && $a[$key]->width > $min) {
+                    $this->drag = ['which' => 'sidebar', 'horizontal' => false];
+                    return true;
+                }
             }
         }
 
-        // 竖分隔条②：AI 列左边界（x = ai_stream.x）
-        $aiEdge = $a['ai_stream']->position->x;
-        if (abs($e->column - $aiEdge) <= $tol
-            && $e->row >= $mainTop && $e->row < $mainBottom) {
-            $key = $e->column < $aiEdge ? 'editor' : 'ai_stream';
-            if ($a[$key]->width > $min) {
-                $this->drag = ['which' => 'ai', 'horizontal' => false];
-                return true;
+        // 竖分隔条②：AI 列左边界（x = ai_stream.x）——左侧邻居是中间列
+        if (isset($a['ai_stream'])) {
+            $aiEdge = $a['ai_stream']->position->x;
+            if (abs($e->column - $aiEdge) <= $tol
+                && $e->row >= $mainTop && $e->row < $mainBottom) {
+                $key = $e->column < $aiEdge ? (isset($a['editor']) ? 'editor' : 'terminal') : 'ai_stream';
+                if (isset($a[$key]) && $a[$key]->width > $min) {
+                    $this->drag = ['which' => 'ai', 'horizontal' => false];
+                    return true;
+                }
             }
         }
 
-        // 横分隔条①：编辑器下边界（y = editor.y + editor.height），且仅在中间列水平范围内
-        $centerX = $a['editor']->position->x;
-        $centerW = $a['editor']->width;
-        $editorEdge = $a['editor']->position->y + $a['editor']->height;
-        if (abs($e->row - $editorEdge) <= $tol
-            && $e->column >= $centerX && $e->column < $centerX + $centerW) {
-            $key = $e->row < $editorEdge ? 'editor' : 'terminal';
-            if ($a[$key]->height > $min) {
-                $this->drag = ['which' => 'center', 'horizontal' => true];
-                return true;
+        // 横分隔条①：编辑器下边界（y = editor.y + editor.height），且仅在中间列水平范围内。
+        // 终端最大化 / 终端被隐藏时中列只有一段 → 没有这条分隔条。
+        if (isset($a['editor'], $a['terminal'])) {
+            $centerX = $a['editor']->position->x;
+            $centerW = $a['editor']->width;
+            $editorEdge = $a['editor']->position->y + $a['editor']->height;
+            if (abs($e->row - $editorEdge) <= $tol
+                && $e->column >= $centerX && $e->column < $centerX + $centerW) {
+                $key = $e->row < $editorEdge ? 'editor' : 'terminal';
+                if ($a[$key]->height > $min) {
+                    $this->drag = ['which' => 'center', 'horizontal' => true];
+                    return true;
+                }
             }
         }
 
         // 横分隔条②：AI 消息流下边界（y = ai_stream.y + ai_stream.height），且在 AI 列水平范围内
-        $aiX = $a['ai_stream']->position->x;
-        $aiW = $a['ai_stream']->width;
-        $aiEdgeY = $a['ai_stream']->position->y + $a['ai_stream']->height;
-        if (abs($e->row - $aiEdgeY) <= $tol
-            && $e->column >= $aiX && $e->column < $aiX + $aiW) {
-            // 工具栏图标画在 ai_input 顶边框（== aiEdgeY），点图标区应触发按钮而非拖拽，
-            // 否则 tryStartDrag 会抢先返回 true，handleClick 永远收不到 → 按钮无反应。
-            if ($this->ai->isToolbarBorderHit($e->column, $e->row, $a['ai_input'])) {
-                return false;
-            }
-            $key = $e->row < $aiEdgeY ? 'ai_stream' : 'ai_input';
-            if ($a[$key]->height > $min) {
-                $this->drag = ['which' => 'ai_input', 'horizontal' => true];
-                return true;
+        if (isset($a['ai_stream'], $a['ai_input'])) {
+            $aiX = $a['ai_stream']->position->x;
+            $aiW = $a['ai_stream']->width;
+            $aiEdgeY = $a['ai_stream']->position->y + $a['ai_stream']->height;
+            if (abs($e->row - $aiEdgeY) <= $tol
+                && $e->column >= $aiX && $e->column < $aiX + $aiW) {
+                // 工具栏图标画在 ai_input 顶边框（== aiEdgeY），点图标区应触发按钮而非拖拽，
+                // 否则 tryStartDrag 会抢先返回 true，handleClick 永远收不到 → 按钮无反应。
+                if ($this->ai->isToolbarBorderHit($e->column, $e->row, $a['ai_input'])) {
+                    return false;
+                }
+                $key = $e->row < $aiEdgeY ? 'ai_stream' : 'ai_input';
+                if ($a[$key]->height > $min) {
+                    $this->drag = ['which' => 'ai_input', 'horizontal' => true];
+                    return true;
+                }
             }
         }
 
@@ -1592,27 +2339,44 @@ class App
      */
     private function updateDrag(MouseEvent $e, array $a, Area $vp): void
     {
+        // ⚠️ 拖拽目标在 Down 时命中、Drag 时面板可能已经被hidden/maximize 掉（同一会话里
+        // 用户按了快捷键或点了菜单）→ 每个分支都要确认自己依赖的面板仍在 $a 里。
         switch ($this->drag['which']) {
             case 'sidebar':
-                // 新宽度 = 鼠标列 - 侧栏起点；上界受「视口 - AI 宽 - 中间列最小宽」限制
-                $maxW = $vp->width - $this->layout->aiWidth - LayoutConfig::MIN_CENTER;
+                if (!isset($a['sidebar'])) {
+                    break;
+                }
+                // 新宽度 = 鼠标列 - 侧栏起点；上界受「视口 - 可见的中间列最小宽」限制
+                // （AI 隐藏时那部分宽度可以全部让给侧栏）
+                $reserved = $this->layout->aiVisible ? $this->layout->aiWidth : 0;
+                $maxW = $vp->width - $reserved - LayoutConfig::MIN_CENTER;
                 $w = max(LayoutConfig::MIN_SIDEBAR, min($e->column - $a['sidebar']->position->x, $maxW));
                 $this->layout = $this->layout->withSidebarWidth($w);
                 break;
             case 'ai':
-                // 新宽度 = 视口右沿 - 鼠标列
-                $maxW = $vp->width - $this->layout->sidebarWidth - LayoutConfig::MIN_CENTER;
+                if (!isset($a['ai_stream'])) {
+                    break;
+                }
+                // 新宽度 = 视口右沿 - 鼠标列；上界同样只保留**可见的**侧栏宽度
+                $reserved = $this->layout->sidebarVisible ? $this->layout->sidebarWidth : 0;
+                $maxW = $vp->width - $reserved - LayoutConfig::MIN_CENTER;
                 $w = max(LayoutConfig::MIN_AI, min(($vp->position->x + $vp->width) - $e->column, $maxW));
                 $this->layout = $this->layout->withAiWidth($w);
                 break;
             case 'center':
-                // 比例 = 鼠标行到编辑器顶 / 中间列总高
+                // 比例 = 鼠标行到编辑器顶 / 中间列总高（两段都在才有这条分隔条）
+                if (!isset($a['editor'], $a['terminal'])) {
+                    break;
+                }
                 $centerH = $a['editor']->height + $a['terminal']->height;
                 $ratio = $centerH > 0 ? ($e->row - $a['editor']->position->y) / $centerH : 0.5;
                 $this->layout = $this->layout->withEditorRatio($ratio);
                 break;
             case 'ai_input':
                 // 新高度 = AI 列底沿 - 鼠标行；上界受「AI 列总高 - 消息流最小行」限制
+                if (!isset($a['ai_stream'], $a['ai_input'])) {
+                    break;
+                }
                 $aiH = $a['ai_stream']->height + $a['ai_input']->height;
                 $maxH = $aiH - LayoutConfig::MIN_AI_STREAM;
                 $h = max(LayoutConfig::MIN_AI_INPUT, min(($a['ai_stream']->position->y + $aiH) - $e->row, $maxH));
@@ -1635,6 +2399,11 @@ class App
     private function updateSelect(MouseEvent $e, array $a): void
     {
         $panel = $this->select['panel'];
+        if (!isset($a[$panel])) {
+            // 选区所属面板被隐藏了（拖选过程中按了隐藏入口）：丢弃这次拖选
+            $this->select = null;
+            return;
+        }
         $area = $a[$panel];
         $this->select['bRow'] = max($area->position->y, min($e->row, $area->position->y + $area->height - 1));
         $this->select['bCol'] = max($area->position->x, min($e->column, $area->position->x + $area->width - 1));
@@ -1650,6 +2419,11 @@ class App
         }
         [$r0, $c0, $r1, $c1] = $this->normalizeRect($s);
         $panel = $s['panel'];
+        if (!isset($a[$panel])) {
+            // 拖选期间那个面板被隐藏了：矩形已无意义，丢弃这次复制（不再动剪贴板）
+            $this->select = null;
+            return;
+        }
         if ($panel === 'editor') {
             $text = $this->editor->getTextRect($a['editor'], $r0, $c0, $r1, $c1);
         } else {
@@ -1672,6 +2446,122 @@ class App
         ];
     }
 
+    // ── AI 代码上下文附加（V2）──────────────────────────
+
+    /** 最近一次 areas() 的视口（attach 动作在按键/菜单路径里没有 vp 参数，用上一帧的） */
+    private ?Area $lastVp = null;
+
+    /** 编辑器选区 → AI 输入框（先拖选，再触发） */
+    public function aiAttachSelection(): void
+    {
+        if ($this->select === null || ($this->select['panel'] ?? '') !== 'editor') {
+            $this->setMessage($this->t('ai.attach_no_selection'));
+            return;
+        }
+        [$r0, $c0, $r1, $c1] = $this->normalizeRect($this->select);
+        $vp = $this->lastVp ?? Area::fromDimensions(120, 40);
+        $text = $this->editor->getTextRect($this->areas($vp)['editor'], $r0, $c0, $r1, $c1);
+        // 选区属于当前 buffer：带上它的路径（langFor 按扩展名取语言；无路径降级 '(selection)'）
+        $this->aiAttachCode($text, $this->buffer?->path ?? '(selection)');
+    }
+
+    /** 当前文件全文 → AI 输入框 */
+    public function aiAttachCurrentFile(): void
+    {
+        $buf = $this->buffer;
+        if ($buf === null) {
+            $this->setMessage($this->t('ai.attach_no_file'));
+            return;
+        }
+        $this->aiAttachCode(implode("\n", $buf->lines), $buf->path ?? '(buffer)');
+    }
+
+    /**
+     * 代码文本 → 围栏代码块字符串（选区/当前文件/@引用共用格式，M6 D3）。
+     * 超过 ai.attachMaxBytes 截断并标注。
+     */
+    private function codeBlockFor(string $code, ?string $path): string
+    {
+        $code = rtrim($code, "\n");
+        if (trim($code) === '') {
+            return '';
+        }
+        $note = '';
+        $max = ConfigStore::aiAttachMaxBytes();
+        if (strlen($code) > $max) {
+            $code = substr($code, 0, $max);
+            while ($code !== '' && !mb_check_encoding($code, 'UTF-8')) {
+                $code = substr($code, 0, -1);
+            }
+            $note = "\n（已截断到 {$max} 字节）";
+        }
+        // 相对路径展示（消息里不用绝对路径，且 langFor 按扩展名取语言）
+        $rel = $path ?? '';
+        $cwd = (string) getcwd();
+        if ($rel !== '' && str_starts_with($rel, $cwd . '/')) {
+            $rel = substr($rel, strlen($cwd) + 1);
+        }
+        $lang = $rel !== '' && $rel !== '(selection)' ? (\App\Editor\Highlighter::langFor($rel) ?? '') : '';
+        $head = ($rel !== '' && $rel !== '(selection)' ? "（文件 {$rel}：）\n" : '');
+        return $head . "```{$lang}\n{$code}\n```{$note}\n";
+    }
+
+    /**
+     * 代码文本 → 围栏代码块 → 注入 AI 输入框（V2）。
+     * 附加后焦点切到 ai_input 让用户接着提问。
+     */
+    private function aiAttachCode(string $code, ?string $path): void
+    {
+        $block = $this->codeBlockFor($code, $path);
+        if ($block === '') {
+            $this->setMessage($this->t('ai.attach_empty'));
+            return;
+        }
+        $cur = $this->ai->input();
+        if ($cur !== '' && !str_ends_with($cur, "\n")) {
+            $this->ai->insertText("\n");
+        }
+        $this->ai->insertText($block);
+        $this->focusIndex = array_search('ai_input', self::PANELS, true);
+        $this->setMessage($this->t('ai.attached', ['n' => (string) strlen($block)]));
+    }
+
+    /**
+     * AI 快捷动作（V2 M7）：解释/注释/重构/单测。
+     * 上下文取编辑器选区（拖选高亮仍保留时），无选区用当前文件，两者皆无就只发指令。
+     * 直接发送（不等用户再按回车）——「快捷动作」的语义就是一步出结果。
+     */
+    private function aiQuickAction(string $kind): void
+    {
+        $labels = ['explain' => 'ai.act.explain', 'comment' => 'ai.act.comment', 'refactor' => 'ai.act.refactor', 'unittest' => 'ai.act.unittest'];
+        if (!isset($labels[$kind])) {
+            return;
+        }
+        $instruction = $this->t($labels[$kind]);
+        $prompt = $instruction;
+
+        $code = null;
+        $path = null;
+        if ($this->select !== null && ($this->select['panel'] ?? '') === 'editor') {
+            [$r0, $c0, $r1, $c1] = $this->normalizeRect($this->select);
+            $vp = $this->lastVp ?? Area::fromDimensions(120, 40);
+            $code = $this->editor->getTextRect($this->areas($vp)['editor'], $r0, $c0, $r1, $c1);
+            $path = $this->buffer?->path;
+        } elseif ($this->buffer !== null) {
+            $code = implode("\n", $this->buffer->lines);
+            $path = $this->buffer->path;
+        }
+        $block = $this->codeBlockFor((string) $code, $path);
+        if ($block !== '') {
+            $prompt .= "\n\n" . $block;
+        }
+        $this->chat->clear(); // 快捷动作起全新对话：上一轮问答跟本次代码无关，混着反而误导模型
+        $this->ai->resetForPrompt();
+        // 带上 kind：策略可以按任务类型自动选档（如 unittest → 优质档）
+        $this->ai->sendPrompt($prompt, $kind);
+        $this->focusIndex = array_search('ai_stream', self::PANELS, true);
+    }
+
     /** 取内存剪贴板内容（非 tty 降级路径；主要给单测断言用） */
     public function clipboardPeek(): string
     {
@@ -1687,7 +2577,7 @@ class App
     /**
      * 请求粘贴（读剪贴板）：按当前焦点定插入目标，再读剪贴板内容插入。
      * - editor  → 编辑器缓冲区光标处
-     * - terminal → runner 输入行光标处 / pty 捕获态转发给 shell；pty 非捕获态忽略
+     * - terminal → runner 输入行光标处 / pty 转发给 shell（非捕获态会先进捕获，粘贴即打字）
      * - ai_input / ai_stream → AI 输入框
      * - 其余（sidebar 等）→ 无目标，忽略
      * tty 环境走 OSC 52 异步读取（暂存 pasteTarget，响应回来再插入）；
@@ -1698,7 +2588,7 @@ class App
         $f = $this->focusPanel();
         $target = match ($f) {
             'editor' => 'editor',
-            'terminal' => ($this->terminal->mode === 'pty' && !$this->terminal->captured) ? null : 'terminal',
+            'terminal' => 'terminal',
             'ai_input', 'ai_stream' => 'ai_input',
             default => null,
         };
@@ -1740,6 +2630,12 @@ class App
                 $this->buffer?->insertText($text);
                 break;
             case 'terminal':
+                // 交互 shell 可能还没起（默认 pty 下要等聚焦后的首帧渲染）：
+                // 粘贴走的是「异步剪贴板读回」，本来不信赖渲染帧，这里显式补上，
+                // 免得默认 pty 下第一次 Ctrl+V 把内容丢进一个不存在的 shell。
+                if ($this->lastVp !== null) {
+                    $this->terminal->ensurePtyStarted($this->areas($this->lastVp)['terminal']);
+                }
                 $this->terminal->pasteText($text);
                 break;
             case 'ai_input':
@@ -1753,7 +2649,7 @@ class App
     public function layoutSummary(): string
     {
         $c = $this->layout;
-        return sprintf(
+        $s = sprintf(
             '%s%d %s%d %s%d%% %s%d',
             $this->t('status.l_sidebar'),
             $c->sidebarWidth,
@@ -1764,6 +2660,23 @@ class App
             $this->t('status.l_input'),
             $c->aiInputHeight,
         );
+        // 只在**真有隐藏**时追加：默认态的输出必须一字不变（大量宽度/内容断言按它写）。
+        $hidden = [];
+        if (!$c->sidebarVisible) {
+            $hidden[] = $this->t('status.hidden_sidebar');
+        }
+        if (!$c->aiVisible) {
+            $hidden[] = $this->t('status.hidden_ai');
+        }
+        if (!$c->terminalVisible) {
+            $hidden[] = $this->t('status.hidden_terminal');
+        } elseif ($c->terminalMaximized) {
+            $hidden[] = $this->t('status.term_max');
+        }
+        if ($hidden !== []) {
+            $s .= ' ' . $this->t('status.hidden') . ':' . implode('/', $hidden);
+        }
+        return $s;
     }
 
     /**
@@ -1787,6 +2700,11 @@ class App
                     'aiWidth' => $this->layout->aiWidth,
                     'editorRatio' => $this->layout->editorRatio,
                     'aiInputHeight' => $this->layout->aiInputHeight,
+                    // 显隐/最大化（B16）也随偏好落盘：下次启动保持上次的面板布局
+                    'sidebarVisible' => $this->layout->sidebarVisible,
+                    'aiVisible' => $this->layout->aiVisible,
+                    'terminalVisible' => $this->layout->terminalVisible,
+                    'terminalMaximized' => $this->layout->terminalMaximized,
                 ],
                 'theme' => $this->theme->id,
                 'locale' => $this->i18n->locale(),
@@ -1795,6 +2713,200 @@ class App
         } catch (\Throwable $e) {
             return false;
         }
+    }
+
+    /**
+     * Tab 补全状态（供渲染与测试读取）。
+     *
+     * provider 的登记**不**从这里做：内建的在构造期 `registerBuiltinCompletions()`，
+     * 插件的随 `rebuildPluginRegistrations()` 重建 —— 两条生命周期不同，别混。
+     */
+    public function completion(): CompletionState
+    {
+        return $this->completion;
+    }
+
+    /**
+     * 按当前焦点算出补全上下文；空串 = 这里没有补全语义（浮层应关闭）。
+     *
+     * 只有这四处有输入：AI 输入框 / 编辑器 / 侧栏 SEARCH 的查询框 / 侧栏 GIT 的提交信息框。
+     */
+    private function completionContext(): string
+    {
+        $f = $this->focusPanel();
+        if ($f === 'ai_input') {
+            return 'ai_input';
+        }
+        if ($f === 'editor') {
+            return $this->buffer === null ? '' : 'editor';
+        }
+        if ($f === 'sidebar') {
+            if ($this->sidebar->tabIndex === 2) {
+                return 'search';
+            }
+            if ($this->sidebar->tabIndex === 1) {
+                return 'commit';
+            }
+        }
+        return '';
+    }
+
+    /** 有模态浮层/确认框打开时不该弹候选（它们独占键盘，底下还在弹候选会分不清谁在响应） */
+    private function completionModalOpen(): bool
+    {
+        return $this->confirm !== null
+            || $this->menuBar->isOpen()
+            || $this->help->isOpen()
+            || $this->help->isAboutOpen()
+            || $this->pluginsPanel->isOpen()
+            || $this->palette->isOpen()
+            || $this->panelHost->isOpen();
+    }
+
+    /**
+     * 当前上下文的文本与光标（**字符**下标）。
+     *
+     * AI 输入框 / 搜索框 / 提交框都**没有光标位**（只能末尾追加），故光标一律按末尾算 ——
+     * 这也意味着补全只对「末尾那个 `@token`」生效（见本文件顶部 Tab 机制的说明）。
+     *
+     * @return array{0:string,1:int}
+     */
+    private function completionInput(string $ctx): array
+    {
+        switch ($ctx) {
+            case 'ai_input':
+                $t = $this->ai->input();
+                return [$t, mb_strlen($t)];
+            case 'editor':
+                $b = $this->buffer;
+                return $b === null ? ['', 0] : [$b->currentLine(), $b->cursorCol];
+            case 'search':
+                $t = $this->search->query;
+                return [$t, mb_strlen($t)];
+            case 'commit':
+                $t = $this->git->commitMsg;
+                return [$t, mb_strlen($t)];
+        }
+        return ['', 0];
+    }
+
+    /**
+     * 取光标前正在输入的那段**非空白 token**（空串 = 光标前是空白/行首，没有可补全的东西）。
+     *
+     * ⚠️ 这里**不判触发符**：`@` 只是内建文件补全自己的约定，核心不该替 provider 决定
+     * "什么前缀才值得补全"。插件完全可以认别的前缀 —— 例如 AI 输入框已有的 `/plan` 这类
+     * 指令前缀，`/` 一样能被补全。认不认由 provider 自己看 `$prefix` 决定。
+     */
+    private function completionPrefix(string $text, int $cursor): string
+    {
+        $head = mb_substr($text, 0, max(0, $cursor));
+        return preg_match('/(\S+)$/u', $head, $m) === 1 ? $m[1] : '';
+    }
+
+    /** 重算候选（`handle()` 末尾统一调用，见那里的注释） */
+    private function syncCompletion(): void
+    {
+        if ($this->completionJustAccepted) {
+            $this->completionJustAccepted = false;   // 只用一次
+            return;
+        }
+        if ($this->completionModalOpen()) {
+            $this->completion->close();
+            return;
+        }
+        $ctx = $this->completionContext();
+        if ($ctx === '') {
+            $this->completion->close();
+            return;
+        }
+        [$text, $cursor] = $this->completionInput($ctx);
+        $this->completion->refresh($ctx, $text, $cursor, $this->completionPrefix($text, $cursor));
+    }
+
+    /**
+     * Tab / Shift+Tab 的统一实现（两条路径共用，避免语义漂移）。
+     *
+     * 规则（已与用户确认的口径）：
+     *  - **有候选**：Tab = 接受补全；Shift+Tab = 上一个候选。两者都吞掉。
+     *  - **无候选**：只有「多行上下文」才缩进 —— 编辑器（光标处）/ AI 输入框（末尾，它没有光标位）；
+     *    Shift+Tab 是反向缩进。
+     *  - 单行输入（搜索框 / GIT 提交框）与其它面板**不吞**，落回全局「Tab 切焦点」：
+     *    单行没有"行"可缩进，而这样键盘切面板的能力不丢。
+     *
+     * @param bool $back true = Shift+Tab
+     * @return bool 是否消费了这个键
+     */
+    private function handleTabKey(bool $back): bool
+    {
+        if ($this->completion->isActive()) {
+            if ($back) {
+                $this->completion->move(-1);
+                return true;
+            }
+            return $this->acceptCompletion();
+        }
+        $ctx = $this->completionContext();
+        if ($ctx === 'editor') {
+            return $this->editor->indent($back);
+        }
+        if ($ctx === 'ai_input') {
+            if ($back) {
+                return $this->ai->outdentTail();
+            }
+            $this->ai->insertIndent();
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 接受当前候选：把 `[prefixStart, 光标)` 那段换成 `item->insert`。
+     *
+     * 一律 `return true`（连"候选恰好空了"也吞掉）：Tab 在输入态已经被定义为补全键，
+     * 让它偶尔退化成"切焦点"会让焦点莫名其妙跑掉。
+     */
+    private function acceptCompletion(): bool
+    {
+        $item = $this->completion->current();
+        $ctx = $this->completion->context();
+        $start = $this->completion->prefixStart();
+        $this->completion->close();
+        // 本次按键末尾不许再弹（补全后的 token 仍然匹配前缀，否则会立刻重现）
+        $this->completionJustAccepted = true;
+        if ($item === null) {
+            return true;
+        }
+        switch ($ctx) {
+            case 'ai_input':
+                $this->ai->replaceTail($start, $item->insert);
+                break;
+            case 'editor':
+                // 边界情况：缓冲区为空时 `?->` 会短路，实参不求值
+                $this->buffer?->replaceRange($start, $this->buffer->cursorCol, $item->insert);
+                break;
+            case 'search':
+                $this->search->query = mb_substr($this->search->query, 0, $start) . $item->insert;
+                break;
+            case 'commit':
+                $this->git->commitMsg = mb_substr($this->git->commitMsg, 0, $start) . $item->insert;
+                break;
+        }
+        return true;
+    }
+
+    /** 候选浮层的锚点矩形：贴在"正在输入的那一行"上（编辑器贴光标行，其余贴输入框/输入行） */
+    private function completionAnchor(array $areas): ?Area
+    {
+        switch ($this->completion->context()) {
+            case 'ai_input':
+                return $areas['ai_input'] ?? null;
+            case 'editor':
+                return isset($areas['editor']) ? $this->editor->cursorRowArea($areas['editor']) : null;
+            case 'search':
+            case 'commit':
+                return isset($areas['sidebar']) ? $this->sidebar->inputRowArea($areas['sidebar']) : null;
+        }
+        return null;
     }
 
     private function handleCoded(CodedKeyEvent $e, array $a): void
@@ -1814,6 +2926,22 @@ class App
             return;
         }
 
+        // Tab / Shift+Tab：补全与缩进要在**面板 onKey 之前**处理，原因有两条：
+        //  ① 「候选打开时按 Esc 关候选」必须抢在全局「Esc 退出程序」之前（否则会误退）；
+        //  ② Ctrl+Tab 是编辑器的切 buffer，绝不能抢 —— 故这里显式排除 CONTROL。
+        if ($e->code === KeyCode::Tab && !($e->modifiers & KeyModifiers::CONTROL)) {
+            if ($this->handleTabKey(false)) {
+                return;
+            }
+        }
+        if ($e->code === KeyCode::BackTab && $this->handleTabKey(true)) {
+            return;
+        }
+        if ($e->code === KeyCode::Esc && $this->completion->isActive()) {
+            $this->completion->close();
+            return;
+        }
+
         $focus = $this->focusPanel();
 
         // 焦点面板优先消费自己的按键；返回 false 的键（全局键 Esc/Tab、以及非本面板键）
@@ -1826,11 +2954,17 @@ class App
 
         switch ($e->code) {
             case KeyCode::Esc:
-                // 终端：运行中→中断命令；有输入→清空输入；否则才退出
+                // 终端：**runner 模式**下运行中→中断命令；有输入→清空输入；否则才退出
                 // （Esc 不归任何面板的 onKey，故走到这里统一处理）
-                if ($focus === 'terminal' && $this->terminal->isRunning()) {
+                //
+                // ⚠️ 必须判 mode === 'runner'：pty 模式下 isRunning() **恒真**（交互 shell 一直
+                // 活着），照旧写法会让 Esc 落进 cancel() 而 cancel() 对 pty 是空操作 ——
+                // 结果是非捕获 pty 下按 Esc 被**静默吞掉**，什么都不发生。
+                // 捕获态的 Esc 更早（捕获分支）就被消费成「退出捕获」，到不了这里。
+                $runner = $focus === 'terminal' && $this->terminal->mode === 'runner';
+                if ($runner && $this->terminal->isRunning()) {
                     $this->terminal->cancel();
-                } elseif ($focus === 'terminal' && $this->terminal->input !== '') {
+                } elseif ($runner && $this->terminal->input !== '') {
                     $this->terminal->clearInput();
                 } else {
                     $this->lifecycle->requestQuit();
@@ -1839,7 +2973,16 @@ class App
             case KeyCode::Tab:
                 // Ctrl+Tab 切 buffer 已由 EditorPanel::onKey 处理，这里只剩全局切焦点
                 // 走 focus() 而不是直接改下标：这样焦点变化才会广播 focus.changed 事件
-                $this->focus(self::PANELS[($this->focusIndex + 1) % count(self::PANELS)]);
+                //
+                // ⚠️ 注意：Tab 在多行输入上下文（编辑器 / AI 输入框）已被上面的 handleTabKey
+                // 拦成「补全或缩进」，走不到这里；能到这里的是单行输入与其它面板（口径见计划）。
+                // 切焦点只在**可见**面板之间循环（隐藏的面板不该被 Tab 切到）。
+                $this->focusNext(1);
+                break;
+            case KeyCode::BackTab:
+                // Shift+Tab 的反向切焦点。原本这个键**全项目零处理**（被静默吞掉）；
+                // 给它在非输入上下文补上反向切焦点，与 Tab 对称（输入上下文里它已用于反向缩进/上一个候选）。
+                $this->focusNext(-1);
                 break;
             case KeyCode::Backspace:
                 // AI 输入框退格（AiPanel::onKey 已处理，这里是历史遗留的空分支，保留以防
@@ -1873,13 +3016,14 @@ class App
         $pos = new Position($col, $row);
 
         // 侧栏：tab 行 + 树条目（行首三角展开/折叠、双击展开、单击文件打开都由面板自己处理）
-        if ($a['sidebar']->containsPosition($pos) && $this->sidebar->onClick($pos, $a)) {
+        if (isset($a['sidebar']) && $a['sidebar']->containsPosition($pos) && $this->sidebar->onClick($pos, $a)) {
             return;
         }
 
         // 命中测试：点哪个面板就聚焦哪个；点编辑器则按坐标定位光标（R6）
+        // ⚠️ `$key` 来自 PANELS 常量（含被隐藏的面板），必须 isset 才能查矩形。
         foreach (self::PANELS as $key) {
-            if ($a[$key]->containsPosition($pos)) {
+            if (isset($a[$key]) && $a[$key]->containsPosition($pos)) {
                 if ($key === 'editor') {
                     // 点 tab 栏切 buffer / 按坐标定位光标，都由编辑器面板处理（它会自己聚焦）
                     $this->editor->onClick($pos, $a);

@@ -17,9 +17,12 @@ declare(strict_types=1);
  * 运行：timeout 120 php tests/pty_r5.php
  */
 
+require __DIR__ . '/lib/isolation.php';
+
 $env = array_merge(getenv(), ['COLUMNS' => '120', 'LINES' => '40', 'APP_LOCALE' => 'en']);
-// 隔离配置：pty 退出会写 ~/.vicerc，落到临时文件避免污染真实家目录配置。
-$env['VICECODE_CONFIG'] = tempnam(sys_get_temp_dir(), 'vc_r5cfg');
+// 隔离配置：pty 退出会写 ~/.vicerc。必须独占目录——tempnam 落在 /tmp 根，dirname 就是 /tmp，
+// 父子进程会一起读 /tmp/.vicecode_ai（对话存档）与 /tmp/.vicecode_session。
+$env['VICECODE_CONFIG'] = vc_isolate_config('vc_r5_pty');
 
 // 临时禁用插件目录：内置 clock 插件每秒在状态栏写时间数字，与布局摘要段（side/AI/edit/input）
 // 同处一行，跨帧位置漂移会让 rebuildScreen 把时钟数字穿插进摘要段、产生「input52」「side 缺数字」

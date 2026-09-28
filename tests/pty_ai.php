@@ -19,6 +19,7 @@ declare(strict_types=1);
 chdir(__DIR__ . '/..');
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 use App\App;
 use PhpTui\Tui\Display\Area;
 
@@ -106,10 +107,12 @@ if (!$up) {
 
 // ── 起应用（pty）──────────────────────────────────────
 $base = 'http://127.0.0.1:' . $port . '/v1';
+// 独占配置目录（tempnam 的 dirname 是 /tmp，父子进程都会去读 /tmp/.vicecode_ai 串档）
+$cfg = vc_isolate_config('vc_ai_pty');
 $env = array_merge(getenv(), [
     'COLUMNS'          => '200',
     'LINES'            => '50',
-    'VICECODE_CONFIG' => tempnam(sys_get_temp_dir(), 'vc_ai'),
+    'VICECODE_CONFIG' => $cfg,
     'OPENAI_BASE_URL'  => $base,
     'OPENAI_API_KEY'   => 'test-key-local-mock',
     'DEEPSEEK_BASE_URL' => $base,

@@ -142,6 +142,12 @@ final class Theme
                 'aiDim' => AnsiColor::DarkGray,
                 'aiErr' => AnsiColor::Red,
 
+                // AI Markdown（V2）：标题/行内码/引用/链接
+                'mdHeading' => AnsiColor::Yellow,
+                'mdCode' => AnsiColor::Green,
+                'mdQuote' => AnsiColor::Gray,
+                'mdLink' => AnsiColor::LightBlue,
+
                 // 帮助页
                 'helpGroup' => AnsiColor::Yellow,
 
@@ -233,6 +239,12 @@ final class Theme
                 'aiUser' => AnsiColor::LightCyan,
                 'aiDim' => AnsiColor::Blue,
                 'aiErr' => AnsiColor::LightRed,
+
+                // AI Markdown（V2）：与 dark 表同名同职责
+                'mdHeading' => AnsiColor::LightYellow,
+                'mdCode' => AnsiColor::LightGreen,
+                'mdQuote' => AnsiColor::White,
+                'mdLink' => AnsiColor::LightBlue,
 
                 'helpGroup' => AnsiColor::LightYellow,
 

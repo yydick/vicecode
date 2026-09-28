@@ -82,7 +82,10 @@ final class MenuBarPanel
      */
     public function definitions(): array
     {
-        $t = fn(string $k): string => $this->shell->t($k);
+        // ⚠️ 必须收下 `$params` 并转交：这个闭包原来只声明了 `$k`，于是 `$t('ai.strategy_item',
+        // ['label' => …])` 的第二个实参被**静默丢弃** → 菜单里策略项一直显示字面量 `策略：{label}`。
+        // PHP 对"多传的实参"不报错，所以这个 bug 需要靠"菜单文案里真的有策略名"才能发现。
+        $t = fn(string $k, array $params = []): string => $this->shell->t($k, $params);
         $defs = [
             [
                 'label' => $t('menu.file'),
@@ -104,6 +107,16 @@ final class MenuBarPanel
                     ['label' => $t('menu.view_focus_ai'),     'action' => 'view.focus.ai',     'shortcut' => 'Tab'],
                     ['label' => $t('menu.command_palette'),    'action' => 'palette.open',      'shortcut' => 'F1'],
                     ['label' => $t('menu.plugin_panels'),       'action' => 'panel.host.open',   'shortcut' => ''],
+                    // 面板显隐 / 终端最大化（B16）：label 随当前状态切换（同 ai.tool_mode 的写法）——
+                    // 菜单是「动作」语境，用户要看到「按下去会发生什么」，而不是一个开关名字。
+                    ['label' => $this->shell->layout->sidebarVisible ? $t('menu.view_sidebar_hide') : $t('menu.view_sidebar_show'),
+                        'action' => 'view.toggle_sidebar', 'shortcut' => ''],
+                    ['label' => $this->shell->layout->aiVisible ? $t('menu.view_ai_hide') : $t('menu.view_ai_show'),
+                        'action' => 'view.toggle_ai', 'shortcut' => ''],
+                    ['label' => $this->shell->layout->terminalVisible ? $t('menu.view_term_hide') : $t('menu.view_term_show'),
+                        'action' => 'view.toggle_terminal', 'shortcut' => ''],
+                    ['label' => $this->shell->layout->terminalMaximized ? $t('menu.view_term_restore') : $t('menu.view_term_max'),
+                        'action' => 'view.toggle_terminal_max', 'shortcut' => ''],
                     ['label' => $t('menu.view_lang'),     'action' => 'view.lang',     'shortcut' => ''],
                 ],
             ],
@@ -121,7 +134,52 @@ final class MenuBarPanel
                     ['label' => $t('menu.help_about'),     'action' => 'help.about',     'shortcut' => ''],
                 ],
             ],
+            // V2：AI 组放在 Help 之后、插件组之前——前 4 组的下标与项序保持不变
+            //（plugin_v11_unit 有索引稳定性硬断言），插件组仍在**最后一个系统组之后**。
+            [
+                'label' => $t('menu.ai'),
+                'items' => [
+                    ['label' => $t('ai.act.explain'),   'action' => 'ai.explain',        'shortcut' => 'Ctrl+E'],
+                    ['label' => $t('ai.act.comment'),   'action' => 'ai.comment',        'shortcut' => ''],
+                    ['label' => $t('ai.act.refactor'),  'action' => 'ai.refactor',       'shortcut' => ''],
+                    ['label' => $t('ai.act.unittest'),  'action' => 'ai.unittest',       'shortcut' => ''],
+                    ['label' => $t('ai.attach_selection_label'), 'action' => 'ai.attach_selection', 'shortcut' => ''],
+                    ['label' => $t('ai.attach_file_label'),      'action' => 'ai.attach_file',      'shortcut' => ''],
+                    ['label' => $this->shell->chat->toolAutoRun() ? $t('ai.tool_mode_confirm') : $t('ai.tool_mode_auto'),
+                                                              'action' => 'ai.tool_mode',      'shortcut' => ''],
+                    ['label' => $t('ai.compact_now_label'),      'action' => 'ai.compact_now',    'shortcut' => ''],
+                    ['label' => $t('ai.providers_label'),        'action' => 'ai.providers_config', 'shortcut' => ''],
+                    ['label' => $t('ai.cleared_menu'),           'action' => 'ai.clear',          'shortcut' => ''],
+                ],
+            ],
         ];
+        // 模型策略（用户级配置的 @strategies，可能一条都没配）：每条一个菜单项（直接选中某一条，
+        // 比只能循环切更好用）。命令面板的条目是从菜单定义派生的，所以这里加完面板里就能搜到。
+        $strategies = $this->shell->chat->strategies();
+        if ($strategies !== []) {
+            foreach ($defs as $i => $g) {
+                if (($g['label'] ?? '') === $t('menu.ai')) {
+                    // 第一项是「自动」（默认状态：按任务类型自己挑），后面每条策略一个条目
+                    $defs[$i]['items'][] = [
+                        'label'    => $t('ai.strategy_auto_item'),
+                        'action'   => 'ai.strategy_auto',
+                        'shortcut' => '',
+                    ];
+                    foreach ($strategies as $name => $st) {
+                        // 此刻打折的档位直接标出来——用户"该切哪一档"的答案就在菜单里，
+                        // 不必先切过去再看状态栏。判定是实时的（见 ChatModel::offPeakActive 同源）。
+                        $tier = $this->shell->chat->strategyOffPeakActive($name);
+                        $defs[$i]['items'][] = [
+                            'label'    => $t('ai.strategy_item', ['label' => $st->label])
+                                . ($tier ? ' · ' . $t('ai.strategy_offpeak_item') : ''),
+                            'action'   => 'ai.strategy:' . $name,
+                            'shortcut' => '',
+                        ];
+                    }
+                    break;
+                }
+            }
+        }
         // V1.1：插件命令组**只追加在末尾** —— 系统 4 组的下标与项序一概不变，
         // 下面那些按 $this->active/$this->sel 取数组的地方才不会错位。
         $pluginItems = $this->shell->pluginMenuItems();

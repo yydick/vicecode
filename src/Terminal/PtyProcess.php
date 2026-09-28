@@ -21,7 +21,8 @@ final class PtyProcess
      * 0=master输入 1=master输出(含stderr)。
      * 声明为 mixed 而非 array：proc_open 的 $pipes 引用参数回填的是 stream resource，
      * AOT（TypePHP）严格类型检查会拒绝把 resource 赋给 array 属性
-     * （见 docs/AOT_INCOMPATIBILITY_REPORT.md ②）。标准 PHP 下 array 也接受 resource 元素，
+     * （见 docs/AOT_INCOMPATIBILITY_REPORT.md ②「resource 不能赋给 array 类型属性」）。
+     * 标准 PHP 下 array 也接受 resource 元素，
      * 故改 mixed 不改变运行时行为；仅为 AOT 编译兼容。
      * @var array<int, resource>
      */
@@ -98,10 +99,9 @@ final class PtyProcess
         // 其它 shell（zsh/fish 等）暂不支持 cwd 捕获，退回原 exec "$0" -i 行为。
         $base = basename($shell);
         if ($base === 'bash') {
-            $rc = $this->buildIntegrationRc($rows, $cols);
             $tmp = tempnam(sys_get_temp_dir(), 'vicetui_rc_');
             if ($tmp !== false) {
-                file_put_contents($tmp, $rc);
+                file_put_contents($tmp, $this->buildIntegrationRc($rows, $cols, $tmp));
                 $this->rcFile = $tmp;
                 $argv = [$shell, '--rcfile', $tmp, '-i'];
             } else {
@@ -139,9 +139,17 @@ final class PtyProcess
 
     /**
      * 生成注入 bash 的 rcfile：先设窗口尺寸、source 用户 ~/.bashrc（保留其环境），
-     * 再 append 一个 PROMPT_COMMAND 钩子，在每轮提示符前经自定义 OSC 回显 $PWD。
+     * 再 append 一个 PROMPT_COMMAND 钩子，在每轮提示符前经自定义 OSC 回显 $PWD，
+     * **最后一行把自己删掉**（见下）。
+     *
+     * ⚠️ 自删是必需的，不是优化：这个临时文件的用处只在「bash 启动时读一次」，
+     * 但它的生命周期原先挂在 shell 进程 / 应用的 finally 上 —— 凡是不执行 finally 的退出路径
+     * （终端关闭 → SIGHUP 直接终止进程；SIGKILL）都会把它永久留在 /tmp（实测关一次终端 +1）。
+     * 由 bash 读完即删之后，文件寿命只有毫秒级，**任何**退出路径都不可能残留。
+     * 安全性：`unlink` 只摘掉目录项，bash 此时已持有该 fd，仍能继续读到 EOF —— 且这行是最后
+     * 一行，执行到它时后续已无内容可读（实测：bash 照常起、提示符正常、命令正常执行）。
      */
-    private function buildIntegrationRc(int $rows, int $cols): string
+    private function buildIntegrationRc(int $rows, int $cols, string $rcPath): string
     {
         $rc = sprintf("stty rows %d cols %d 2>/dev/null\n", $rows, $cols);
         $home = getenv('HOME');
@@ -150,6 +158,7 @@ final class PtyProcess
         }
         $rc .= '__vicetui_cwd() { printf \'\033]777;vicetui;cwd=%s\007\' "$PWD"; }' . "\n";
         $rc .= 'PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__vicetui_cwd"' . "\n";
+        $rc .= 'command rm -f -- ' . escapeshellarg($rcPath) . "\n";
         return $rc;
     }
 
@@ -207,18 +216,24 @@ final class PtyProcess
         }
         $st = proc_get_status($this->proc);
         if ($st['running'] === false) {
-            $this->exitCode = $st['exitcode'];
+            // proc_get_status 只在**首次**报告真实退出码，之后再问会变成 -1；
+            // 而本方法现在有两个调用点（主循环 poll 与 TerminalPanel::syncShellState 的按键路径），
+            // 故只认第一次的值，别被后续调用覆盖成 -1。
+            $this->exitCode ??= $st['exitcode'];
             $this->running = false;
             return true;
         }
         return false;
     }
 
-    /** 强制杀掉并回收（退出应用 / 测试收尾时调用） */
+    /** 强制杀掉并回收（退出应用 / 测试收尾时调用）。幂等。 */
     public function shutdown(): void
     {
         if (!is_resource($this->proc)) {
+            // 进程句柄已经没了（例如 pollExited 结算过）也要删掉 rc 文件——
+            // 早期版本在这里直接 return，导致 shell 自行退出后 /tmp/vicetui_rc_* 永久残留。
             $this->running = false;
+            $this->cleanupRcFile();
             return;
         }
         if ($this->running) {
@@ -238,9 +253,15 @@ final class PtyProcess
         $this->proc = null;
         $this->pipes = [];
         $this->running = false;
+        $this->cleanupRcFile();
+    }
+
+    /** 删掉 bash `--rcfile` 用的临时文件（shell 启动后即可安全删除） */
+    private function cleanupRcFile(): void
+    {
         if ($this->rcFile !== null && is_file($this->rcFile)) {
             @unlink($this->rcFile);
-            $this->rcFile = null;
         }
+        $this->rcFile = null;
     }
 }

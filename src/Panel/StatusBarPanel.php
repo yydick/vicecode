@@ -123,8 +123,8 @@ final class StatusBarPanel
      * 按最终 join 顺序给出每段的列区间 [x0,x1]（相对状态栏左沿，含端点）。
      * 必须与 join() 逐列对齐：join() 结果带前导 1 空格 → 起始 x=1；
      * 't'==='' 的段被 join() 跳过 → 不产出矩形；段间分隔符不归入任何段。
-     * @param array<int,array{k:string,p:int,o:int,t:string,pfix?:string,cmd?:?string}> $kept
-     * @return array<int,array{k:string,cmd:?string,x0:int,x1:int}>
+     * @param array<int,array{k:string,p:int,o:int,t:string,pfix?:string,cmd?:?string,pick?:?string}> $kept
+     * @return array<int,array{k:string,cmd:?string,pick:?string,x0:int,x1:int}>
      */
     private function placeWidths(array $kept, int $width): array
     {
@@ -142,6 +142,8 @@ final class StatusBarPanel
             $placed[] = [
                 'k' => $s['k'],
                 'cmd' => $s['cmd'] ?? null,
+                // 系统段自己的选项列表 id（V1.2 可点段）；与 cmd 互斥，二者都不为 null 才算可点
+                'pick' => $s['pick'] ?? null,
                 'x0' => $x,
                 'x1' => min($x + $w - 1, $width - 1),
             ];
@@ -151,17 +153,38 @@ final class StatusBarPanel
     }
 
     /**
-     * 命中测试：相对状态栏左沿的列 → 该段要执行的完全限定命令 id。
-     * 未命中（空列 / 分隔符 / 系统段 / 无命令的段 / 已被整条确认占用）返回 null。
+     * 某个段本帧的左沿列（相对状态栏左沿）；段被丢弃/本帧没摆上则返回 null。
+     *
+     * 选项列表要靠它把浮层对齐到被点的那个段上。取「最后一帧摆放结果」与命中判定同源，
+     * 所以「看不见的段」自然没有锚点。
+     */
+    public function segmentX0(string $k): ?int
+    {
+        foreach ($this->lastPlaced as $p) {
+            if ($p['k'] === $k) {
+                return $p['x0'];
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 命中测试：相对状态栏左沿的列 → 命中段的详情 `{k,cmd,pick,x0,x1}`。
+     * 未命中（空列 / 分隔符 / **不可点的段** / 已被整条确认占用）返回 null。
      *
      * 取舍：只有段**文本所占列**算命中，宁可难点也不让"点错也触发"。
      * V1.1 不给可点段加视觉标识，文档建议插件自己在文案里加标记（如 `🕐 12:00 ⟳`）。
+     *
+     * @return array{k:string,cmd:?string,pick:?string,x0:int,x1:int}|null
      */
-    public function clickSegment(int $x): ?string
+    public function clickSegment(int $x): ?array
     {
         foreach ($this->lastPlaced as $p) {
-            if ($p['cmd'] !== null && $x >= $p['x0'] && $x <= $p['x1']) {
-                return $p['cmd'];
+            if (($p['cmd'] ?? null) === null && ($p['pick'] ?? null) === null) {
+                continue;
+            }
+            if ($x >= $p['x0'] && $x <= $p['x1']) {
+                return $p;
             }
         }
         return null;
@@ -189,15 +212,48 @@ final class StatusBarPanel
         // 它们不显示却占 1 列宽度，会让状态栏少显内容，故统一剔除。
         $file = $buf !== null ? DisplayWidth::stripControl(basename((string) $buf->path)) : '—';
         $dirty = $buf !== null && $buf->dirty ? ' ' . $t('status.dirty') : '';
+        // 多光标标记：不标出来的话，用户根本不知道自己处于多光标态，也就想不到可以用 Esc 收掉。
+        // 它也是"多光标只在编辑器里有意义"的可见证据（焦点不在编辑器时仍然显示当前 buffer 的状态）。
+        $cursors = $buf !== null && $buf->hasMultipleCursors()
+            ? ' ' . $t('status.cursors', ['n' => (string) (count($buf->extraCursors()) + 1)])
+            : '';
         // 编辑模式（R1 四项之一）：只读必须显式标出来，
         // 否则用户改半天发现保存不了，会以为是 bug。
         $mode = $buf === null ? '—' : ($buf->readOnly ? $t('status.readonly') : $t('status.mode_edit'));
 
-        // M5：Provider/模型。生成中带省略号（AI 面板标题只有一个点，容易忽略）
+        // M5：Provider/模型。生成中带省略号（AI 面板标题只有一个点，容易忽略）。
+        // 模型没声明 tools 能力时补一个短标记——否则用户会疑惑「为什么 Agent 工具从不触发」。
+        //
+        // 判据用 `hasSelection()` 而不是 `spec() !== null`：后者配了 provider 就恒真
+        // （`spec()` 兜底到 defaultId()），会把用户没选过的默认模型当成他的选择显示出来。
+        // 未选时给「未选」，而不是编一个模型名。（请求仍走默认 provider，那属实现细节。）
         $spec = $this->shell->chat->spec();
-        $ai = $spec === null
-            ? '—'
-            : $spec->label . '/' . $spec->model . ($this->shell->chat->isStreaming() ? ' …' : '');
+        $streaming = $this->shell->chat->isStreaming() ? ' …' : '';
+        if ($spec === null) {
+            $ai = '—';
+        } elseif (!$this->shell->chat->hasSelection()) {
+            $ai = $t('status.ai_unset') . $streaming;
+        } else {
+            $ai = $spec->label . '/' . $spec->model
+                . ($spec->supportsTools() ? '' : '·' . $t('status.no_tools'))
+                . $streaming;
+        }
+
+        // 模型策略段：只在配了策略时显示（`@strategies`）。
+        // 它必须**常显**，而且要**说清现在听谁的**：自动选档生效时带「·自动」后缀，
+        // 手动钉住时不带（手动切 provider/模型会清空策略名，所以这个段不会说谎）。
+        // 折扣时段再加一个「·折扣」：它必须**实时**算——折扣一结束后缀就自己消失，
+        // 否则状态栏会一直挂着"折扣中"，比不显示更误导。
+        $stLabel = $this->shell->chat->strategyLabel();
+        $stAuto = !$this->shell->chat->isPinned();
+        $offPeak = $this->shell->chat->offPeakActive() ? '·' . $t('status.strategy_offpeak') : '';
+        if (!$this->shell->chat->hasStrategies()) {
+            $stText = '';
+        } elseif ($stLabel === null) {
+            $stText = $stAuto ? $t('status.strategy_auto') : '';
+        } else {
+            $stText = $stLabel . ($stAuto ? '·' . $t('status.strategy_auto') : '') . $offPeak;
+        }
 
         // R5 拖拽分隔条时：把当前各面板尺寸显示在状态栏（高优先级，确保可见）。
         // 非拖拽时 t 为空，join() 会跳过，不占空间。
@@ -209,27 +265,40 @@ final class StatusBarPanel
             // 焦点/标签排得低是刻意的：它们**在界面上已经有视觉表达**（聚焦面板边框高亮、
             // 侧栏当前 tab 高亮），状态栏里再写一遍是纯冗余，占掉的 28 列不如让给
             // 「文件 / 消息 / 退出提示」这些没有第二处显示的信息。
-            ['k' => 'message', 'p' => 100, 'o' => 8, 't' => $this->shell->message],
-            ['k' => 'file',    'p' => 90,  'o' => 1, 'pfix' => $t('status.file') . '=', 't' => $file . $dirty],
+            ['k' => 'message', 'p' => 100, 'o' => 9, 't' => $this->shell->message],
+            ['k' => 'file',    'p' => 90,  'o' => 1, 'pfix' => $t('status.file') . '=', 't' => $file . $dirty . $cursors],
             ['k' => 'mode',    'p' => 85,  'o' => 2, 't' => $t('status.mode') . '=' . $mode],
             ['k' => 'ai',      'p' => 80,  'o' => 4, 't' => $t('status.provider') . '=' . $ai],
+            // 策略段紧跟 AI 段（同一件事的两个侧面：哪一档 + 打到哪个模型）。
+            // 优先级略高于 AI 段：窄屏上宁可丢掉 provider/model 也要保住"我在哪个档"。
+            ['k' => 'strategy', 'p' => 82, 'o' => 4,
+                't' => $stText === '' ? '' : $t('status.strategy') . '=' . DisplayWidth::stripControl($stText)],
             ['k' => 'branch',  'p' => 70,  'o' => 3, 'pfix' => $t('status.branch') . '=', 't' => DisplayWidth::stripControl($this->shell->git->branch)],
-            ['k' => 'quit',    'p' => 65,  'o' => 9, 't' => $t('status.quit')],
-            ['k' => 'app',     'p' => 50,  'o' => 0, 't' => $t('app.title')],
-            ['k' => 'locale',  'p' => 40,  'o' => 7, 't' => $t('status.locale') . '=' . $this->shell->locale()],
+            ['k' => 'quit',    'p' => 65,  'o' => 10, 't' => $t('status.quit')],
+            // ⚠️ app 段的优先级刻意压到最低：状态栏要腾地方给**可点的**语言/主题段时，
+            // 「应用名」是这里唯一的纯装饰（单应用终端里没有第二处需要它），
+            // 而 focus 段又必须继续在 120 列被丢掉（m6 有断言：它有边框高亮、本就冗余）。
+            ['k' => 'app',     'p' => 30,  'o' => 0, 't' => $t('app.title')],
+            ['k' => 'locale',  'p' => 40,  'o' => 7, 't' => $t('status.locale') . '=' . $this->shell->locale(),
+                // 可点：弹出语言列表（数据源 Translator::available）。段本身仍按普通段参与裁剪，
+                // 被丢弃时 clickSegment 也读不到它 —— 命中与取舍同源，天然「看不见就点不到」。
+                'pick' => 'locale'],
+            // 主题段：与语言段相邻（同属「视图偏好」）。**可点**，弹出主题列表。
+            ['k' => 'theme',   'p' => 45,  'o' => 8,
+                't' => $t('status.theme') . '=' . $t($this->shell->theme->label), 'pick' => 'theme'],
             ['k' => 'focus',   'p' => 35,  'o' => 5, 't' => $t('status.focus') . '=' . strtoupper($this->shell->focusPanel())],
             // ⚠️ tab 不能排太低：侧栏 tab **只显示图标不显示文字**，状态栏这行是它
             // 唯一的文字标识，丢了用户就分不清当前在哪个 tab。
             ['k' => 'tab',     'p' => 75,  'o' => 6, 't' => $t('status.tab') . '=' . $this->shell->sidebar->tabLabel()],
             // 终端 cwd：仅在聚焦终端时显示（避免与其它面板争抢状态栏空间）。
             // 值来自 PROMPT_COMMAND 钩子经 OSC 实时上报的 shell 工作目录。
-            ['k' => 'cwd',     'p' => 60,  'o' => 10,
+            ['k' => 'cwd',     'p' => 60,  'o' => 11,
                 'pfix' => $t('status.cwd') . '=',
                 't' => $this->shell->focusPanel() === 'terminal'
                     ? DisplayWidth::stripControl($this->shell->terminal->cwd())
                     : ''],
             // 拖拽尺寸段：排最右、优先级最高，拖拽时必定显示，松手即消失。
-            ['k' => 'layout',  'p' => 95,  'o' => 11, 't' => $layout],
+            ['k' => 'layout',  'p' => 95,  'o' => 12, 't' => $layout],
         ];
 
         // 插件段（V1）：与系统段统一走「按优先级丢弃 + 按 order 摆放」逻辑，

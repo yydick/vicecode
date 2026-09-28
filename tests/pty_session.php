@@ -16,7 +16,12 @@ declare(strict_types=1);
  * 运行：timeout 120 php tests/pty_session.php
  */
 
-$cfgFile = tempnam(sys_get_temp_dir(), 'vc_sesscfg');
+require __DIR__ . '/lib/isolation.php';
+
+// 独占配置目录：tempnam 的 dirname 是 /tmp，父子进程会一起读 /tmp/.vicecode_ai（对话存档）
+$cfgFile = vc_isolate_config('vc_session_pty');
+// 防回归（BUGFIXES D6）：pty 的 bash `--rcfile` 临时文件必须随会话收尾被删（基准先于应用启动取）
+$rcBefore = count((array) glob(sys_get_temp_dir() . '/vicetui_rc_*'));
 file_put_contents($cfgFile, (string) json_encode(['persistSession' => true]));
 $sessionFile = dirname($cfgFile) . '/.vicecode_session';
 @unlink($sessionFile); // 确保从干净状态开始
@@ -27,6 +32,13 @@ $env = array_merge(getenv(), [
     'APP_LOCALE' => 'zh_CN',
     'VICECODE_CONFIG' => $cfgFile,
 ]);
+// ⚠️ 自造 HOME（替代开发机那份会加载 nvm + conda 的 .bashrc）：本用例要「恢复出新 shell 后
+// 立刻打字」（MARK_NEW），而就绪前的按键会被 TerminalPanel 攒着等提示符 —— 开发机 rc 要数秒
+// 才出提示符，窗口就不可预测了（实测批跑时假红）。测会话往返，不该被用户 rc 的启动速度牵着走。
+$home = vc_tmp_dir('vc_session_home');
+file_put_contents($home . '/.bashrc', "PS1='ready$ '\n");
+$env['HOME'] = $home;
+$env['SHELL'] = '/bin/bash';
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
 
 function normalize(string $raw): string
@@ -151,6 +163,9 @@ check(str_contains($nb, 'marknew'), '新 shell 仍可交互：MARK_NEW 已渲染
 check(str_contains($nb, 'colorredx'), '彩色标记 COLOR_RED_X 文本经重启仍在（cells 还原）');
 check(str_contains($rb['out'], "\x1b[31m"), '重启后渲染仍含红色 SGR（颜色随快照恢复，非本次键入）');
 check($sessionConsumed, '恢复后快照已消费（文件清除），不会二次恢复');
+// D6 防回归：两次运行（含"重启恢复"这条冷门退出路径）都不该留下 rc 文件
+$rcAfter = count((array) glob(sys_get_temp_dir() . '/vicetui_rc_*'));
+check($rcAfter <= $rcBefore, sprintf('两次运行后 /tmp 未残留 pty rc 文件（vicetui_rc_*：%d → %d）', $rcBefore, $rcAfter));
 
 @unlink($cfgFile);
 @unlink($sessionFile);

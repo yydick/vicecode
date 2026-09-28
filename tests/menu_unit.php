@@ -9,6 +9,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_menu');   // 同上：只 pin APP_LOCALE 不够，布局/主题仍会从真实配置漂进来
 
 // 固化 locale：本测试断言中文菜单名（文件/帮助），但 App 优先读 ~/.vicerc 的 locale，
 // 未隔离会随操作员配置漂移。APP_LOCALE 优先级高于配置文件，故此处 pin zh_CN 保证确定性。
@@ -45,24 +47,28 @@ foreach ($ext->widgetRenderers() as $r) {
 }
 $rr = new AggregateWidgetRenderer($rs);
 
-// ─════════ 1) 菜单定义：4 个菜单、每项都有真实 action ═════════
+// ─════════ 1) 菜单定义：5 个菜单（V2 起 AI 组在帮助之后）、每项都有真实 action ═════════
 echo "\n== 菜单定义 ==\n";
 $app = new App();
 $defs = $app->menuBar->definitions();
-check(count($defs) === 4, '共 4 个菜单（文件/视图/终端/帮助）');
+check(count($defs) === 5, '共 5 个菜单（文件/视图/终端/帮助/AI）');
 $labels = array_map(static fn($m) => $m['label'], $defs);
 check(in_array('文件', $labels, true) && in_array('帮助', $labels, true), '含文件与帮助菜单');
 $actionCount = 0;
 $known = ['file.open','file.save','file.close','file.quit','view.theme','view.focus.editor',
     'view.focus.terminal','view.focus.explorer','view.focus.ai','view.lang','term.cancel',
-    'term.clear','help.shortcuts','help.about','plugins.open','palette.open','panel.host.open'];
+    // B16：面板显隐 / 终端最大化（4 项）
+    'view.toggle_sidebar','view.toggle_ai','view.toggle_terminal','view.toggle_terminal_max',
+    'term.clear','help.shortcuts','help.about','plugins.open','palette.open','panel.host.open',
+    'ai.explain','ai.comment','ai.refactor','ai.unittest','ai.attach_selection','ai.attach_file',
+    'ai.tool_mode','ai.compact_now','ai.providers_config','ai.clear'];
 foreach ($defs as $m) {
     foreach ($m['items'] as $it) {
         $actionCount++;
         check(in_array($it['action'], $known, true), "菜单项 {$it['label']} 的 action({$it['action']}) 是真实命令");
     }
 }
-check($actionCount === 17, "共 17 个菜单项（含命令面板与插件面板浮层，实际 " . $actionCount . "）");
+check($actionCount === 31, "共 31 个菜单项（含 AI 组 10 项、面板显隐 4 项与命令面板/插件面板浮层，实际 " . $actionCount . "）");
 
 // ─════════ 2) 菜单栏在常规视口可见、矮视口不画 ═════════
 echo "\n== 菜单栏可见性 ==\n";
@@ -127,12 +133,21 @@ check($clickedOther && $app6b->menuBar->isOpen(), '点其它标签可切换（�
 // ─════════ 5) menuAction 真实副作用 ═════════
 echo "\n== menuAction 副作用 ==\n";
 $app7 = new App();
+// V1.2：视图 → 主题 / 语言 改成**打开选项列表**（不再盲目循环）。所以「真的改了」要
+// 走完整流程：菜单开列表 → ↓ 移到下一项 → Enter 应用。
 $themeBefore = $app7->theme->id;
 $app7->menuAction('view.theme');
-check($app7->theme->id !== $themeBefore, 'view.theme 真的切换了主题');
+check($app7->picker()?->id === 'theme', 'view.theme 打开主题列表（不再盲目循环）');
+$app7->handle(CodedKeyEvent::new(KeyCode::Down, 0), $vp);
+$app7->handle(CodedKeyEvent::new(KeyCode::Enter, 0), $vp);
+check($app7->theme->id !== $themeBefore, '在列表里选下一项 → 主题真的切换了');
+check($app7->picker() === null, '应用后列表关闭');
 $localeBefore = $app7->locale();
 $app7->menuAction('view.lang');
-check($app7->locale() !== $localeBefore, 'view.lang 真的切换了语言');
+check($app7->picker()?->id === 'locale', 'view.lang 打开语言列表');
+$app7->handle(CodedKeyEvent::new(KeyCode::Down, 0), $vp);
+$app7->handle(CodedKeyEvent::new(KeyCode::Enter, 0), $vp);
+check($app7->locale() !== $localeBefore, '在列表里选下一项 → 语言真的切换了');
 $app8 = new App();
 $app8->openFile('src/App.php');
 $app8->menuAction('file.quit');

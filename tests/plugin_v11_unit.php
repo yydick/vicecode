@@ -16,6 +16,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_plugin_v11');   // 含插件配置：否则会读开发机 ~/.vicecode.plugins.json
 
 use App\App;
 use App\Plugin\StatusSegment;
@@ -130,12 +132,17 @@ check(($noexecConf['noexec.*']['reason'] ?? '') === 'no_executor', 'noexec 记�
 // ── 2) 菜单形状（索引稳定性硬断言）─────────────────────
 echo "== 菜单合并与索引稳定性 ==\n";
 $defs = $app->menuBar->definitions();
-check(count($defs) === 5, '有插件命令时菜单追加到第 5 组（实际 ' . count($defs) . ' 组）');
-check($defs[4]['label'] === $app->t('menu.plugins'), '第 5 组 label 走 i18n（插件）');
+// V2：AI 组插在 Help 之后（第 5 组），插件组顺延到第 6 组
+check(count($defs) === 6, '有插件命令时菜单共 6 组（AI 第 5 组 + 插件第 6 组，实际 ' . count($defs) . ' 组）');
+check($defs[4]['label'] === $app->t('menu.ai'), '第 5 组是 AI 组（label 走 i18n）');
+check($defs[5]['label'] === $app->t('menu.plugins'), '第 6 组 label 走 i18n（插件）');
 $expectActions = [
     'file.open', 'file.save', 'file.close', 'plugins.open', 'file.quit',
     'view.theme', 'view.focus.editor', 'view.focus.terminal', 'view.focus.explorer',
-    'view.focus.ai', 'palette.open', 'panel.host.open', 'view.lang', 'term.cancel', 'term.clear', 'help.shortcuts', 'help.about',
+    'view.focus.ai', 'palette.open', 'panel.host.open',
+    // B16：面板显隐 / 终端最大化（4 项，插在 view.lang 之前）
+    'view.toggle_sidebar', 'view.toggle_ai', 'view.toggle_terminal', 'view.toggle_terminal_max',
+    'view.lang', 'term.cancel', 'term.clear', 'help.shortcuts', 'help.about',
 ];
 $gotActions = [];
 for ($i = 0; $i < 4; $i++) {
@@ -143,8 +150,8 @@ for ($i = 0; $i < 4; $i++) {
         $gotActions[] = $it['action'];
     }
 }
-check($gotActions === $expectActions, '前 4 组的 action 序列与改动前逐项一致（17 项，含命令面板与插件面板浮层）');
-$pluginActions = array_column($defs[4]['items'], 'action');
+check($gotActions === $expectActions, '前 4 组的 action 序列与改动前逐项一致（21 项，含面板显隐 4 项、命令面板与插件面板浮层）');
+$pluginActions = array_column($defs[5]['items'], 'action');
 // demo 3 + conf 3：快捷键冲突只降级快捷键，**命令本身仍会注册**（仍可从菜单触发）
 check(count($pluginActions) === 6, '插件组共 6 项（demo 3 + conf 3；冲突只降级快捷键）');
 foreach ($pluginActions as $a) {
@@ -153,7 +160,7 @@ foreach ($pluginActions as $a) {
     }
 }
 check(true, '所有插件项 action 均以 plugin: 开头');
-$shortcutsIn = array_column($defs[4]['items'], 'shortcut');
+$shortcutsIn = array_column($defs[5]['items'], 'shortcut');
 check(in_array('Ctrl+K', $shortcutsIn, true) && in_array('F3', $shortcutsIn, true), '绑定成功的快捷键出现在菜单里');
 check(count(array_filter($shortcutsIn, static fn (string $s): bool => $s !== '')) === 2, '只有 2 项带快捷键（其余为空串，不承诺无效键）');
 
@@ -226,17 +233,18 @@ check($placedByKey['seg']['cmd'] === 'demo.k', 'seg 段带命令 demo.k');
 // 边界
 $pSeg = $placedByKey['seg'];
 check($app->statusBar->clickSegment($pSeg['x0'] - 1) === null, '段左侧一列不命中');
-check($app->statusBar->clickSegment($pSeg['x0']) === 'demo.k', '段首列命中');
-check($app->statusBar->clickSegment($pSeg['x1']) === 'demo.k', '段末列命中');
+check(($app->statusBar->clickSegment($pSeg['x0'])['cmd'] ?? null) === 'demo.k', '段首列命中');
+check(($app->statusBar->clickSegment($pSeg['x1'])['cmd'] ?? null) === 'demo.k', '段末列命中');
 check($app->statusBar->clickSegment($pSeg['x1'] + 1) === null, '段右侧一列不命中（分隔符不算）');
-// 系统段不可点
-$sysHit = false;
+// 系统段不带**插件命令**（cmd）。V1.2 起系统段可以带自己的选项列表（pick），
+// 所以「不可点」不再等于「不在 placed」—— 判据是「没有 cmd 也没有 pick」。
+$sysHasCmd = false;
 foreach ($r['placed'] as $p) {
-    if ($p['k'] === 'file' && $p['cmd'] !== null) {
-        $sysHit = true;
+    if ($p['k'] === 'file' && ($p['cmd'] ?? null) !== null) {
+        $sysHasCmd = true;
     }
 }
-check(!$sysHit, '系统段不带命令，不可点');
+check(!$sysHasCmd, '系统段不带插件命令（cmd）');
 // 窄屏：低优先级段被丢弃 → 不可点
 $rn = $app->statusBar->assemble(20);
 $lowIn = false;
@@ -293,7 +301,7 @@ check(in_array('focus.changed', DemoPlugin::$events, true), 'Tab 键切换焦点
 
 $app3 = new App();
 DemoPlugin::$events = [];
-$tmp = tempnam(sys_get_temp_dir(), 'vc_v11f');
+$tmp = vc_tmp_file('vc_v11f');
 file_put_contents($tmp, "hello\n");
 $app3->openFile($tmp);
 check(in_array('file.opened', DemoPlugin::$events, true), 'openFile 发出 file.opened');
@@ -314,6 +322,10 @@ check(DemoPlugin::$events === [] || DemoPlugin::$events[0] === 'app.ready', 'app
 
 // 终端输出（条件轮询，不赌 sleep）
 DemoPlugin::$events = [];
+// ⚠️ 钉回 runner：终端默认已是交互式 pty（B15），而 poll() 在 pty 模式下走 pollPty()，
+// 命令行运行器的管道**不会被排空** → 这条 terminal.output 事件永远发不出来。
+// 本用例要验的是「runner 输出会广播 terminal.output」，故显式钉住 runner。
+$app5->terminal->mode = 'runner';
 $app5->terminal->input = 'echo v11unit';
 $app5->terminal->submit();
 $deadline = microtime(true) + 5;

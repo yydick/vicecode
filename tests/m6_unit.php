@@ -12,6 +12,8 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
+vc_isolate_config('vc_m6');   // 否则 new App() 会读开发机真实 ~/.vicerc（主题/布局/语言），主题环断言会飘
 putenv('APP_LOCALE=zh_CN');
 
 use App\Ai\ChatModel;
@@ -61,7 +63,7 @@ echo "== R1 状态栏：编辑模式 ==\n";
 $app = new App();
 check(mb_strpos($app->statusBar->text(200), '模式=—') !== false, '未打开文件时编辑模式显示 —');
 
-$tmpFile = tempnam(sys_get_temp_dir(), 'vc6_');
+$tmpFile = vc_tmp_file('vc6');
 file_put_contents($tmpFile, "hello\n");
 $app->openFile($tmpFile);
 $t = $app->statusBar->text(200);
@@ -72,7 +74,7 @@ $app->buffer?->insertChar('X');
 check(str_contains($app->statusBar->text(200), '*'), '改动后状态栏出现未保存标记 *');
 
 // 只读文件 → 模式=只读
-$roFile = tempnam(sys_get_temp_dir(), 'vc6ro_');
+$roFile = vc_tmp_file('vc6ro');
 file_put_contents($roFile, "ro\n");
 chmod($roFile, 0444);
 $app2 = new App();
@@ -228,6 +230,26 @@ foreach (['Ctrl+Q', 'Ctrl+S', 'Ctrl+W', 'Ctrl+Tab', 'Ctrl+L', 'Ctrl+C', 'Ctrl+P'
     }
 }
 check(true, '帮助页涵盖全部 Ctrl 组合键');
+
+// 非 Ctrl 的新功能同样不能从帮助页悄悄消失。断言直接查注册表的 desc 列
+// （不查渲染文本），因而与语言包无关；desc 的 i18n key 每条唯一，可当稳定锚点。
+// 键名本身会重复（编辑器与 AI 都有 Tab / Shift+Tab），所以按 desc 判定。
+$docDescs = [];
+foreach (KeyBindings::all() as $g) {
+    foreach ($g['items'] as $it) {
+        $docDescs[$it['desc']] = true;
+    }
+}
+foreach ([
+    'help.g_add_cursor'       => 'Alt+↑/↓ 加编辑光标',
+    'help.g_add_cursor_click' => 'Alt+点击 加编辑光标',
+    'help.e_indent'           => '编辑器 Tab 缩进 / Shift+Tab 反向缩进',
+    'help.e_autopair'         => '符号自动配对',
+    'help.a_at_ref'           => 'AI 输入框 @ 文件引用',
+    'help.a_complete'         => 'AI 输入框 Tab 接受补全',
+] as $descKey => $label) {
+    check(isset($docDescs[$descKey]), '帮助页登记了 ' . $label . '（' . $descKey . '）');
+}
 // 键位列对齐：所有条目行的第二列必须起始于同一显示列
 $offsets = [];
 foreach ($lines as $l) {
@@ -316,8 +338,7 @@ check(str_contains($txt120, '编辑器') || str_contains($txt120, '资源管理�
 
 // ═══════════════ 4) R3 错误处理 ═══════════════
 echo "\n== R3 打开失败文件 ==\n";
-$dir = sys_get_temp_dir() . '/vc6_perm_' . uniqid();
-mkdir($dir);
+$dir = vc_tmp_dir('vc6_perm');
 $secret = $dir . '/secret.txt';
 file_put_contents($secret, "hi\n");
 
@@ -399,9 +420,7 @@ check($appT->theme->id === 'dark', '再切一次回到默认主题（环形）')
 
 // 语法高亮缓存必须失效，否则代码区仍是旧配色
 $appT2 = new App();
-$phpFile = tempnam(sys_get_temp_dir(), 'vc6_');
-rename($phpFile, $phpFile . '.php');
-$phpFile .= '.php';
+$phpFile = vc_tmp_file('vc6', '.php');
 file_put_contents($phpFile, "<?php\nfunction hello() { return 'x'; }\n");
 $appT2->openFile($phpFile);
 // 先渲染一次，让高亮缓存生成

@@ -18,6 +18,7 @@ declare(strict_types=1);
 require __DIR__ . '/../vendor/autoload.php';
 
 use App\App;
+use App\Core\ConfigStore;
 use PhpTui\Term\Terminal;
 use PhpTui\Term\Actions;
 use PhpTui\Term\Event;
@@ -104,6 +105,184 @@ function restoreTerminal(Terminal $term): void
 }
 
 /**
+ * 致命错误的统一出口：翻译成人类可读的一行（终端还原已由 start() 的 finally 保证），
+ * 而不是把一堆 PHP 堆栈喷在用户的屏幕上。
+ */
+function reportFatal(Throwable $e): void
+{
+    fwrite(STDERR, "\nViceCode 异常退出：" . $e->getMessage() . "\n");
+    fwrite(STDERR, '  ' . $e->getFile() . ':' . $e->getLine() . "\n");
+    exit(1);
+}
+
+/**
+ * 退出收尾：**正常退出、未捕获异常、致命错误**三条路径共用同一件事，且只做一次。
+ *
+ * ⚠️ 为什么不能只靠 `start()` 的 finally：PHP 的**致命错误**（`E_ERROR` /
+ * `E_CORE_ERROR` / `E_COMPILE_ERROR` / `E_USER_ERROR` / 内存耗尽）**不会执行 finally**
+ * —— 实测（两行脚本即可复现）：内存耗尽与未捕获 Error 下 finally 都不跑，
+ * 而 `register_shutdown_function` 都跑。
+ *
+ * 少了这层兜底，进程一死于致命错误，终端就留在 raw mode + alternate screen
+ * + **鼠标上报开着**：用户回到 shell 后每动一下鼠标，终端就往 tty 灌
+ * `ESC[<b;x;yM`（`ESC [ <` 被终端当控制序列吃掉，只剩数字）
+ * → 显示成 `-bash: 35: command not found`。这是用户实测报上来的现象。
+ *
+ * `run()` 幂等：第二次调用直接返回。**这条必须守住**——当年 `Coroutine\defer` 与
+ * finally 各还原一次，还原序列发两遍，才把 defer 撤掉的（见 startMain 的注释）。
+ */
+final class Shutdown
+{
+    /** @var null|\Closure():void 由 start() 注册：落盘偏好 + 回收资源 + 还原终端 */
+    private static ?\Closure $cleanup = null;
+
+    private static bool $ran = false;
+
+    public static function register(\Closure $cleanup): void
+    {
+        self::$cleanup = $cleanup;
+    }
+
+    public static function run(): void
+    {
+        if (self::$ran) {
+            return;
+        }
+        self::$ran = true;   // 先置位：cleanup 自身若再抛错也不会重入
+        if (self::$cleanup !== null) {
+            (self::$cleanup)();
+        }
+    }
+
+    /** 致命错误日志路径：与配置同目录（`VICECODE_CONFIG` 的 dirname），测试隔离时自动落进临时目录 */
+    public static function fatalLogPath(): string
+    {
+        return dirname(ConfigStore::path()) . '/.vicecode_fatal.log';
+    }
+
+    /** 往致命日志追加一行。用户不主动看它，但它是「为什么死的」唯一线索来源。 */
+    public static function log(string $line): void
+    {
+        @file_put_contents(self::fatalLogPath(), $line, FILE_APPEND);
+    }
+
+    /**
+     * 「本次会话还活着」标记的路径。
+     *
+     * 它要捕捉的是 shutdown function 与信号 handler **都够不到**的那一类死亡
+     * （SIGKILL、段错误、宿主进程整块消失）：进程没有任何机会执行收尾代码，
+     * 既不会发还原序列、也不会写日志。只有靠「启动时写、**正常退出**时删」的标记，
+     * 下次启动才发现「上一次是异常结束，而且连死因都没留下」。
+     */
+    public static function alivePath(): string
+    {
+        return dirname(ConfigStore::path()) . '/.vicecode_alive';
+    }
+
+    /** 启动时写下存活标记（带启动时间与 pid，事后能判断是哪一次会话） */
+    public static function markAlive(): void
+    {
+        @file_put_contents(self::alivePath(), json_encode([
+            'since' => date('c'),
+            'pid'   => getmypid(),
+        ], JSON_UNESCAPED_SLASHES) . "\n");
+    }
+
+    /** **只有正常退出**才调用：清掉标记。异常路径一律不清，下次启动才会提示。 */
+    public static function clearAlive(): void
+    {
+        @unlink(self::alivePath());
+    }
+
+    /**
+     * 读取残留标记；没有残留返回 null。
+     *
+     * ⚠️ pid 存活检查不能省：同时开两个 ViceCode 时，后启动的会覆盖标记 ——
+     * 若不检查，先启动那个实例的（正常）退出会被后启动的实例在下次启动时
+     * 误报成「上次异常结束」。
+     */
+    public static function staleAlive(): ?array
+    {
+        $path = self::alivePath();
+        if (!is_file($path)) {
+            return null;
+        }
+        $data = json_decode((string) @file_get_contents($path), true);
+        if (!is_array($data)) {
+            return [];   // 标记内容坏掉：仍按「有残留」处理（宁可多提示一次，不可漏报）
+        }
+        $pid = (int) ($data['pid'] ?? 0);
+        if ($pid > 0 && $pid !== getmypid() && self::pidAlive($pid)) {
+            return null;   // 那是**另一个**正在运行的实例
+        }
+        return $data;
+    }
+
+    private static function pidAlive(int $pid): bool
+    {
+        if (function_exists('posix_kill')) {
+            return @posix_kill($pid, 0);
+        }
+        return is_dir('/proc') && file_exists('/proc/' . $pid);
+    }
+
+    /**
+     * 装信号处理：SIGTERM / SIGHUP / SIGINT。
+     *
+     * ⚠️ 为什么必须装（实测见 `tests/pty_signals.php`）：没有 handler 时，信号走
+     * **默认动作 = 进程立即终止** —— PHP 既不执行 `register_shutdown_function`、
+     * 也不走 `finally`。于是终端被留在 raw + 备用屏 + 鼠标上报，而
+     * `error_get_last()` 是 null（信号不是 error）→ **连日志都不写**。
+     * 这类死法在用户眼里与崩溃一模一样，却是唯一「终端乱掉且查不到原因」的一种。
+     *
+     * handler 里**必须 exit**：否则默认动作被吞掉，进程会变得杀不死。
+     * 用 pcntl 而非 `Swoole\Process::signal`：pcntl + async signals 在两种底座下
+     * 行为一致，且信号一到就能分发，不依赖事件循环正在跑。
+     */
+    public static function installSignalHandlers(): void
+    {
+        if (!function_exists('pcntl_signal')) {
+            return;   // 没有 pcntl 的构建：只能接受这一类死亡无覆盖
+        }
+        $handler = static function (int $signo): void {
+            self::run();   // 幂等：还原终端 + 落盘偏好 + 回收资源
+            $name = self::signalName($signo);
+            self::log(sprintf("[%s] 被信号终止：%s（终端已还原）\n", date('c'), $name));
+            fwrite(STDERR, "\nViceCode 被信号终止（{$name}），终端已还原。\n");
+            fwrite(STDERR, '  日志：' . self::fatalLogPath() . "\n");
+            // ⚠️ 这里**不能**写 exit(128 + $signo)：
+            //  - 协程内 Swoole 会把 exit() 转成 `Swoole\ExitException`，被顶层 catch
+            //    接住后走 reportFatal → 退出码变成 1，还多打一句「异常退出：swoole exit」；
+            //  - 非协程内它只是「正常退出、码为 128+n」，而非真正被信号终止。
+            // 改成「恢复默认处置 + 重发信号」：handler 执行期间该信号被内核屏蔽，
+            // 重发的那个会在 handler **返回后立刻**投递，进程遂按默认处置终止
+            // （实测两种底座都得到 `Terminated`；pty 用例断言 termsig=15/1/2）。
+            // 不重发则默认动作被吞掉，进程会变得杀不死。
+            if (function_exists('posix_kill')) {
+                pcntl_signal($signo, SIG_DFL);
+                posix_kill(getmypid(), $signo);
+                return;
+            }
+            exit(128 + $signo);   // 退路：没有 posix 扩展的构建
+        };
+        foreach ([SIGTERM, SIGHUP, SIGINT] as $sig) {
+            pcntl_signal($sig, $handler);
+        }
+        pcntl_async_signals(true);
+    }
+
+    private static function signalName(int $signo): string
+    {
+        return match ($signo) {
+            SIGTERM => 'SIGTERM',
+            SIGHUP  => 'SIGHUP',
+            SIGINT  => 'SIGINT',
+            default => 'signal ' . $signo,
+        };
+    }
+}
+
+/**
  * 解析启动参数（纯函数，便于单测）。返回 [openFile, chdirTo]：
  *  - 首个非选项位置参数：目录 → chdirTo=realpath；可读文件 → openFile；'.' → 两者皆 null（当前目录）。
  *  - 无匹配参数 → 两者皆 null。
@@ -152,7 +331,29 @@ function start(bool $sw, array $argv): void
         chdir($arg['chdirTo']);
     }
 
+    // 存活标记：启动时写、**正常退出**时删（见 start() 末尾）。残留 = 上次异常结束。
+    // 「上一次」的提示要等 new App() 之后才能发（那时才有 setMessage），故先读出来存着。
+    $stale = Shutdown::staleAlive();
+    Shutdown::markAlive();
+
     $app = new App();
+
+    if ($stale !== null) {
+        // 上次没走正常路径。它可能连致命错误都没留下（SIGKILL / 段错误），所以这条
+        // 日志往往是唯一线索 —— 没有它，那种死法永远查不出「到底发生过没有」。
+        Shutdown::log(sprintf(
+            "[%s] WARN: 上次会话未正常结束（启动于 %s, pid %s），且没有致命错误记录"
+            . " —— 可能是被 SIGKILL / 段错误等无法拦截的方式终止。\n",
+            date('c'),
+            (string) ($stale['since'] ?? '未知'),
+            (string) ($stale['pid'] ?? '?')
+        ));
+        // ⚠️ 走 stderr 而**不是**状态栏消息：状态栏的消息段是为**瞬时事件**设计的，
+        // 且优先级最高，会把常显的「Ctrl+Q 退出」这类面包屑挤掉（实测：`pty_hotkey`
+        // 因为上一次被 SIGKILL 留下标记，下一次启动的提示把退出键提示顶没了）。
+        // 这是一条**持续状态**，写在进入备用屏之前 —— 备用屏弹栈后它仍在普通屏上可见。
+        fwrite(STDERR, "\n{$app->t('app.stale_exit')}\n");
+    }
 
     // 命令行首个可读文件作为初始打开文件（验收 / 日常 `vicecode <file>` 都可用）。
     if ($arg['openFile'] !== null) {
@@ -161,7 +362,27 @@ function start(bool $sw, array $argv): void
 
     // ── 进入终端（终端动作仍走 php-tui/term）──
     $term = Terminal::new();
+
+    // ⚠️ 收尾闭包必须在**终端被改动之前**就注册好，否则「raw mode 已生效、收尾还没挂上」
+    // 那个窗口里的致命错误依然会把终端留在 raw mode（`register_shutdown_function` 是在
+    // 顶层注册的，但它跑的时候只能调用这里注册进来的闭包）。
+    //
+    // `$terminalTouched` 用来精确界定"有没有东西要还原"：raw mode 一生效就置位，
+    // 因为在它之前退出的话根本无需还原（disableRawMode 还原的是一份尚未被改动的 stty 设置）。
+    $terminalTouched = false;
+    Shutdown::register(static function () use ($app, $term, &$terminalTouched): void {
+        $app->saveConfig();       // R7：退出前把偏好落盘（~/.vicerc），内部容错不抛
+        // 资源回收兜底（与终端还原同理，必须覆盖**所有**退出路径）：正常退出由 Lifecycle 的
+        // 关闭闭包做，但未捕获异常/致命错误等路径只走到这里——不在这里收，pty/shell 子进程就只靠
+        // 内核在 pty 主端关闭时发 SIGHUP 兜底，bash `--rcfile` 的临时文件也不会被删。幂等。
+        $app->shutdownResources();
+        if ($terminalTouched) {
+            restoreTerminal($term);
+        }
+    });
+
     $term->enableRawMode();
+    $terminalTouched = true;   // 从这里起，终端有任何改动都需要还原
     $term->queue(
         Actions::alternateScreenEnable(),
         Actions::enableMouseCapture(),
@@ -173,14 +394,29 @@ function start(bool $sw, array $argv): void
     // ⚠️ 从这里到函数结束**任何**退出路径都要还原终端：
     // 少了 finally 的话，一个未捕获异常就会把终端留在 raw mode + alternate screen
     // （无回显、无光标，用户的 shell 直接废掉）—— 这正是 M0 早期"花屏"的根因。
-    // restoreTerminal 是幂等的（只是发几段转义序列），与 Swoole 分支的
-    // Coroutine\defer 重复调用也无害。
+    //
+    // 但 finally **覆盖不到致命错误**（PHP 的 E_ERROR / 内存耗尽不走 finally），
+    // 所以同一份收尾同时注册给 Shutdown（由顶层 register_shutdown_function 兜底）。
+    // 两边共用同一个闭包 + Shutdown::run() 的幂等标志，保证**只做一次**。
+
     try {
         startMain($app, $term, $sw);
+    } catch (Throwable $e) {
+        // 异常退出时也要**让读键协程停下来**：Swoole\Coroutine\run() 必须等容器内所有子协程
+        // 结束才会返回 —— 协程还挂在 `while (!$app->quit)` 里的话，异常就永远报告不出去。
+        // 实测（tests/pty_crash.php 场景 B：交互 shell 活着时崩溃）表现为进程挂住、只能被
+        // SIGKILL 收掉。置位后照常上抛，由顶层 reportFatal 统一报告；回收交给下面的 finally。
+        $app->quit = true;
+        throw $e;
     } finally {
-        $app->saveConfig();       // R7：退出前把偏好落盘（~/.vicerc），内部容错不抛
-        restoreTerminal($term);
+        // 与致命错误路径共用（幂等）：正常/异常退出在这里收尾，
+        // 致命错误则由 register_shutdown_function 再兜一次。
+        Shutdown::run();
     }
+
+    // 只有走到这里才是**正常退出**（异常路径在上面的 catch 里已上抛，finally 之后不会执行到）。
+    // 清掉存活标记，下次启动就不会误报「上次异常结束」。
+    Shutdown::clearAlive();
 }
 
 function startMain(App $app, Terminal $term, bool $sw): void
@@ -332,18 +568,78 @@ $useSwoole = (getenv('TUI_USE_SWOOLE') ?: '1') === '1'
 // 仅当本文件被直接执行（而非被测试 require）时才启动 TUI；
 // 守卫让 tests/cli_dir.php 能 require 本文件调用 resolveStartArg 而不误进界面。
 if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
-    try {
-        if ($useSwoole) {
-            Swoole\Runtime::enableCoroutine(
-                SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO & ~SWOOLE_HOOK_FILE & ~SWOOLE_HOOK_PROC
-            );
-            Swoole\Coroutine\run(static fn() => start(true, $argv));
-        } else {
-            start(false, $argv);
+    // 致命错误兜底：必须在**进入终端之前**注册 —— 终端一旦被置成 raw/备用屏/鼠标捕获，
+    // 任何一条不经过 finally 的死亡（E_ERROR、E_USER_ERROR、内存耗尽…）都会把它留在那儿。
+    // 详见 Shutdown 的类注释与 tests/pty_crash.php 场景 C。
+    register_shutdown_function(static function (): void {
+        $e = error_get_last();
+        $isFatal = $e !== null && in_array(
+            $e['type'],
+            [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR],
+            true
+        );
+        // 先收尾（还原终端），再谈日志：日志要落在已经还原好的屏幕上。
+        Shutdown::run();
+        if (!$isFatal) {
+            return;
         }
-    } catch (Throwable $e) {
-        fwrite(STDERR, "\nViceCode 异常退出：" . $e->getMessage() . "\n");
-        fwrite(STDERR, '  ' . $e->getFile() . ':' . $e->getLine() . "\n");
-        exit(1);
+        // 致命错误信息原本会打在 alternate screen 上，还原后会被冲掉看不清 —— 所以另外落盘。
+        // 这也是「用户只看到终端乱掉、却不知道原因」时唯一的线索来源。
+        $line = sprintf(
+            "[%s] %s: %s @ %s:%d\n",
+            date('c'),
+            $e['type'] === E_USER_ERROR ? 'E_USER_ERROR' : 'FATAL',
+            $e['message'],
+            $e['file'],
+            $e['line']
+        );
+        $log = Shutdown::fatalLogPath();
+        Shutdown::log($line);
+        fwrite(STDERR, "\nViceCode 致命错误（终端已尝试还原）：{$e['message']}\n");
+        fwrite(STDERR, "  {$e['file']}:{$e['line']}\n");
+        fwrite(STDERR, "  日志：{$log}\n");
+        fwrite(STDERR, "  若终端仍不正常（鼠标乱码 / 无回显）：reset 或 stty sane\n");
+    });
+
+    // 信号兜底：SIGTERM / SIGHUP / SIGINT 不装 handler 时走「默认动作 = 立即终止」，
+    // 既不跑 shutdown function、也不走 finally，且 error_get_last() 为 null → 终端乱掉且无日志。
+    // 装在终端被改动之前，保证「刚进 raw mode 就被 kill」也覆盖得到。
+    Shutdown::installSignalHandlers();
+
+    // 交互式终端前置检查：非 tty 的 stdin（重定向 / 管道 / `</dev/null`）下，php-tui 取
+    // raw mode 必然失败 —— vendor SttyRawMode::enable() 靠 `stty -g` 探测，非 tty 时直接抛
+    // RuntimeException('Could not get stty settings')。在这里、**协程之外**快速失败，用户
+    // 看到的是一句人话，而不是「PHP Fatal error + 堆栈 + exit 255」。
+    if (!stream_isatty(STDIN)) {
+        reportFatal(new RuntimeException(
+            '需要交互式终端：stdin 不是 TTY（请勿重定向或管道输入 stdin）'
+        ));
+    }
+
+    if ($useSwoole) {
+        Swoole\Runtime::enableCoroutine(
+            SWOOLE_HOOK_ALL & ~SWOOLE_HOOK_STDIO & ~SWOOLE_HOOK_FILE & ~SWOOLE_HOOK_PROC
+        );
+        // ⚠️ try/catch 必须放在**协程闭包内部**：Swoole\Coroutine\run() 内部抛出的异常
+        // 不会传播给调用者 —— 实测把 catch 挂在 run() 外面根本接不住，异常直接变成
+        // 「PHP Fatal error: Uncaught ...」并 exit 255（顺带绕过 reportFatal 的友好提示）。
+        // 故在协程内捕获、把异常带出来，再由协程外统一报告。
+        $fatal = null;
+        Swoole\Coroutine\run(static function () use ($argv, &$fatal): void {
+            try {
+                start(true, $argv);
+            } catch (Throwable $e) {
+                $fatal = $e;
+            }
+        });
+        if ($fatal !== null) {
+            reportFatal($fatal);
+        }
+    } else {
+        try {
+            start(false, $argv);
+        } catch (Throwable $e) {
+            reportFatal($e);
+        }
     }
 }

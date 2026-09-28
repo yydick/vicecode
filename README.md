@@ -23,20 +23,20 @@ A VSCode-style multi-panel terminal workspace (TUI). Built on **PHP 8.3 + php-tu
 
 ## Preview
 
-> Text mockups below (identical layout in a real terminal). Press **F2** in the Terminal panel to switch between "Command Runner" and "Interactive PTY" modes — the latter forwards keystrokes directly to a real shell, so full-screen programs like `vim` / `top` / `ssh` work.
+> Text mockups below (identical layout in a real terminal). The Terminal panel **is a real PTY by default** (bash, reading your `~/.bashrc`) — aliases, functions and the prompt are all there, and full-screen programs like `vim` / `top` / `ssh` just work. Once focused, **start typing** to take over the keyboard; `Esc` / `F2` leaves capture; `exit` / `Ctrl+D` ends the shell and drops back to "Command Runner".
 
-**Command Runner mode (Terminal panel default)**
+**Interactive terminal (Terminal panel default)**
 
 ```
-┌─ Command Runner mode (Terminal panel default) ───────────────────────────────┐
+┌─ Interactive terminal (Terminal panel default) ──────────────────────────────┐
 ┌──────────────┬──────────────────────────────────────┬──────────────────────┐
 │ Sidebar      │ Editor                               │ Terminal             │
 ├──────────────┼──────────────────────────────────────┼──────────────────────┤
-│ > Project    │ <?php                                │ $ ls src             │
+│ > Project    │ <?php                                │ ~/work/tui$ ls src   │
 │   src        │ final class App {                    │ app.php  panel/ ...  │
-│   tests      │   public function run() {            │ $ grep -r TODO .     │
+│   tests      │   public function run() {            │ ~/work/tui$ grep ... │
 │   vendor     │     // edit code                     │ ... 3 hits           │
-│              │   }                                  │ $ ▏                  │
+│              │   }                                  │ ~/work/tui$ ▏        │
 │ GIT          │ }                                    │                      │
 │  * main      │                                      │                      │
 └──────────────┴──────────────────────────────────────┴──────────────────────┘
@@ -51,10 +51,10 @@ A VSCode-style multi-panel terminal workspace (TUI). Built on **PHP 8.3 + php-tu
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Interactive PTY mode (Terminal panel, press F2 to capture)**
+**Full-screen programs in the interactive terminal (vim / top — default mode)**
 
 ```
-┌─ Interactive PTY mode (Terminal panel, F2 to capture) ────────────────────────┐
+┌─ Interactive terminal: vim / top (capturing) ─────────────────────────────────┐
 ┌──────────────┬──────────────────────────────────────┬──────────────────────┐
 │ Sidebar      │ Editor                               │ Terminal             │
 ├──────────────┼──────────────────────────────────────┼──────────────────────┤
@@ -110,32 +110,49 @@ TUI_USE_SWOOLE=0 php bin/vicecode.php   # force fallback to the pure php-tui/ter
 | `F10` | open/close the top menu bar |
 | `Ctrl+T` | switch theme |
 | `Shift+←` / `Shift+→` | horizontal scroll (covers editor/terminal/AI/sidebar) |
-| mouse wheel / drag | scroll content; drag panel dividers to resize the layout (session-only) |
+| mouse wheel / drag | scroll content; drag panel dividers to resize the layout (persisted) |
+
+**Clickable status bar**: clicking the `lang=` / `Theme=` segment pops up the matching **list above the status bar** (`↑`/`↓` to move, `Enter` or a click to apply, `Esc` or a click elsewhere to close); the *View → Language / Theme* menu items open the same lists, while `Ctrl+T` still cycles the theme quickly. Segments without a list (e.g. `file=`) are not clickable.
 
 For the Editor (`Enter` newline, `Ctrl+S` save, `Ctrl+W` close, `Ctrl+Tab` switch tab, etc.), Explorer (single-click to open a file, double-click a directory to expand/collapse, click the leading triangle to expand/collapse), and GIT / Search panel usage, see the in-app `?` help page.
 
+**Editor multi-cursor (edit several lines at once)**: `Alt+↑` / `Alt+↓` adds a cursor on the line above/below, or `Alt+click` adds one where you click (at most one cursor per line). Typing, backspace, Delete, Enter and `Tab`/`Shift+Tab` indentation then apply to **all** cursors; `Esc` collapses back to a single cursor (in that state `Esc` will not quit). The status bar shows `N cursors` in its `file=` segment. Auto-pairing and paste do **not** participate with multiple cursors (they act on the main cursor only) — for auto-pairing because "should this pair here?" can differ per position, so one keystroke producing different results would be unpredictable. `Alt+click` adds a cursor and does **not** start a selection (hold `Alt`, otherwise it is a normal drag-copy).
+
+## Panel visibility & terminal maximize
+
+All three side panels can be collapsed/expanded at any time. The entries live **only in the View menu and the command palette (`F1`)** — deliberately no Ctrl shortcut:
+
+| View menu item | Effect |
+| --- | --- |
+| Hide / Show Sidebar | collapse the left column (the centre column takes the width; `Tab` skips it) |
+| Hide / Show AI Column | collapse the right column (stream + input together) |
+| Hide / Show Terminal | collapse the bottom half of the centre column; the editor fills it |
+| Maximize / Restore Terminal | the centre column holds **only the terminal**; both side columns stay |
+
+Labels follow the current state ("Hide Sidebar" = currently visible); focus moves to the nearest visible panel if it sat on a panel that gets hidden; hiding the terminal also cancels maximize; all of it **persists with your preferences**. The status bar marks `hidden:sidebar/AI/terminal` (or `term max`) whenever something is hidden or maximized.
+
 ## Terminal panel
 
-The Terminal panel has two modes, toggled with **F2**:
+The Terminal panel **is a real PTY by default**: it allocates a pseudo-terminal and launches an interactive shell (bash, reading your `~/.bashrc`), forwarding all keystrokes straight to it. So **aliases / functions / the prompt are all there** (`ll` and friends just work) and you can run `vim`, `top`, `less`, `ssh`, TUI programs, or anything that needs a full terminal. A built-in lightweight VT100/ANSI emulator handles cursor positioning, coloring, erasing, scrolling, and the alternate screen.
 
-### 1. Command Runner mode (default)
+### 1. Interactive terminal (default)
 
-Run commands like a normal command palette:
+- **Just type**: focus the Terminal panel with `Tab`, then **start typing** to take over the keyboard (no need to press `F2` first) — the first printable character or Enter enters capture mode and that key is forwarded to the shell.
+- **Exit capture** (shell keeps running in the background): press `Esc` or `F2`. Focus returns to app navigation; you can then use `PageUp` / `PageDown` and arrow keys to browse the terminal scrollback.
+- **Recapture**: press `F2` again, or just keep typing.
+- **While not capturing these keys still belong to the app**: `Tab` switches panels, `?` opens the help page, `Esc` quits, `PageUp` / arrows browse the scrollback. Only "typing" (printable characters / Enter) is treated as taking over the keyboard — otherwise focus would get stuck in the terminal.
+- **End the shell**: send `exit` or `Ctrl+D` while capturing → the panel falls back to Command Runner mode (leaving "Interactive terminal exited · F2 to re-enter" behind).
+- The panel title reads `Interactive · captured` while capturing, and the hint line at the bottom always says what to press.
+
+### 2. Command Runner mode (fallback state after the shell exits)
+
+Takes over once the shell ends; runs a single command like a normal command palette (via `sh -c`, so your shell **aliases / functions are not available** here):
 
 - Type a command in the input line at the bottom and press `Enter`; output streams in real time.
 - `↑` / `↓` browse command history; `Home` / `End` jump to line start/end.
 - `Ctrl+C` interrupts the running command; `Ctrl+L` clears the output.
 - `PageUp` / `PageDown` review past output (auto-disables "stick to bottom").
-
-### 2. Interactive PTY mode (F2 to enter)
-
-Press **F2** to allocate a **real PTY** and launch an interactive shell (bash); all keystrokes are forwarded directly to the shell — so you can run `vim`, `top`, `less`, `ssh`, TUI programs, or anything that needs a full terminal. A built-in lightweight VT100/ANSI emulator handles cursor positioning, coloring, erasing, scrolling, and the alternate screen.
-
-- **Enter capture**: with the Terminal panel focused, press `F2` → enter capture mode, all keys forwarded to the PTY.
-- **Exit capture** (shell keeps running in the background): in capture mode press `Esc` or `F2` again. Focus returns to app navigation; you can then use `PgUp/PgDn` and arrow keys to browse terminal scrollback.
-- **Re-enter**: after exiting capture (shell not yet quit), press `F2` again to recapture.
-- **Quit shell back to runner**: in capture mode send `Ctrl+D` or `exit`; once the shell ends, it automatically returns to Command Runner mode.
-- The terminal title shows the current state (`Interactive` / `Capturing`).
+- To get a real shell back: press `F2`.
 
 > Window size is synced to the shell via `stty` as the panel resizes; wide characters (CJK) are rendered at 2 columns.
 
@@ -154,9 +171,35 @@ By default the interactive shell dies when you quit ViceCode (the PTY is an OS p
 - Only the **startup** working directory is restored; a `cd` performed inside the shell is *not* restored.
 - The PTY process itself cannot be serialized; what is restored is a brand-new shell with the snapshot text injected above its fresh prompt.
 
+## AI assistant (V2)
+
+The right-hand AI panel is wired into the workspace: OpenAI- / DeepSeek-compatible endpoints plus **native Claude (Anthropic Messages API)** (config in `config/providers.php`, keys via environment variables), streamed through a `curl` subprocess so the UI never blocks.
+
+- **Explicit protocol declaration**: each provider sets `protocol` — `'openai'` (the default: any `/chat/completions` endpoint, e.g. OpenAI, DeepSeek, self-hosted gateways) or `'anthropic'` (native Claude: `POST /v1/messages`, `x-api-key` + `anthropic-version` headers, `system` as a top-level parameter, required `max_tokens` configurable per provider — 4096 by default). Omitting it means `openai`, so existing configs need no migration. A built-in `anthropic` entry ships with models `claude-opus-4-8` / `claude-sonnet-4-6` / `claude-haiku-4-5-20251001` and key `ANTHROPIC_API_KEY`; **tool calling (the Agent loop) works fully under both protocols** (`tool_use`/`tool_result` round-trips).
+- **Model capabilities**: declare per model in `config/providers.php` (`tools` for function calling, `reasoning`, `vision`, `audio`; custom names are accepted too). A provider-level default applies to models without their own list, and **models without any declaration default to `tools`** (existing configs need no migration). Today **only `tools` changes behavior**: only models declaring it get tool definitions in the request — so a pure reasoning model (`deepseek-reasoner` is pre-declared as `['reasoning']`) is never rejected for carrying tools. The active model's capabilities show up in the AI panel's empty-state hint, and the status bar AI segment gains a "no tools" marker when `tools` is absent.
+- **User-level model config (no repo edits)**: the menu 「AI → Edit model config…」 opens `~/.vicecode.providers.php` in the **built-in editor** (writing a commented template if it does not exist yet). Same shape as `config/providers.php`, merged **per id, field by field, with new ids appended** (`models` is replaced wholesale) — so pointing `openai` at your own gateway takes one id plus the fields you want to change. Saving (`Ctrl+S`) hot-reloads it and keeps the current provider/model; a syntax error keeps the previous working config and says so in the status bar.
+- **Model strategies (switchable tiers)**: an `@strategies` section in the same file maps "what am I doing now" to a concrete model (e.g. `plan` → a reasoning model, `grind` → a cheap one). Cycle them with `Ctrl+R` in the AI panel, or pick one directly from the menu / command palette; the status bar always shows the active tier. A strategy may declare `requires` (e.g. `['tools']`) and a switch is **refused with an explanation** when the target model does not provide it — so "fall back to the cheap model" can never silently break the agent's tools. A wrong provider/model is likewise refused (no silent fallback). Switching provider/model by hand drops the strategy name, so the status bar never lies.
+- **Route by task type**: a strategy may declare `kinds` (e.g. `['unittest', 'refactor']`) and is then picked automatically for matching requests. Task types come from exactly two places, neither guessed: **quick actions** (explain/comment/refactor/unittest) and an **input prefix** such as `/plan rework this module` (the prefix is never sent to the model; an unknown type refuses to send and lists the known ones; `//` escapes a literal slash). **Manual wins**: picking a tier by hand (`Ctrl+R`, the menu, or switching provider) *pins* it and pauses auto-routing, while `Ctrl+R` includes an "auto" stop to hand control back — the status bar spells out who is in charge (`strategy=plan·auto` vs `strategy=plan`), and a typed task type is reported as ignored instead of silently doing nothing.
+
+- **Code context**: mention files with `@path/in/project` in the input — each reference is expanded into a syntax-highlighted fenced block before sending (paths are validated against the project root: `../`, absolute paths, root-escaping symlinks and binaries are rejected; per-file cap `ai.attachMaxBytes`, default 64 KB, truncated with a note). The menu *AI → Attach editor selection / Attach current file* injects context too.
+- **Tab completion & indentation**: type `@` and a candidate list of project paths pops up (directories carry a trailing slash, prefix-filtered) — `Tab` accepts, `Shift+Tab` selects the previous one, `Esc` dismisses. With no candidates, `Tab` indents by 4 spaces in the AI input and the editor, and `Shift+Tab` outdents; single-line inputs (search / commit) and the other panels keep `Tab` for focus cycling (reverse with `Shift+Tab`). Plugins can serve candidates too via `completions()` (same key, same popup) — that is the landing point for AI autocomplete.
+- **Read-only tools (Agent loop)**: the model may call `list_files` / `read_file` inside the project. Calls run locally and the loop continues until the model answers or `ai.maxSteps` (default 8) is reached. In-stream you see the call line (`→ name(args)`) and a one-line result summary (`⚙ name(path) ✓`) — file contents are never dumped into the chat. Tool results are summarized on click-copy. Set `ai.toolAutoRun: false` to approve each call with `y` / `n` (`Esc` cancels).
+- **Context compaction**: when the estimated token count exceeds `ai.compactThreshold` (default 24000), the oldest history is summarized automatically (keeping the most recent `ai.compactKeepRecent`, default 6 messages) before the real request; compaction never splits a tool_call/result pair and falls back to "no compaction" on failure. Trigger manually via *AI → Compact conversation now*.
+- **Conversation persistence** (on by default): every finished exchange is saved to `~/.vicecode_ai` (`0600`) and restored on the next launch; `Ctrl+L` clears the chat and the archive together. Disable with `ai.persist: false`.
+- **Markdown rendering**: finished messages render headings, lists, quotes, inline code/links/bold/italic and fenced code blocks (highlighted via scrivo). Streaming messages render as plain text until finished. Single line breaks are preserved.
+- **Quick actions**: menu *AI → Explain this code / Add comments / Suggest refactoring / Write unit tests* (also in the `F1` command palette). In the editor, `Ctrl+E` sends the current file (or your selection) to the AI for an explanation in a fresh conversation.
+
+All keys and behaviors are documented in the in-app `?` help page.
+
 ## Configuration & Language
 
-- Config is persisted to `~/.vicerc` (JSON: layout / theme / language, and `persistSession` if you set it) and auto-saved on exit. On save, ViceCode **merges** with the existing file so hand-edited keys (like `persistSession`) are preserved.
+- Config is persisted to `~/.vicerc` (JSON: layout / theme / language, `persistSession`, and the `ai` section — `persist` / `toolAutoRun` / `maxSteps` / `compactThreshold` / `compactKeepRecent` / `attachMaxBytes`) and auto-saved on exit. On save, ViceCode **merges** with the existing file so hand-edited keys (like `persistSession`) are preserved.
+- The `editor` section controls editor behaviour. Right now it only holds auto-pairing:
+  ```json
+  { "editor": { "autoPairs": ["()", "[]", "{}", "\"\"", "''"] } }
+  ```
+  Each entry is an `open` + `close` pair. **That list is the default** — it deliberately omits `<>`, because in PHP `<` is an operator and auto-closing `if ($a < $b)` into `<>` is pure noise; add it yourself if you want it. Writing `[]` **disables** auto-pairing. Save `~/.vicerc` from inside the editor and the change takes effect.
+  Behaviour: typing an opening symbol inserts its closing one and leaves the cursor in between; typing a closing symbol that already sits to the right **skips over** it instead of duplicating; backspace inside an empty pair deletes **both**; typing an opening symbol with a selection **wraps** the selection; quotes are **not** paired when they follow a letter/digit/underscore (`don't`, `it's`).
 - Override the config path with the `VICECODE_CONFIG` env var (used for test isolation to avoid polluting the home directory).
 - UI language is switched via `APP_LOCALE`, default `zh_CN`, `en` also available; missing keys fall back to English.
 
@@ -193,6 +236,8 @@ Full plugin developer guide (authoring / loading / segment fields / testing) is 
 
 Release notes: [CHANGELOG.md](CHANGELOG.md). Root-cause and regression-test catalogue for every fixed bug: [docs/BUGFIXES.md](docs/BUGFIXES.md).
 
+For full usage (step-by-step on every panel / AI / configuration / plugins) see **[docs/manual.md](docs/manual.md)** — this README stays a feature overview.
+
 ## Tests
 
 Run everything with the bundled runner (pass/fail is decided by each test's **exit code**; supports name filtering and a per-test timeout):
@@ -213,6 +258,7 @@ timeout 90 php tests/pty_interactive.php # Interactive PTY: real pty end-to-end 
 php tests/session_unit.php              # Session persistence: export/import + App restore (headless)
 timeout 120 php tests/pty_session.php   # Session persistence: save on exit -> restore on restart (real pty)
 php tests/m6_unit.php                   # terminal/editor/keybinding-drift regression
+php tests/docs_links.php                # doc link integrity (relative links + in-page anchors)
 ```
 
 > Never run `bin/vicecode.php` bare for pty acceptance; always go through `tests/pty_*.php` and set `VICECODE_CONFIG` to a temp file to isolate config.

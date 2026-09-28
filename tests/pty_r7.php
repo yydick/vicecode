@@ -18,8 +18,11 @@ declare(strict_types=1);
 $base = is_array(getenv()) ? getenv() : [];
 $env = array_merge($base, ['COLUMNS' => '120', 'LINES' => '40', 'APP_LOCALE' => 'en']);
 
-$cfgFile = sys_get_temp_dir() . '/vicecode_r7_pty_' . uniqid('', true) . '.json';
-@unlink($cfgFile);
+require __DIR__ . '/lib/isolation.php';
+
+// 独占配置目录。⚠️ 不能写成 sys_get_temp_dir() . '/xxx.json'：文件在 /tmp 根，
+// dirname 就是 /tmp，父子进程会一起去读 /tmp/.vicecode_ai（对话存档）与 /tmp/.vicecode_session。
+$cfgFile = vc_isolate_config('vc_r7_pty', 'vicerc.json');
 $env['VICECODE_CONFIG'] = $cfgFile;
 
 $readPty = static function ($stream, int $len) {

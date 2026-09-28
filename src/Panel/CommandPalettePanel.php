@@ -28,7 +28,8 @@ use PhpTui\Tui\Widget\Widget;
  * 键盘选择，选中后走既有的 App::menuAction() 分发，不另立分发逻辑。
  *
  * ## 唤起键为什么是 F1 而不是 Ctrl+Shift+P
- * 用户原始诉求是 VS Code 的 Ctrl+Shift+P，但项目实测结论（src/App.php:421-422、memory feedback.md）
+ * 用户原始诉求是 VS Code 的 Ctrl+Shift+P，但项目实测结论（src/App.php:421-422、
+ * docs/BUGFIXES.md §六「验收纪律」）
  * 确认：真实 pty 下 Shift/Alt 修饰不可区分，Ctrl+Shift+P 会退化成裸 Ctrl+P（0x10 控制字节），
  * 与 AI 面板的 Ctrl+P 切 Provider 冲突。F1 在 pty 下是独立 FunctionKeyEvent（同 F10/F2），
  * 完全可识别且当前空闲，故用 F1。

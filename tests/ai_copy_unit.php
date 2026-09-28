@@ -11,7 +11,10 @@ declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
 
-putenv('VICECODE_CONFIG=' . tempnam(sys_get_temp_dir(), 'vc_ai'));
+require __DIR__ . '/lib/isolation.php';
+
+// 独占配置目录（tempnam 会落在 /tmp 根，dirname 就是 /tmp → 与别的测试共用对话存档）
+vc_isolate_config('vc_ai_copy');
 
 use App\App;
 use PhpTui\Term\Event\MouseEvent;

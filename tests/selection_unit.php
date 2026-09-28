@@ -14,8 +14,9 @@ declare(strict_types=1);
  */
 
 require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/lib/isolation.php';
 
-putenv('VICECODE_CONFIG=' . tempnam(sys_get_temp_dir(), 'vc_sel'));
+vc_isolate_config('vc_selection');   // 独占配置目录：见 lib/isolation.php 顶部说明
 
 use App\App;
 use App\Text\DisplayWidth;
@@ -60,7 +61,7 @@ $up   = static fn(int $c, int $r): MouseEvent => MouseEvent::new(MouseEventKind:
 // ─════════ 1) 编辑器选择 ═════════
 echo "\n== 编辑器文本选择 ==\n";
 $content = "hello world\n你好世界abc\nthird line\n";
-$tmp = tempnam(sys_get_temp_dir(), 'vc_buf') . '.txt';
+$tmp = vc_tmp_file('vc_buf', '.txt');
 file_put_contents($tmp, $content);
 $app = new App();
 $app->openFile($tmp);
@@ -106,6 +107,9 @@ check($app->clipboardPeek() !== '', '编辑器：跨行复制后内存剪贴板�
 // ─════════ 2) 终端（runner）选择 ═════════
 echo "\n== 终端文本选择 ==\n";
 $app2 = new App();
+// ⚠️ 钉回 runner：终端**默认**已是交互式 pty（B15），而本段按 runner 的视口几何算行号
+// （输出顶对齐 + 输入行占底部一行）。pty 模式下取字走的是仿真器网格，行号口径完全不同。
+$app2->terminal->mode = 'runner';
 $tb = $app2->terminal->buffer();
 $tb->append("echo hello\n", false);
 $tb->append("line two output\n", false);
