@@ -31,13 +31,11 @@
 
 - **约束**：AOT 的严格类型检查会**拒绝**把 `resource` 赋给声明为 `array` 的属性。
 - **依据**：`src/Terminal/PtyProcess.php:23-27`。
-- **偏离点**：`PtyProcess::$pipes` 声明为 `mixed`，并在属性上保留
-  `@var array<int, resource>` 供静态分析与读者理解。
-  - 起因：`proc_open()` 的 `$pipes` 是引用参数，回填进去的是 **stream resource**。
-  - **标准 PHP 下 `array` 属性本来就接受 resource 元素**（`array` 不是泛型容器，不做元素类型检查），
-    因此改成 `mixed` **不改变任何运行时行为**，纯粹为编译兼容。
-  - 代价：类型信息从语言层降级到注释层，丢了静态检查——这是刻意的取舍。
-- **验证状态**：**注释结论，未验证**。
+- **本仓库现状**：核心源码 `PtyProcess::$pipes` 已还原为纯标准 PHP `array`（标准 PHP 下
+  `array` 属性接受 resource 元素，运行时无差）。AOT 编译所需的 `mixed` 妥协**不再写入核心**，
+  改由构建层 `patches/core-patches.sh` 注入 `vendor/yydick/vicecode` 副本，核心保持无 AOT 污染、
+  可被任意 PHP+Swoole `composer require`。
+- **验证状态**：**注释结论，未验证**（AOT 编译验证见构建层仓库）。
 
 ### ③ 禁 `Closure::bind`
 
