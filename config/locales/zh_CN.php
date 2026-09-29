@@ -63,6 +63,9 @@ return [
     'term.interactive_enter' => '按 F2 进入交互（Esc/F2 退出）',
     'term.interactive_exit'  => '交互终端已退出',
     'term.interactive_hint'  => '交互终端 · F2 退出捕获',
+    'term.takeover_enter' => '按 F11 独占整屏（真实终端）',
+    'term.takeover_exit'  => 'F11 退出独占',
+    'term.takeover_need'  => '独占失败：交互终端未启动（先按 F2）',
 
     'git.not_repo'       => '（当前目录不是 git 仓库）',
     'git.view_status'    => '状态 {n}',
@@ -151,6 +154,7 @@ return [
     'help.t_clear'         => '清屏',
     'help.t_cancel'        => '中断正在跑的命令',
     'help.t_interactive'   => 'F2 进入 / 退出交互终端',
+    'help.t_takeover'      => 'F11 终端独占整屏（直连真实终端，F11 退出）',
     'help.x_move'          => '移动选中',
     'help.x_enter'         => '展开折叠目录 或 打开文件',
     'help.x_open'          => '打开文件',

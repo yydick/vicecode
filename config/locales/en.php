@@ -70,6 +70,9 @@ return [
     'term.interactive_enter' => 'Press F2 to enter (Esc/F2 exits)',
     'term.interactive_exit'  => 'Interactive terminal exited',
     'term.interactive_hint'  => 'Interactive · F2 to exit capture',
+    'term.takeover_enter' => 'Press F11 to take over whole screen (real terminal)',
+    'term.takeover_exit'  => 'F11 exits takeover',
+    'term.takeover_need'  => 'Takeover failed: interactive terminal not running (press F2 first)',
 
     // 侧栏其它标签占位
     'git.not_repo'       => '(not a git repository)',
@@ -159,6 +162,7 @@ return [
     'help.t_clear'         => 'Clear screen',
     'help.t_cancel'        => 'Interrupt running command',
     'help.t_interactive'   => 'F2 enter / exit interactive terminal',
+    'help.t_takeover'      => 'F11 take over whole screen (real terminal; F11 to exit)',
     'help.x_move'          => 'Move selection',
     'help.x_enter'         => 'Expand/collapse dir or open file',
     'help.x_open'          => 'Open file',

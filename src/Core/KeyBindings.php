@@ -67,6 +67,7 @@ final class KeyBindings
                 ['Ctrl+L', 'help.t_clear'],
                 ['Ctrl+C', 'help.t_cancel'],
                 ['F2', 'help.t_interactive'],
+                ['F11', 'help.t_takeover'],
             ]),
             self::group('help.group_explorer', [
                 ['↑ / ↓', 'help.x_move'],
