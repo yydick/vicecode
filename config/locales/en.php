@@ -61,7 +61,7 @@ return [
     'status.paste_pending' => 'Reading clipboard…',
 
     // AI 输入框提示
-    'ai.input_hint'    => '(Enter send)',
+    'ai.input_hint'    => 'send ↵',
 
     // 编辑器占位 / 提示
     'editor.no_file'   => '(no file open — pick a file in Explorer, Enter to open)',

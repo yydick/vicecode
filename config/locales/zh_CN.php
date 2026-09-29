@@ -56,7 +56,7 @@ return [
     'status.pasted'      => '已粘贴 {n} 字符',
     'status.paste_pending' => '正在读取剪贴板…',
 
-    'ai.input_hint'    => '（回车发送）',
+    'ai.input_hint'    => 'send ↵',
 
     'editor.no_file'   => '（未打开文件 — 在资源管理器选中文件后按 Enter 打开）',
     'editor.readonly'  => '（只读）',

@@ -159,6 +159,10 @@ final class AiPanel
         $W = max(1, $width);
         $H = max(1, $height);
         $cursor = '▌';
+        // 右侧淡灰「send ↵」提示（非交互装饰）：表明「回车即发送」。
+        // 复用 ai.input_hint 文案；空间不够时自动隐藏，绝不遮挡光标与已输入文字。
+        $theme = $this->shell->theme;
+        $hint = $this->shell->t('ai.input_hint');
 
         // 首行带提示符 '> '，整段按显示列宽软换行（mbWrapDisp 已处理输入里的既有 \n）
         // 净化：粘贴进来的内容同样可能带 ESC/TAB（终端转义注入与制表符错位，同消息流）
@@ -175,7 +179,23 @@ final class AiPanel
         }
 
         $lines = [];
-        foreach ($wrapped as $wl) {
+        $last = count($wrapped) - 1;
+        foreach ($wrapped as $i => $wl) {
+            if ($i === $last && $W > 0) {
+                // 末行右侧追加淡灰提示：容得下才加（文字 + 1 间隔 + 提示 <= 宽），否则隐藏
+                $textW = DisplayWidth::dispWidth($wl);
+                $hintW = DisplayWidth::dispWidth($hint);
+                $gap = 1;
+                if ($textW + $gap + $hintW <= $W) {
+                    $pad = $W - $textW - $gap - $hintW;
+                    $lines[] = Line::fromSpans(
+                        Span::styled($wl, Style::default()),
+                        Span::styled(str_repeat(' ', $gap + $pad), Style::default()),
+                        Span::styled($hint, $theme->style('aiDim')),
+                    );
+                    continue;
+                }
+            }
             $lines[] = Line::fromSpans(Span::styled($wl, Style::default()));
         }
         return ParagraphWidget::fromLines(...$lines);
