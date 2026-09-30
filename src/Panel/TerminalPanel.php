@@ -1028,7 +1028,7 @@ final class TerminalPanel
     private function ptyHintLine(int $cw, bool $focused, bool $gutter, Style $trackStyle): Line
     {
         $hint = $this->captured
-            ? $this->shell->t('term.interactive_hint') . ' · F11'
+            ? $this->shell->t('term.interactive_hint') . ' · F5'
             : $this->shell->t('term.interactive_enter');
         $style = $focused
             ? $this->shell->theme->style('borderFocus')

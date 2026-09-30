@@ -38,6 +38,12 @@ final class KeyToPty
             if ($event->char === "\x1b") {
                 return null; // 孤立 ESC：App 当退出捕获处理
             }
+            // 退格键在不同终端上可能以 \x08(BS / Control-H) 或 \x7f(DEL) 到达；
+            // shell / readline / vim 在 smkx（应用键模式）下统一按 DEL(\x7f) 解释回退，
+            // 故无论来的是哪种都归一到 \x7f，否则 \x08 在 readline 里只是左移、看起来「没反应」。
+            if ($event->char === "\x08" || $event->char === "\x7f") {
+                return "\x7f";
+            }
             // Ctrl+字母 → 控制字节（ord(c)&0x1f）。其它原样 UTF-8 转发。
             if (($event->modifiers & KeyModifiers::CONTROL) !== 0) {
                 $ch = strtolower($event->char);
@@ -161,18 +167,19 @@ final class KeyToPty
     private static function codedKey(CodedKeyEvent $e): ?string
     {
         $ctrl = ($e->modifiers & KeyModifiers::CONTROL) !== 0;
-        $mod = $ctrl ? ';5' : ''; // xterm Ctrl 修饰序列
         return match ($e->code) {
             KeyCode::Enter => "\r",
             KeyCode::Backspace => "\x7f",
             KeyCode::Delete => "\x1b[3~",
             KeyCode::Tab => "\t",
-            KeyCode::Up => "\x1b[" . ($ctrl ? '1' . $mod : '') . 'A',
-            KeyCode::Down => "\x1b[" . ($ctrl ? '1' . $mod : '') . 'B',
-            KeyCode::Right => "\x1b[" . ($ctrl ? '1' . $mod : '') . 'C',
-            KeyCode::Left => "\x1b[" . ($ctrl ? '1' . $mod : '') . 'D',
-            KeyCode::Home => $ctrl ? "\x1b[1{$mod}H" : "\x1b[H",
-            KeyCode::End => $ctrl ? "\x1b[1{$mod}F" : "\x1b[F",
+            // 应用光标键模式（smkx 之后程序期待的序列）：SS3 \eO + 方向字母；
+            // 带 Ctrl 时用 \e[1;5 + 字母。发 ANSI 裸序列 \e[A 在 readline/vim 里常被忽略。
+            KeyCode::Up => $ctrl ? "\x1b[1;5A" : "\x1bOA",
+            KeyCode::Down => $ctrl ? "\x1b[1;5B" : "\x1bOB",
+            KeyCode::Right => $ctrl ? "\x1b[1;5C" : "\x1bOC",
+            KeyCode::Left => $ctrl ? "\x1b[1;5D" : "\x1bOD",
+            KeyCode::Home => $ctrl ? "\x1b[1;5H" : "\x1bOH",
+            KeyCode::End => $ctrl ? "\x1b[1;5F" : "\x1bOF",
             KeyCode::PageUp => "\x1b[5~",
             KeyCode::PageDown => "\x1b[6~",
             KeyCode::Insert => "\x1b[2~",

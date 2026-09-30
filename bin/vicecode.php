@@ -626,11 +626,12 @@ function startMain(App $app, Terminal $term, bool $sw): void
             $busy = $app->termRunning() || $app->searchRunning() || $app->aiStreaming();
             $ev = $ch->pop($busy ? 0.01 : $idleTimeout);
 
-            // 终端独占（Takeover）切换：F11 且焦点在终端面板。
+            // 终端独占（Takeover）切换：F5（主用）且焦点在终端面板。
+            // F5 不被 Windows Terminal 等模拟器的全屏热键抢占；同时保留 F11 给未抢占该键的平台。
             // 放在最前：它要直接操作真实终端（$term），而 App::handle 拿不到 $term。
             if ($ev !== false
                 && $ev instanceof FunctionKeyEvent
-                && $ev->number === 11
+                && ($ev->number === 5 || $ev->number === 11)
                 && $app->focusPanel() === 'terminal') {
                 if ($app->terminalTakeover) {
                     exitTakeover($app, $term, $display, $vp);
@@ -703,9 +704,9 @@ function startMain(App $app, Terminal $term, bool $sw): void
         $handled = false;
         $busy = $app->termRunning() || $app->searchRunning() || $app->aiStreaming();
         foreach ($events->drainTimeout($busy ? 10000 : $idleUs, $app->terminalTakeover) as $event) {
-            // F11 切换独占（仅终端面板聚焦时）
+            // F5（主用）/ F11（未抢占平台）切换独占（仅终端面板聚焦时）
             if ($event instanceof FunctionKeyEvent
-                && $event->number === 11
+                && ($event->number === 5 || $event->number === 11)
                 && $app->focusPanel() === 'terminal') {
                 if ($app->terminalTakeover) {
                     exitTakeover($app, $term, $display, $vp);
@@ -716,7 +717,7 @@ function startMain(App $app, Terminal $term, bool $sw): void
                 break;
             }
             if ($app->terminalTakeover) {
-                // 接管期：除 F11 外的按键经 KeyToPty 编码转发给 PTY
+                // 接管期：除 F5/F11（接管开关）外的按键经 KeyToPty 编码转发给 PTY
                 $bytes = KeyToPty::encode($event);
                 if ($bytes !== null) {
                     $app->terminal->sendToPty($bytes);

@@ -1980,6 +1980,14 @@ class App
         // 所有按键经 KeyToPty 编码后转发给 PTY（由真实 shell / 全屏程序解释），
         // 不再走下面的面板导航分发。
         if ($this->focusPanel() === 'terminal' && $this->terminal->isCaptured()) {
+            // 鼠标事件在「嵌入面板」里不转发给 PTY：bash 等不识别 SGR 鼠标编码，
+            // 会把 \e[<x;yM 原样回显成满屏 ASCII 垃圾（这就是用户看到的「位置信息变字符」）。
+            // 改走 TUI 的 handleMouse——滚轮翻回退、点击/拖拽归文本选择。
+            // 真正的全屏鼠标透传只在 Takeover(F5/F11) 模式发生（见 bin/vicecode.php 接管主循环）。
+            if ($event instanceof MouseEvent) {
+                $this->handleMouse($event, $a, $vp);
+                return;
+            }
             $exit = ($event instanceof FunctionKeyEvent && $event->number === 2)
                 || ($event instanceof CodedKeyEvent && $event->code === KeyCode::Esc);
             if ($exit) {

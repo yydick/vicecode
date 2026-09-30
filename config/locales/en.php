@@ -93,8 +93,8 @@ return [
     'term.focus_to_start'    => '(focus this panel to start an interactive shell)',
     'term.interactive_exit'  => 'Interactive terminal exited · F2 to re-enter',
     'term.interactive_hint'  => 'Interactive · F2 to exit capture',
-    'term.takeover_enter' => 'Press F11 to take over whole screen (real terminal)',
-    'term.takeover_exit'  => 'F11 exits takeover',
+    'term.takeover_enter' => 'Press F5 to take over whole screen (real terminal)',
+    'term.takeover_exit'  => 'F5 exits takeover',
     'term.takeover_need'  => 'Takeover failed: interactive terminal not running (press F2 first)',
 
     // 侧栏其它标签占位
@@ -235,7 +235,7 @@ return [
     'help.t_clear'         => 'Clear screen',
     'help.t_cancel'        => 'Interrupt running command',
     'help.t_interactive'   => 'F2 toggle terminal keyboard capture (interactive shell is the default)',
-    'help.t_takeover'      => 'F11 take over whole screen (real terminal; F11 to exit)',
+    'help.t_takeover'      => 'F5 take over whole screen (real terminal; F5 to exit)',
     'help.x_move'          => 'Move selection',
     'help.x_nav'           => 'Expand (→ into child) / collapse (← to parent)',
     'help.x_enter'         => 'Expand/collapse dir or open file',
