@@ -79,6 +79,7 @@ final class KeyBindings
                 ['Ctrl+V', 'help.e_paste'],
                 ['Shift+Ins', 'help.e_paste'],
                 ['F2', 'help.t_interactive'],
+                ['F11', 'help.t_takeover'],
             ]),
             self::group('help.group_explorer', [
                 ['↑ / ↓', 'help.x_move'],

@@ -329,6 +329,72 @@ final class TerminalPanel
         }
     }
 
+    /** 接管期：PTY 是否仍存活（bin/vicecode.php 据此决定是否自动退出独占） */
+    public function ptyAlive(): bool
+    {
+        return $this->mode === 'pty' && $this->pty !== null && $this->pty->isRunning();
+    }
+
+    /**
+     * 计算面板内「输出视口」几何（与 ptyContent 渲染共用）：返回 [$W, $outH, $gutter, $cw]。
+     * $W=内宽，$outH=去掉提示行后的输出行数，$gutter=是否画右缘滚动条，$cw=实际仿真列数。
+     */
+    private function ptyViewportGeometry(Area $terminal): array
+    {
+        $inner = $terminal->inner(new Margin(1, 1));
+        $W = max(0, $inner->width);
+        $H = max(0, $inner->height);
+        $outH = max(0, $H - 1);
+        $gutter = $W >= 3;
+        $cw = $gutter ? $W - 1 : $W;
+        return [$W, $outH, $gutter, $cw];
+    }
+
+    /** 接管（Takeover）：把仿真器与 PTY 都拉到整帧尺寸（绕过面板子矩形） */
+    public function resizeToViewport(int $w, int $h): void
+    {
+        $w = max(1, $w);
+        $h = max(1, $h);
+        if ($this->emu === null) {
+            $this->emu = new Vt100Emulator($w, $h);
+        } else {
+            $this->emu->resize($w, $h);
+        }
+        $this->lastCols = $w;
+        $this->lastRows = $h;
+        if ($this->pty !== null && $this->pty->isRunning()) {
+            $this->pty->resize($w, $h);
+        }
+    }
+
+    /** 退出接管：PTY/仿真器恢复成面板子矩形尺寸（含右缘 gutter） */
+    public function resizeToPanel(Area $terminal): void
+    {
+        [, $outH, , $cw] = $this->ptyViewportGeometry($terminal);
+        $this->resizeToViewport($cw, $outH);
+    }
+
+    /**
+     * 接管期主循环钩子：把 PTY 输出原样透传到真实终端（保留 100% 保真度），
+     * 同时抄一份给仿真器作回看历史。PTY 死亡则退回 runner 并通知 App 退出独占。
+     */
+    public function takeoverPump(): void
+    {
+        if ($this->pty === null || !$this->pty->isRunning()) {
+            if ($this->pty !== null && $this->pty->pollExited()) {
+                $this->fallbackToRunner();
+            }
+            $this->shell->terminalTakeover = false;
+            return;
+        }
+        $bytes = $this->pty->read();
+        if ($bytes !== '') {
+            $this->emu?->write($bytes);
+            fwrite(STDOUT, $bytes);
+            fflush(STDOUT);
+        }
+    }
+
     // ── 交互式 PTY 控制 ────────────────────────────────
 
     /**
@@ -663,10 +729,11 @@ final class TerminalPanel
         return $this->runnerContent($terminal, $focused);
     }
 
-    /** 交互式 PTY 模式渲染：仿真器网格 + 底部提示行（无命令输入行） */
+    /** 交互式 PTY 模式渲染：仿真器网格 + 底部提示行（无命令输入行）+ 右缘滚动条 */
     private function ptyContent(Area $terminal, bool $focused): Widget
     {
         [$inner, $W, $outH] = $this->viewport($terminal);
+        [, , $gutter, $cw] = $this->ptyViewportGeometry($terminal);
 
         if ($outH <= 0 || $W <= 0) {
             return ParagraphWidget::fromLines(
@@ -692,21 +759,39 @@ final class TerminalPanel
 
         // 尺寸同步：emu 初始 80×24，首帧按实际面板尺寸重建；变化时才 resize（避免每帧写 stty）
         if ($this->emu === null) {
-            $this->emu = new Vt100Emulator($W, $outH);
-            $this->lastCols = $W;
+            $this->emu = new Vt100Emulator($cw, $outH);
+            $this->lastCols = $cw;
             $this->lastRows = $outH;
-        } elseif ($this->lastCols !== $W || $this->lastRows !== $outH) {
-            $this->emu->resize($W, $outH);
-            $this->lastCols = $W;
+        } elseif ($this->lastCols !== $cw || $this->lastRows !== $outH) {
+            $this->emu->resize($cw, $outH);
+            $this->lastCols = $cw;
             $this->lastRows = $outH;
             if ($this->pty !== null && $this->pty->isRunning()) {
-                $this->pty->resize($W, $outH);
+                $this->pty->resize($cw, $outH);
             }
         }
 
         $grid = $this->emu->gridForRender($outH, $this->scrollback);
         $cursor = $grid['cursor'];
         $this->lastGrid = $grid['lines'];
+
+        // 右缘滚动条 thumb 几何（基于回退偏移与总可见行；内容未溢出则不画）
+        $sbTotal = $this->emu->scrollbackSize();
+        $total = $sbTotal + $outH;
+        $thumbTop = -1;
+        $thumbBottom = -1;
+        if ($gutter && $total > $outH) {
+            $viewStart = max(0, $total - $outH - max(0, $this->scrollback));
+            $thumbTop = (int) round($viewStart / $total * $outH);
+            $thumbBottom = (int) round(($viewStart + $outH) / $total * $outH) - 1;
+            if ($thumbBottom < $thumbTop) {
+                $thumbBottom = $thumbTop;
+            }
+            $thumbTop = max(0, min($outH - 1, $thumbTop));
+            $thumbBottom = max(0, min($outH - 1, $thumbBottom));
+        }
+        $trackStyle = $this->shell->theme->style('border');
+        $thumbStyle = $this->shell->theme->style('borderFocus');
 
         $lines = [];
         foreach ($grid['lines'] as $rIdx => $cells) {
@@ -740,9 +825,13 @@ final class TerminalPanel
                 $curText .= $ch;
             }
             $flush();
+            if ($gutter) {
+                $inThumb = $rIdx >= $thumbTop && $rIdx <= $thumbBottom;
+                $spans[] = Span::styled($inThumb ? '█' : ' ', $inThumb ? $thumbStyle : $trackStyle);
+            }
             $lines[] = Line::fromSpans(...$spans);
         }
-        $lines[] = $this->ptyHintLine($W, $focused);
+        $lines[] = $this->ptyHintLine($cw, $focused, $gutter, $trackStyle);
 
         return ParagraphWidget::fromLines(...$lines);
     }
@@ -921,6 +1010,9 @@ final class TerminalPanel
     /** shell 还没起（未聚焦）：主体只留一行「聚焦即启动」，末行仍是提示行 */
     private function pendingContent(int $W, int $outH, bool $focused): Widget
     {
+        $gutter = $W >= 3;
+        $cw = $gutter ? $W - 1 : $W;
+        $trackStyle = $this->shell->theme->style('border');
         $lines = [Line::fromSpans(Span::styled(
             $this->shell->t('term.focus_to_start'),
             $this->shell->theme->style('termHint')
@@ -928,26 +1020,30 @@ final class TerminalPanel
         while (count($lines) < $outH) {
             $lines[] = Line::fromSpans(Span::styled('', Style::default()));
         }
-        $lines[] = $this->ptyHintLine($W, $focused);
+        $lines[] = $this->ptyHintLine($cw, $focused, $gutter, $trackStyle);
         return ParagraphWidget::fromLines(...$lines);
     }
 
-    /** 底部提示行：捕获态提示按 F2 退出；非捕获态提示「输入即接管键盘」 */
-    private function ptyHintLine(int $W, bool $focused): Line
+    /** 底部提示行：捕获态提示按 F2 退出；非捕获态提示按 F2 进入交互。可附右缘滚动条 track。 */
+    private function ptyHintLine(int $cw, bool $focused, bool $gutter, Style $trackStyle): Line
     {
         $hint = $this->captured
-            ? $this->shell->t('term.interactive_hint')
+            ? $this->shell->t('term.interactive_hint') . ' · F11'
             : $this->shell->t('term.interactive_enter');
         $style = $focused
             ? $this->shell->theme->style('borderFocus')
             : $this->shell->theme->style('border');
         $w = DisplayWidth::dispWidth($hint);
-        if ($w < $W) {
-            $hint .= str_repeat(' ', $W - $w);
-        } elseif ($w > $W) {
-            $hint = DisplayWidth::mbSubDisp($hint, 0, $W);
+        if ($w < $cw) {
+            $hint .= str_repeat(' ', $cw - $w);
+        } elseif ($w > $cw) {
+            $hint = DisplayWidth::mbSubDisp($hint, 0, $cw);
         }
-        return Line::fromSpans(Span::styled($hint, $style));
+        $spans = [Span::styled($hint, $style)];
+        if ($gutter) {
+            $spans[] = Span::styled(' ', $trackStyle);
+        }
+        return Line::fromSpans(...$spans);
     }
 
     /** 命令运行器模式渲染（原 content 逻辑） */

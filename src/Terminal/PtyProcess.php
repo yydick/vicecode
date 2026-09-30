@@ -223,6 +223,12 @@ final class PtyProcess
         return false;
     }
 
+    /** 主端输出流（shell 写、我们读），供接管期 stream_select / 原始透传用 */
+    public function outStream()
+    {
+        return $this->pipes[1] ?? null;
+    }
+
     /** 强制杀掉并回收（退出应用 / 测试收尾时调用）。幂等。 */
     public function shutdown(): void
     {

@@ -82,6 +82,9 @@ class App
 {
     public bool $quit = false;
 
+    /** 终端独占（Takeover）模式：占满整帧、PTY 直连真实终端、跳过 php-tui 合成（bin/vicecode.php 主循环驱动） */
+    public bool $terminalTakeover = false;
+
     /** 可聚焦面板顺序（Tab 循环用） */
     public const PANELS = ['sidebar', 'editor', 'terminal', 'ai_stream', 'ai_input'];
 
@@ -1987,6 +1990,25 @@ class App
             if ($event instanceof CharKeyEvent && $event->char === "\x1b") {
                 $this->terminal->exitCapture();
                 return;
+            }
+            // 捕获态下 Shift+回滚键：在 shell 里打字时也能回看历史，不必先 F2 退出捕获
+            // （滚轮在捕获态本就走 handleMouse→terminal.wheel→scrollPty，无需此处理）
+            if ($event instanceof CodedKeyEvent
+                && ($event->modifiers & KeyModifiers::SHIFT) !== 0) {
+                $page = max(1, ($a['terminal']->height ?? 4) - 3);
+                $d = match ($event->code) {
+                    KeyCode::PageUp => -$page,
+                    KeyCode::PageDown => $page,
+                    KeyCode::Up => -1,
+                    KeyCode::Down => 1,
+                    KeyCode::Home => -$this->terminal->scrollbackSize(),
+                    KeyCode::End => $this->terminal->scrollbackSize(),
+                    default => null,
+                };
+                if ($d !== null) {
+                    $this->terminal->scrollPty($d);
+                    return;
+                }
             }
             $bytes = KeyToPty::encode($event);
             if ($bytes !== null) {

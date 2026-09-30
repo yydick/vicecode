@@ -19,12 +19,19 @@ require __DIR__ . '/../vendor/autoload.php';
 
 use App\App;
 use App\Core\ConfigStore;
+use App\Terminal\KeyToPty;
 use PhpTui\Term\Terminal;
 use PhpTui\Term\Actions;
 use PhpTui\Term\Event;
 use PhpTui\Term\EventProvider;
 use PhpTui\Term\EventParser;
+use PhpTui\Term\Event\FunctionKeyEvent;
+use PhpTui\Term\Event\MouseEvent;
+use PhpTui\Term\KeyModifiers;
+use PhpTui\Term\MouseButton;
+use PhpTui\Term\MouseEventKind;
 use PhpTui\Tui\Bridge\PhpTerm\PhpTermBackend;
+use PhpTui\Tui\Display\Area;
 use PhpTui\Tui\DisplayBuilder;
 
 /**
@@ -70,9 +77,14 @@ final class BlockingTtyEventProvider implements EventProvider
      * 无 Swoole 的回退分支必须用这个而不是 next()：next() 永久阻塞，命令运行期间
      * 主循环卡在等键上，命令输出就没法被排空，界面会僵住直到命令结束。
      *
+     * $takeover：接管期置真。php-tui 0.2.x 的 EventParser 对 SGR 鼠标「松开」码
+     * （button+3 的 3/4/5）解析不了——与 Swoole 分支同样的位置，这里用
+     * scanSgrMouseRelease() 从原始字节补一份 release 事件，保证接管期「点一下松开」
+     * 也透传给 PTY。非接管期不注入，正常 TUI 的鼠标逻辑不受影响。
+     *
      * @return Event[]
      */
-    public function drainTimeout(int $timeoutUs): array
+    public function drainTimeout(int $timeoutUs, bool $takeover = false): array
     {
         $r = [$this->stream];
         $w = $e = [];
@@ -84,12 +96,60 @@ final class BlockingTtyEventProvider implements EventProvider
                 foreach ($this->parser->drain() as $ev) {
                     $this->buffer[] = $ev;
                 }
+                // 接管期：补 SGR 鼠标松开（php-tui 解析器丢的）。按下/拖拽/滚轮由
+                // 上面 parser 正常解析，无需处理；只有松开码需要自行合成注入。
+                if ($takeover) {
+                    foreach (scanSgrMouseRelease($bytes) as $rel) {
+                        $this->buffer[] = $rel;
+                    }
+                }
             }
         }
         $out = $this->buffer;
         $this->buffer = [];
         return $out;
     }
+}
+
+/**
+ * 从原始字节里抽出 SGR 鼠标「松开」序列（\e[<B;X;Ym），合成 release 事件。
+ *
+ * 为什么需要它：php-tui 0.2.x 的 EventParser 对 SGR 松开（button+3 的 3/4/5 码）
+ * 解析不了——parseCb 把它们误当滚轮码或抛 ParseError 丢弃，导致接管期「点一下松开」
+ * 透传不到 PTY（点击选中/拖拽落点会失效）。这里不碰 vendor，自行补一份 release 事件，
+ * 仅在接管期（$app->terminalTakeover）注入，正常 TUI 的鼠标逻辑不受影响。
+ * 按下(M)/拖拽(+32)/滚轮(64+）由 php-tui 正常解析，无需处理。
+ *
+ * @return MouseEvent[]
+ */
+function scanSgrMouseRelease(string $bytes): array
+{
+    $out = [];
+    if (preg_match_all('/\e\\[<(\d+);(\d+);(\d+)m/', $bytes, $m, PREG_SET_ORDER) > 0) {
+        foreach ($m as $cap) {
+            $code = (int) $cap[1];
+            $x = (int) $cap[2];
+            $y = (int) $cap[3];
+            $btn = match ($code) {
+                3 => MouseButton::Left,
+                4 => MouseButton::Middle,
+                5 => MouseButton::Right,
+                default => MouseButton::None,
+            };
+            $mods = KeyModifiers::NONE;
+            if (($code & 0b0000_0100) !== 0) {
+                $mods |= KeyModifiers::SHIFT;
+            }
+            if (($code & 0b0000_1000) !== 0) {
+                $mods |= KeyModifiers::ALT;
+            }
+            if (($code & 0b0001_0000) !== 0) {
+                $mods |= KeyModifiers::CONTROL;
+            }
+            $out[] = MouseEvent::new(MouseEventKind::Up, $btn, max(0, $x - 1), max(0, $y - 1), $mods);
+        }
+    }
+    return $out;
 }
 
 /** 干净还原终端（无花屏、回显恢复）。 */
@@ -316,6 +376,62 @@ function resolveStartArg(array $argv): array
 }
 
 /**
+ * 进入终端独占（Takeover）：把交互式 PTY 从「面板内仿真」切换成「直连真实终端」。
+ *
+ * 原理：复用 restoreTerminal 的还原序列（离开 php-tui 的备用屏 → 回到真实终端主屏），
+ * 但**不关 raw mode**——这样 STDIN 仍是原始字节、由读键协程解析后转发给 PTY，
+ * 输出侧则把 PTY 字节原样 fwrite 给 STDOUT，实现 100% 真终端保真度。
+ * 仿真器仍被抄一份，供退出独占后回看历史。
+ *
+ * 需要交互式 shell 在跑；若当前是 runner 态则先自动进入交互（F2 行为）。
+ */
+function enterTakeover(App $app, Terminal $term, Area $vp): void
+{
+    if ($app->terminal->mode === 'runner') {
+        $app->terminal->toggleInteractive();
+    }
+    if (!($app->terminal->mode === 'pty' && $app->terminal->ptyAlive())) {
+        $app->setMessage($app->t('term.takeover_need'));
+        return;
+    }
+    // 1) 离开 php-tui 备用屏（TUI 帧被终端保存），回到真实终端主屏
+    $term->queue(
+        Actions::alternateScreenDisable(),
+        Actions::disableMouseCapture(),
+        Actions::cursorShow()
+    );
+    $term->flush();
+    // 2) 清掉主屏残留内容，避免与 pty 后续输出叠加
+    fwrite(STDOUT, "\e[2J\e[H");
+    fflush(STDOUT);
+    // 3) 把 PTY/仿真器拉到整帧尺寸，触发 SIGWINCH 让 shell / 全屏程序重绘
+    $app->terminal->resizeToViewport($vp->width, $vp->height);
+    $app->terminalTakeover = true;
+}
+
+/** 退出终端独占：PTY/仿真器恢复面板尺寸，重新进入备用屏并画回 TUI。 */
+function exitTakeover(App $app, Terminal $term, $display, Area $vp): void
+{
+    if ($app->terminal->ptyAlive()) {
+        $app->terminal->resizeToPanel($app->areas($vp)['terminal']);
+    }
+    $app->terminalTakeover = false;
+    restoreTuiScreen($app, $term, $display, $vp);
+}
+
+/** 重新进入 php-tui 备用屏并画回当前 TUI 帧（退出独占 / PTY 在独占中死亡共用）。 */
+function restoreTuiScreen(App $app, Terminal $term, $display, Area $vp): void
+{
+    $term->queue(
+        Actions::alternateScreenEnable(),
+        Actions::enableMouseCapture(),
+        Actions::cursorHide()
+    );
+    $term->flush();
+    $display->draw($app->render($vp));
+}
+
+/**
  * @param bool $sw 是否使用 Swoole 协程底座
  * @param list<string> $argv 命令行参数：
  *   - 首个位置参数（不以 '-' 开头）为目录 → chdir 进该目录，资源管理器/终端/搜索/git 随之跟随；
@@ -472,6 +588,13 @@ function startMain(App $app, Terminal $term, bool $sw): void
                 foreach ($evs as $ev) {
                     $ch->push($ev);
                 }
+                // 接管期：php-tui 解析器对 SGR 松开会丢事件（parseCb bug），
+                // 这里自行补一份 release 事件，保证「点一下松开」也透传给 PTY。
+                if ($app->terminalTakeover) {
+                    foreach (scanSgrMouseRelease($bytes) as $rel) {
+                        $ch->push($rel);
+                    }
+                }
             }
         });
 
@@ -499,8 +622,41 @@ function startMain(App $app, Terminal $term, bool $sw): void
         $tickSec = $app->minTickInterval();
         $idleTimeout = $tickSec !== null ? max(0.1, (float) $tickSec) : 0.05;
         while (!$app->quit) {
+            $vp = $display->viewportArea();
             $busy = $app->termRunning() || $app->searchRunning() || $app->aiStreaming();
             $ev = $ch->pop($busy ? 0.01 : $idleTimeout);
+
+            // 终端独占（Takeover）切换：F11 且焦点在终端面板。
+            // 放在最前：它要直接操作真实终端（$term），而 App::handle 拿不到 $term。
+            if ($ev !== false
+                && $ev instanceof FunctionKeyEvent
+                && $ev->number === 11
+                && $app->focusPanel() === 'terminal') {
+                if ($app->terminalTakeover) {
+                    exitTakeover($app, $term, $display, $vp);
+                } else {
+                    enterTakeover($app, $term, $vp);
+                }
+                continue;
+            }
+
+            if ($app->terminalTakeover) {
+                // 接管期：PTY 输出原样透传真实终端（不画 TUI 帧）；
+                // PTY 中途死亡则自动回到 TUI。
+                $app->terminal->takeoverPump();
+                if (!$app->terminalTakeover) {
+                    restoreTuiScreen($app, $term, $display, $vp);
+                    continue;
+                }
+                if ($ev !== false) {
+                    $bytes = KeyToPty::encode($ev);
+                    if ($bytes !== null) {
+                        $app->terminal->sendToPty($bytes);
+                    }
+                }
+                continue;
+            }
+
             $gotOutput = $app->pollTerminal();
             $gotSearch = $app->pollSearch();
             // M5：AI 流式 token 同样每轮排空。返回 true 表示有新 token，必须重绘，
@@ -513,15 +669,15 @@ function startMain(App $app, Terminal $term, bool $sw): void
                     if (!$redraw->isEmpty()) {
                         $redraw->pop(0.001);
                     }
-                    $display->draw($app->render($display->viewportArea()));
+                    $display->draw($app->render($vp));
                 } elseif ($tickSec !== null) {
                     // 无事件/输出但有待 tick 插件：idle 超时到达即重绘，驱动时钟等插件更新
-                    $display->draw($app->render($display->viewportArea()));
+                    $display->draw($app->render($vp));
                 }
                 continue;
             }
-            $app->handle($ev, $display->viewportArea());
-            $display->draw($app->render($display->viewportArea()));
+            $app->handle($ev, $vp);
+            $display->draw($app->render($vp));
         }
         return;
     }
@@ -533,18 +689,53 @@ function startMain(App $app, Terminal $term, bool $sw): void
     $events = new BlockingTtyEventProvider(STDIN);
     $display->draw($app->render($display->viewportArea()));
     while (!$app->quit) {
+        $vp = $display->viewportArea();
+
+        // 接管期：持续把 PTY 输出透传真实终端（不画 TUI 帧）；PTY 死亡自动回到 TUI。
+        if ($app->terminalTakeover) {
+            $app->terminal->takeoverPump();
+            if (!$app->terminalTakeover) {
+                restoreTuiScreen($app, $term, $display, $vp);
+                continue;
+            }
+        }
+
         $handled = false;
         $busy = $app->termRunning() || $app->searchRunning() || $app->aiStreaming();
-        foreach ($events->drainTimeout($busy ? 10000 : $idleUs) as $event) {
-            $app->handle($event, $display->viewportArea());
+        foreach ($events->drainTimeout($busy ? 10000 : $idleUs, $app->terminalTakeover) as $event) {
+            // F11 切换独占（仅终端面板聚焦时）
+            if ($event instanceof FunctionKeyEvent
+                && $event->number === 11
+                && $app->focusPanel() === 'terminal') {
+                if ($app->terminalTakeover) {
+                    exitTakeover($app, $term, $display, $vp);
+                } else {
+                    enterTakeover($app, $term, $vp);
+                }
+                $handled = true;
+                break;
+            }
+            if ($app->terminalTakeover) {
+                // 接管期：除 F11 外的按键经 KeyToPty 编码转发给 PTY
+                $bytes = KeyToPty::encode($event);
+                if ($bytes !== null) {
+                    $app->terminal->sendToPty($bytes);
+                }
+                $handled = true;
+                continue;
+            }
+            $app->handle($event, $vp);
             $handled = true;
+        }
+        if ($app->terminalTakeover) {
+            continue; // 接管期不画 TUI 帧
         }
         $gotOutput = $app->pollTerminal();
         $gotSearch = $app->pollSearch();
         $gotAi = $app->pollAi();
         // 有待 tick 插件时即便无输入/输出也重绘（$idleUs 已按 tick 放大），驱动时钟走动
         if ($handled || $gotOutput || $gotSearch || $gotAi || $tickSec !== null) {
-            $display->draw($app->render($display->viewportArea()));
+            $display->draw($app->render($vp));
         }
     }
     // 还原由 start() 的 finally 统一负责
