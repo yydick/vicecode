@@ -470,14 +470,16 @@ final class TerminalPanel
         if ($this->mode !== 'pty' || $this->pty !== null) {
             return;
         }
-        [, $W, $outH] = $this->viewport($terminal);
-        if ($W <= 0 || $outH <= 0) {
+        // ⚠️ 列宽必须与渲染一致：pty 用 $cw（去掉右缘 gutter 的内宽），
+        // 不能比模拟器渲染宽 1 列——否则接近右边界/多行的命令 redisplay 错位成「叠加」。
+        [, $outH, , $cw] = $this->ptyViewportGeometry($terminal);
+        if ($cw <= 0 || $outH <= 0) {
             return; // 面板太小（或未布局）：等首帧渲染路径再来
         }
         if ($this->restorePending) {
-            $this->restoreSession($W, $outH);
+            $this->restoreSession($cw, $outH);
         } elseif ($this->ptyStartPending) {
-            $this->startPty($W, $outH);
+            $this->startPty($cw, $outH);
         }
     }
 
@@ -748,9 +750,9 @@ final class TerminalPanel
                 return $this->pendingContent($W, $outH, $focused);
             }
             if ($this->restorePending) {
-                $this->restoreSession($W, $outH);
+                $this->restoreSession($cw, $outH);
             } else {
-                $this->startPty($W, $outH);
+                $this->startPty($cw, $outH);
             }
             if ($this->mode !== 'pty') {
                 return $this->runnerContent($terminal, $focused);

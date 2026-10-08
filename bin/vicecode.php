@@ -428,6 +428,11 @@ function restoreTuiScreen(App $app, Terminal $term, $display, Area $vp): void
         Actions::cursorHide()
     );
     $term->flush();
+    // ⚠️ 必须 clear() 再 draw：标准 VT 下离开备用屏时其缓冲区被丢弃，重新进入是**空白**屏；
+    // 但 php-tui 内部 diff buffer 仍记着接管前的那一帧，与新帧相同 → diff 为空 → draw 不发任何
+    // 绘制字节，屏幕停在空白（表现为「F5 退出接管后四窗不可见 / 花屏」）。clear() 把 back buffer
+    // 重置为空，迫使下一次 draw 全量重绘当前 TUI 帧。Swoole/回退/pty 死亡三条退出路径共用本函数。
+    $display->clear();
     $display->draw($app->render($vp));
 }
 

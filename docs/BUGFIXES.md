@@ -462,6 +462,28 @@
   还原三连 + 日志记到信号名 + `signaled=true, termsig=对应信号` + 存活标记残留；
   另加**非 Swoole 底座**（`TUI_USE_SWOOLE=0`）的 SIGTERM 一例（两种底座退出路径不同，
   历史上各自出过不一样的问题）；再加「残留标记 → 下次启动写 WARN」。
+
+#### D12. F5 退出终端接管（Takeover）后屏幕花、四窗不可见 `[本轮]`
+- **现象**（用户实测）：聚焦终端面板 → F5 进 Takeover 全屏（直连真实终端，vim/htop 可用）正常；
+  **再按 F5 退出接管后，屏幕花掉、Sidebar/Editor/AI 等窗口全不见**（只剩空白或接管残留）。复现稳。
+- **先证伪**（不是这些）：① 不是 `resizeToPanel` 尺寸错配（列宽 `$cw`/`$W-1` 已是另一轮修好的、与接管无关）；
+  ② 不是 `enterTakeover`/`exitTakeover` 配对漏调用（三条退出路径——Swoole 分支、回退分支、
+  pty 在接管中死亡自动退出——都走同一个 `restoreTuiScreen`）；③ 不是 `alternateScreenEnable`
+  没发（字节层面确实发了 `?1049h`）。
+- **根因**：`restoreTuiScreen()` 在 `alternateScreenEnable()` 后**直接 `$display->draw()`，没有先
+  `$display->clear()`**。两件事叠加：
+  1. **标准 VT 行为**：离开备用屏（`?1049l`）时其缓冲区被**丢弃**，重新进入（`?1049h`）是**一块全新空白屏**，
+     并非接管前保存的那一帧；
+  2. **php-tui 的 diff 渲染**：`Display::flush()` 发的是 `previous->diff(current)`，而接管期间主循环
+     `continue` 不画帧，php-tui 内部 diff buffer 仍记着接管前的那一帧。退出接管时布局没变，新帧与旧帧
+     **完全相同 → diff 为空 → 不发任何绘制字节**。终端已切回空白备用屏，于是屏幕停在空白 = 四窗不可见。
+- **修复**：`restoreTuiScreen()` 在 `alternateScreenEnable()` + `enableMouseCapture()` + `cursorHide()`
+  并 `flush` 之后、**`draw()` 之前**补一句 `$display->clear()`。它把 back buffer 重置为空（见
+  `vendor/php-tui/php-tui/src/Display/Display.php::clear()`，注释明写 *"Reset the back buffer to make
+  sure the next update will redraw everything"*），迫使下一次 `draw()` 全量重绘当前 TUI 帧。一处修复覆盖三条退出路径。
+- **防回归**：该现象依赖真实终端的 alternate-screen 丢弃语义，**headless 单测无法复现**（验收纪律 C1/A2 类）；
+  修复由「VT 标准行为 + php-tui diff 机制」推理确认，需用户在真实 pty 下 F5 进/出接管复验。
+  `tests/takeover_drive.php` / `tests/takeover_mouse_drive.php` 仅断言接管**进入**与字节对齐，不覆盖退出重画。
   **反面对照**必须有：正常退出（Ctrl+Q）断言退出码 0、存活标记**被清掉**、不产生日志 ——
   少了它，「标记残留」那几条断言可能只是恒真。
   四条**反向注入**都实测可 FAIL：① 不装 handler → 三个信号的还原断言全红；
