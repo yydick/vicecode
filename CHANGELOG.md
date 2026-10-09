@@ -8,7 +8,47 @@
 
 ---
 
-## [Unreleased]
+## [v0.0.4] — 2026-10-09
+
+> 本轮主题：**多终端标签 + 终端独占（Takeover）+ 终端鼠标三修**。跑批 102/102，多终端/鼠标/粘贴均已真机验证。
+
+### 新增（多终端标签 + 底部面板切换条）
+
+- **终端面板容器化**：每标签一个独立的 `TerminalInstance`（自己的 pty / 仿真器 / 缓冲 / 输入行），面板只做容器（`__get/__set` 转发保持全部调用点不变）；shell 退出回落、会话落盘/恢复均为**每实例独立**，`shutdown` 仅落盘活动实例。
+- **底部面板切换条** `TERMINAL / PROBLEMS / OUTPUT / DEBUG / PORTS`：点底部行切换视图（非 terminal 视图为占位面板，后端实现待后续）；顶部实例标签条（仿编辑器 tab）支持**点击切换 / ✕ 关闭 / ⊕ 新建**，命中矩形每帧重建防空残留。
+- **键位**：`Ctrl+\`` 新建、`Alt+1..9` 切第 N 个、`Ctrl+PgUp/PgDn` 上/下一个、`Ctrl+W` 关闭当前（**捕获态全部透传给 shell**——bash 删词 / meta 前缀不偷，切标签先 F2/Esc 退捕获）。
+- **帮助页与双语语言包同步**（`KeyBindings` 登记 + `help.t_*` / `panel.*` 文案）。
+
+### 新增（终端独占 Takeover）
+
+- **F5 全屏直连真实终端**：交互式 PTY 切换到 100% 保真模式（vim / htop / less 可用），接管期鼠标事件原样透传；PTY 中途死亡自动回 TUI；退出/死亡三条路径统一 `restoreTuiScreen`（含 `$display->clear()` 防空白屏）。
+- F5 主用（Windows Terminal 不抢占 F11 的替代位），F11 在未抢占平台保留。
+
+### 新增（终端鼠标三修，真机验证通过）
+
+- **修选区高亮窜行**：`content()` 在 build 期以面板外框求值、渲染期 Block/Grid 把内容重排进内区，高亮比对基准与实际落笔差 1 行 1 列 —— 改用 `viewport()` 的 inner 原点（BUGFIXES E5）。
+- **双击选词**：350ms 内同位两次左键，按显示列扩到空白边界并复制（CJK 安全）。
+- **右键粘贴（仅终端内；其他面板右键预留给上下文菜单）**：bin 读键协程接入 `Osc52StreamScanner`（原 EventParser 丢弃 OSC52 响应 → 粘贴挂死）；`Clipboard::copy` 真机也记内存剪贴板（降级源）；`pasteTick` 1.5s 超时降级 + 会话级 `osc52ReadOk` 记忆（不支持读取的终端如 Windows Terminal 默认配置，首次探测后**零等待**直贴应用内剪贴板）。
+
+### 修复
+
+- **终端输入渲染**（a5b0dc8）：退格 `\b` typo（PHP 双引号非法转义）、方向键改应用键模式（smkx）、gutter 列宽口径统一、F5 接管退出屏幕花（`restoreTuiScreen` 补 `$display->clear()`）。
+- **Markdown 加粗/强调样式全丢**（fc72f52，B15）：commonmark v2 迁移后 `Emphasis`/`Strong` 的 use 指向已删除的旧命名空间，`instanceof` 对未定义类静默不中 —— 补样式位断言（纯文本断言抓不住）。
+- 没选过模型却显示具体模型名（B14）；状态栏可点段宽度取舍等（详见 BUGFIXES）。
+
+### 新增（AI 输入框）
+
+- 右侧淡灰「send ↵」发送提示装饰。
+
+### 测试
+
+- 新增 `terminal_instance_unit`（容器/渲染/命中/键位/捕获态边界）、`pty_mouse_select`（真 pty 拖选后逐格扫 REVERSED 断反白在拖选行）、`mouse_paste_unit`（OSC52 扫描器 8 断言 + 右键落点 + 超时降级 + 会话记忆）。
+- 适配 7 个既有测试（反射穿透容器、COLUMNS/LINES=P8 老坑、SS3 断言、注入锚点跟 bin 重构等）。
+- 全量跑批 **102/102**。
+
+---
+
+## [v0.0.3] — 2026-09-28（tag `652b929`，发版时未写 CHANGELOG，此处补录）
 
 > 本轮主题：**AI V2** —— 把 AI 从「孤岛聊天框」接进工作台：代码上下文、只读工具 Agent loop、上下文压缩、对话持久化与 Markdown 渲染。
 
