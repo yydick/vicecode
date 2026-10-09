@@ -420,10 +420,14 @@ $upE = static fn (int $c, int $r): MouseEvent => MouseEvent::new(MouseEventKind:
 
 $selAt = static function (int $hScroll, int $c0, int $c1) use ($vp, $mkTerm, $lineT, $downE, $dragE, $upE): string {
     [$app, $area, $inner] = $mkTerm($lineT . "\n", $hScroll);
-    $row = $inner->position->y;                    // runner 模式：首行输出在 inner.y
-    $app->handle($downE($inner->position->x + $c0, $row), $vp);
-    $app->handle($dragE($inner->position->x + $c1, $row), $vp);
-    $app->handle($upE($inner->position->x + $c1, $row), $vp);
+    // M8 多终端：runner 网格画满 midArea（渲染无 margin 位移），midArea 原点 =
+    // 边框(1) + 实例标签条(1) → 首行 = outer.y+2；首列 = outer.x+1（仅左侧一列边框）。
+    // 取字/渲染/高亮三条链共用这一基准（TerminalInstance::getTextRect 同口径）。
+    $row = $area->position->y + 2;
+    $col0 = $area->position->x + 1;
+    $app->handle($downE($col0 + $c0, $row), $vp);
+    $app->handle($dragE($col0 + $c1, $row), $vp);
+    $app->handle($upE($col0 + $c1, $row), $vp);
     return (string) $app->clipboardPeek();
 };
 

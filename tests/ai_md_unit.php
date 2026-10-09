@@ -77,6 +77,22 @@ foreach ($spans1 as [$text, $style]) {
 check($codeStyled, '行内 code 有 mdCode 主题色');
 check($linkStyled, '链接文字有 mdLink 主题色');
 
+// 粗/斜体的**样式位**断言（防回归：commonmark v2 迁移时 Emphasis/Strong 的 use 指了
+// 不存在的旧命名空间 —— instanceof 对未定义类静默 false，文本照常展开、样式全丢，
+// 只断言纯文本的测试永远绿。必须直接查 Modifier 位。）
+$boldBit = false;
+$italicBit = false;
+foreach ($spans1 as [$text, $style]) {
+    if ($text === '粗体') {
+        $boldBit = ($style->addModifiers & \PhpTui\Tui\Style\Modifier::BOLD) !== 0;
+    }
+    if ($text === '斜体') {
+        $italicBit = ($style->addModifiers & \PhpTui\Tui\Style\Modifier::ITALIC) !== 0;
+    }
+}
+check($boldBit, '粗体 span 带 BOLD 修饰位');
+check($italicBit, '斜体 span 带 ITALIC 修饰位');
+
 // 列表（有序/无序/嵌套）
 $lines = $fmt->format("- 甲\n- 乙\n  - 丙\n\n1. 其一\n2. 其二\n");
 $t = allText($lines);

@@ -80,8 +80,25 @@ final class CommandRunner
             2 => ['pipe', 'w'],
         ];
         $pipes = [];
-        // 走 /bin/sh -c 以支持管道/重定向；数组形式避免二次 shell 解析
-        $proc = proc_open(['/bin/sh', '-c', $cmd], $desc, $pipes, $cwd);
+        // 走用户的 $SHELL（默认 bash）而非 /bin/sh，并加载别名（如 ll）：
+        // 非交互 `bash -c` 不会自动 source rc，故在命令前注入前缀——
+        //   shopt -s expand_aliases             开别名展开
+        //   . /etc/profile.d/colorls.sh         系统别名（ll 定义在此，见 BUGFIXES）
+        //   . ~/.bash_aliases                   用户别名（标准位置）
+        //   eval "$1"                           直接在当前 bash 执行命令（不嵌套 `bash <cmd>`）
+        //
+        // ⚠️ 只 source「别名定义文件」，**绝不 source ~/.bashrc / /etc/profile 全量**：
+        // 在 WSL/装了 conda·nvm·补全的系统上，~/.bashrc 初始化要 600~800ms，会让每条
+        // 命令（含 AI 流式 curl、搜索 grep）启动被拖慢，表现为「中途快照空白、结束才全出」。
+        // 流式命令（curl -N SSE）对启动延迟尤其敏感，故这里只取别名、不取慢初始化。
+        // 用 `bash -i` 看似更省事，但交互态跑完命令会掉进 REPL 读 stdin、进程不退出，runner 会卡死，
+        // 故坚持非交互。数组形式（命令作 $1 传入，避免二次 shell 解析）让 eval 直接 exec 命令。
+        $shell = getenv('SHELL') ?: '/bin/bash';
+        $prefix = 'shopt -s expand_aliases;'
+            . ' [ -r /etc/profile.d/colorls.sh ] && . /etc/profile.d/colorls.sh 2>/dev/null;'
+            . ' [ -r "$HOME/.bash_aliases" ] && . "$HOME/.bash_aliases" 2>/dev/null;'
+            . ' eval "$1"';
+        $proc = proc_open([$shell, '-c', $prefix, '_', $cmd], $desc, $pipes, $cwd);
 
         if (!is_resource($proc)) {
             return false;

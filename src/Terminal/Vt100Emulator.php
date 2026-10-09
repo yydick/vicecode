@@ -179,7 +179,7 @@ final class Vt100Emulator
                 $stop = intdiv($this->cx, 8) * 8 + 8;
                 $this->cx = min($this->cols - 1, $stop);
                 break;
-            case "\b":
+            case "\x08": // BS（注意：PHP 双引号里 \b 不是合法转义，必须用 \x08）
                 $this->cx = max(0, $this->cx - 1);
                 break;
             case "\x07": // BEL
@@ -459,8 +459,21 @@ final class Vt100Emulator
             case 'T': // SD
                 $this->scrollDownRegion($this->top, $this->bottom, max(1, $n0));
                 break;
-            case 'P': // DCH
+            case 'P': // DCH（老旧形式 \e[P）
                 $this->deleteChars(max(1, $n0));
+                break;
+            case '~': // 辅助键：\e[3~ Delete / \e[5~ PageUp / \e[6~ PageDown
+                switch ($n0) {
+                    case 3:
+                        $this->deleteChars(max(1, $n1 ?: 1));
+                        break;
+                    case 5:
+                        $this->scrollUpRegion($this->top, $this->bottom, 1);
+                        break;
+                    case 6:
+                        $this->scrollDownRegion($this->top, $this->bottom, 1);
+                        break;
+                }
                 break;
             case '@': // ICH
                 $this->insertChars(max(1, $n0));

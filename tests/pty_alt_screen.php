@@ -156,11 +156,12 @@ $nv = normalize($rv['out']);
 $fatalV = str_contains($rv['out'], 'Fatal error') || str_contains($rv['out'], 'Uncaught');
 check($rv['code'] === 0, "干净退出 exit=$rv[code]");
 check(!$fatalV, '无 Fatal / Uncaught（IL/DL/DECSTBM/DECSCUSR 处理正常）');
-// 注：终端面板在六面板布局里只有 ~13 行视口，单帧无法同时显示整个 30 行文件；
+// 注：终端面板在六面板布局里视口有限（M8 多终端后顶部实例标签条 + 底部面板切换条
+// 再占 2 行，可用输出行比旧布局更少），单帧无法同时显示整个 30 行文件；
 // 且 php-tui 差分渲染会把「顶部→底部」的整屏滚动中间帧合并，故只断言可靠可见的顶部帧。
 // 文件末行的可达性已由独立仿真器回放（tests 开发期验证：43x13 下 G 后网格含 19-30 行）覆盖。
 check(str_contains($nv, 'altline001'), '交替屏首行已渲染（vim 启动顶部帧，marker_1）');
-check(str_contains($nv, 'altline012'), '交替屏顶部多行已渲染（marker_12，证明整屏文件绘制）');
+check(str_contains($nv, 'altline010'), '交替屏顶部多行已渲染（marker_10，证明整屏文件绘制）');
 check(str_contains($nv, 'altrestoreok'), '退 vim 后 shell 仍交互（ALT_RESTORE_OK）');
 
 // ---------- 用例 2：less ----------

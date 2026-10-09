@@ -6,11 +6,13 @@ namespace App\Core;
 /**
  * 系统剪贴板（复制写入 + 读取请求）。
  *
- * - 写入（copy）：tty 环境写 OSC 52 序列 `\e]52;c;<base64>\a` 把文字推到系统剪贴板；
- *   非 tty 降级为进程内内存剪贴板（便于单测断言、且不污染 stdout）。
+ * - 写入（copy）：tty 环境写 OSC 52 序列 `\e]52;c;<base64>\a` 把文字推到系统剪贴板，
+ *   **同时**记一份进程内内存剪贴板（作为终端不支持 OSC 52 读取时的降级源）；
+ *   非 tty 只记内存（便于单测断言、且不污染 stdout）。
  * - 读取请求（requestRead）：仅 tty 环境向终端发 OSC 52 查询 `\e]52;c;?\a`，
- *   终端异步把内容以转义序列经 stdin 回传，由 InputParser 旁路捕获后回调（见 EventLoop）。
- *   非 tty 没有系统剪贴板可读，requestRead 是 no-op，读取走 App 的内存剪贴板降级。
+ *   终端异步把内容以转义序列经 stdin 回传，由 InputParser 旁路捕获后回调（见 EventLoop）；
+ *   超时无响应（终端不支持读取）由 App::pasteTick 降级为粘贴内存剪贴板。
+ *   非 tty 的 requestRead 是 no-op，读取直接走内存剪贴板。
  *
  * 长度上限：单条 OSC 52 由终端决定上限（主流模拟器远大于 4K；tmux 约 100KB）。
  * 不主动分块——xterm 规范中每条 OSC 52 是**替换**剪贴板而非追加，分块只会丢内容。
@@ -33,8 +35,11 @@ final class Clipboard
             // 限制，不应靠「分块」规避，分块反而制造了截断 bug。
             fwrite(STDOUT, "\x1b]52;c;" . $b64 . "\x07");
             fflush(STDOUT);
-            return;
         }
+        // ⚠️ 真机也要同步记一份内存剪贴板：部分终端（Windows Terminal 默认关闭）不支持
+        // OSC 52 **读取**，粘贴请求 1.5s 超时后 App::pasteTick 靠这份内存兜底
+        // （「终端内拖选复制 → 右键粘贴」的主流用法）。只发 OSC 52 不记内存的话，
+        // 降级时 peek() 恒为空 → 用户明明复制过却提示「应用内剪贴板为空」。
         $this->memory = $text;
     }
 

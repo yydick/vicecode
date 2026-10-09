@@ -13,6 +13,10 @@ return [
     'panel.sidebar'    => 'SIDEBAR',
     'panel.editor'     => 'EDITOR',
     'panel.terminal'   => 'TERMINAL',
+    'panel.problems'   => 'PROBLEMS',
+    'panel.output'     => 'OUTPUT',
+    'panel.debug'      => 'DEBUG CONSOLE',
+    'panel.ports'      => 'PORTS',
     'panel.ai_chat'    => 'AI CHAT',
     'panel.ai_input'   => 'AI INPUT',
 
@@ -59,9 +63,11 @@ return [
     'status.copied_msg' => 'Copied message',
     'status.pasted'      => 'Pasted {n} chars',
     'status.paste_pending' => 'Reading clipboard…',
+    'status.paste_fallback' => 'Terminal did not answer clipboard read; pasted in-app clipboard ({n} chars)',
+    'status.paste_unsupported' => 'Terminal does not support clipboard read, and in-app clipboard is empty',
 
     // AI 输入框提示
-    'ai.input_hint'    => '(Enter send)',
+    'ai.input_hint'    => 'send ↵',
 
     // 编辑器占位 / 提示
     'editor.no_file'   => '(no file open — pick a file in Explorer, Enter to open)',
@@ -93,6 +99,9 @@ return [
     'term.focus_to_start'    => '(focus this panel to start an interactive shell)',
     'term.interactive_exit'  => 'Interactive terminal exited · F2 to re-enter',
     'term.interactive_hint'  => 'Interactive · F2 to exit capture',
+    'term.takeover_enter' => 'Press F5 to take over whole screen (real terminal)',
+    'term.takeover_exit'  => 'F5 exits takeover',
+    'term.takeover_need'  => 'Takeover failed: interactive terminal not running (press F2 first)',
 
     // 侧栏其它标签占位
     'git.not_repo'       => '(not a git repository)',
@@ -212,6 +221,8 @@ return [
     'help.g_wheel'         => 'Scroll current panel',
     'help.g_wheel_h'       => 'Scroll current panel horizontally',
     'help.g_click'         => 'Change focus / select item',
+    'help.g_right_paste'   => 'Paste into focused panel (goes straight to shell when terminal focused)',
+    'help.t_dblclick_word' => 'Double-click in terminal to select & copy word under cursor',
     'help.e_move'          => 'Move cursor (wraps across lines)',
     'help.e_home_end'      => 'Line start / end',
     'help.e_page'          => 'Page up / down',
@@ -232,6 +243,11 @@ return [
     'help.t_clear'         => 'Clear screen',
     'help.t_cancel'        => 'Interrupt running command',
     'help.t_interactive'   => 'F2 toggle terminal keyboard capture (interactive shell is the default)',
+    'help.t_takeover'      => 'F5 take over whole screen (real terminal; F5 to exit)',
+    'help.t_new_tab'       => 'New terminal tab',
+    'help.t_switch_n'      => 'Switch to Nth terminal tab',
+    'help.t_tab_cycle'     => 'Previous / next terminal tab',
+    'help.t_close_tab'     => 'Close current terminal tab (passed through to shell while captured)',
     'help.x_move'          => 'Move selection',
     'help.x_nav'           => 'Expand (→ into child) / collapse (← to parent)',
     'help.x_enter'         => 'Expand/collapse dir or open file',
@@ -327,6 +343,8 @@ return [
     'keys.wheel'             => 'Wheel',
     'keys.hwheel'            => 'Horizontal wheel',
     'keys.click'             => 'Click',
+    'keys.right_click'       => 'Right-click',
+    'keys.dblclick'          => 'Double-click',
     'keys.alt_click'         => 'Alt+click',
     'keys.printable'         => 'Printable char',
     'keys.click_file'        => 'Click file',

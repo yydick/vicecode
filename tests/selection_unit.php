@@ -24,7 +24,10 @@ use PhpTui\Term\Event\MouseEvent;
 use PhpTui\Term\MouseEventKind;
 use PhpTui\Term\MouseButton;
 use PhpTui\Tui\Display\Area;
+use PhpTui\Tui\Display\Buffer as TuiBuffer;
+use PhpTui\Tui\Extension\Core\CoreExtension;
 use PhpTui\Tui\Widget\Margin;
+use PhpTui\Tui\Widget\WidgetRenderer\AggregateWidgetRenderer;
 
 $failed = false;
 function check(bool $cond, string $msg): void
@@ -107,8 +110,7 @@ check($app->clipboardPeek() !== '', '编辑器：跨行复制后内存剪贴板�
 // ─════════ 2) 终端（runner）选择 ═════════
 echo "\n== 终端文本选择 ==\n";
 $app2 = new App();
-// ⚠️ 钉回 runner：终端**默认**已是交互式 pty（B15），而本段按 runner 的视口几何算行号
-// （输出顶对齐 + 输入行占底部一行）。pty 模式下取字走的是仿真器网格，行号口径完全不同。
+// ⚠️ 钉回 runner：终端**默认**已是交互式 pty（B15），而本段测的是 runner 的取字链。
 $app2->terminal->mode = 'runner';
 $tb = $app2->terminal->buffer();
 $tb->append("echo hello\n", false);
@@ -117,18 +119,33 @@ $tb->append("third line\n", false);
 
 $a2 = $app2->areas($vp);
 $term = $a2['terminal'];
-$innerT = $term->inner(new Margin(1, 1));
-$outH = max(0, $innerT->height - 1);
-// runner 跟随模式：输出顶对齐，第 n 行在 inner.y + n - 1（输入行在底部，其余为空白填充）
-$rowsT = $app2->terminal->buffer()->all();
-$nT = count($rowsT);
-$lastRow = $innerT->position->y + min($nT, $outH) - 1;
+
+// 渲染**完整 App 帧**（必须走 Block 渲染链），从结果反推「third line」的绝对行列。
+// ⚠️ 不能直接渲染 terminal->content()：那会绕过 Block 的 inner 层，锚点整体偏 1 行。
+// M8 后终端网格 = 外框 −边框(2) −实例标签条(1) −面板切换条(1) −内容 margin(2)，手推层数太易错。
+$rr2 = new AggregateWidgetRenderer(iterator_to_array((new CoreExtension())->widgetRenderers()));
+$b2 = TuiBuffer::empty($vp);
+$rr2->render($rr2, $app2->render($vp), $b2, $b2->area());
+$lines2 = $b2->toLines();
+$lastRow = null;
+foreach ($lines2 as $y => $l) {
+    if (str_contains($l, 'third line')) {
+        $lastRow = $y;
+        break;
+    }
+}
+check($lastRow !== null, '渲染帧可见 third line（锚点成立）');
 $lastLine = 'third line';
 $wLast = DisplayWidth::dispWidth($lastLine);
+if ($lastRow !== null) {
+    // 绝对列 = 渲染行内「third line」前缀的显示宽（行内前缀 box 边框/空格均单宽，与屏幕列一致）
+    $charPos = (int) mb_strpos($lines2[$lastRow], 'third line');
+    $lastCol = DisplayWidth::dispWidth(mb_substr($lines2[$lastRow], 0, $charPos));
 
-$app2->handle($down($innerT->position->x, $lastRow), $vp);
-$app2->handle($drag($innerT->position->x + $wLast - 1, $lastRow), $vp);
-$app2->handle($up($innerT->position->x + $wLast - 1, $lastRow), $vp);
+    $app2->handle($down($lastCol, $lastRow), $vp);
+    $app2->handle($drag($lastCol + $wLast - 1, $lastRow), $vp);
+    $app2->handle($up($lastCol + $wLast - 1, $lastRow), $vp);
+}
 expectClip($app2, $lastLine, '终端：拖拽选中末行输出 → 剪贴板含去色原文');
 
 // ─════════ 3) 状态栏提示 ═════════

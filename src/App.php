@@ -29,6 +29,7 @@ use App\Panel\PluginsPanel;
 use App\Panel\CommandPalettePanel;
 use App\Panel\PluginPanelHost;
 use App\Panel\SidebarPanel;
+use App\Panel\BottomTabs;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
 use App\Plugin\PluginCommand;
@@ -81,6 +82,12 @@ use PhpTui\Tui\Text\Span;
 class App
 {
     public bool $quit = false;
+
+    /** 终端独占（Takeover）模式：占满整帧、PTY 直连真实终端、跳过 php-tui 合成（bin/vicecode.php 主循环驱动） */
+    public bool $terminalTakeover = false;
+
+    /** 底部面板当前视图（M8 多终端）：terminal=终端区，其余为占位面板（Problems/Output/Debug/Ports） */
+    public string $bottomView = 'terminal';
 
     /** 可聚焦面板顺序（Tab 循环用） */
     public const PANELS = ['sidebar', 'editor', 'terminal', 'ai_stream', 'ai_input'];
@@ -169,10 +176,31 @@ class App
      */
     private ?array $select = null;
 
+    /** 上次鼠标左键按下（时间/行/列）：双击选词判定用 */
+    private ?array $lastClick = null;
+
     /** 剪贴板写入服务（复制：OSC 52 或降级内存） */
     private Clipboard $clip;
 
     /** 粘贴目标面板（tty 异步读取时暂存，响应回来即插入该面板）；null=无进行中的粘贴 */
+    /** OSC 52 粘贴请求发出时刻（null=无待响应请求）。超时降级判定用，见 pasteTick() */
+    private ?float $pasteSentAt = null;
+
+    /**
+     * 本会话内终端对 OSC 52 读取的支持状态：null=未知（首次发查询探测）、
+     * true=收到过响应（支持）、false=已超时（不支持，后续粘贴直接走应用内剪贴板，零等待）。
+     * 会话级记忆——每次右键都白等 1.5s 超时的体验不可接受。
+     */
+    private ?bool $osc52ReadOk = null;
+
+    /**
+     * pasteTick 在**无事件轮**里改了状态栏消息（超时降级）——bin 主循环空闲时不满足
+     * draw 条件（只看 gotOutput/gotSearch/gotAi/redraw），消息会永远不上屏。
+     * pasteTick 置位此标记，主循环 draw 一次后清除。
+     */
+    public bool $needsRedraw = false;
+
+    /** 粘贴目标（'editor'/'terminal'/'ai_input'），与 pasteSentAt 成对 */
     private ?string $pasteTarget = null;
 
     /**
@@ -1306,13 +1334,17 @@ class App
         // ── Terminal（默认交互式 PTY / shell 退出后回落命令运行器）──
         // 标题**不**随默认模式变化：pty 下只有「捕获中」才值得写出来（那是用户唯一看不出
         // 来的状态，其余靠面板底部的提示行说明）。默认态标题保持「终端」，与改动前一致。
+        // M8 多终端：底部切到 Problems/Output/... 占位视图时，标题跟随当前视图名。
         $terminalWidget = null;
         if ($hasTerminal) {
-            $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
-            if ($this->terminal->mode === 'pty' && $this->terminal->isCaptured()) {
+            if ($this->bottomView !== 'terminal') {
+                $termTitle = ' ' . $this->i18n->t('panel.' . $this->bottomView) . ' ';
+            } elseif ($this->terminal->mode === 'pty' && $this->terminal->isCaptured()) {
                 $termTitle = ' ' . $this->i18n->t('term.interactive') . ' · ' . $this->i18n->t('term.captured') . ' ';
             } elseif ($this->terminal->mode === 'runner' && $this->terminal->isRunning()) {
                 $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' · ' . $this->i18n->t('term.running') . ' ';
+            } else {
+                $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
             }
             $terminalWidget = BlockWidget::default()
                 ->borders(Borders::ALL)
@@ -1977,6 +2009,14 @@ class App
         // 所有按键经 KeyToPty 编码后转发给 PTY（由真实 shell / 全屏程序解释），
         // 不再走下面的面板导航分发。
         if ($this->focusPanel() === 'terminal' && $this->terminal->isCaptured()) {
+            // 鼠标事件在「嵌入面板」里不转发给 PTY：bash 等不识别 SGR 鼠标编码，
+            // 会把 \e[<x;yM 原样回显成满屏 ASCII 垃圾（这就是用户看到的「位置信息变字符」）。
+            // 改走 TUI 的 handleMouse——滚轮翻回退、点击/拖拽归文本选择。
+            // 真正的全屏鼠标透传只在 Takeover(F5/F11) 模式发生（见 bin/vicecode.php 接管主循环）。
+            if ($event instanceof MouseEvent) {
+                $this->handleMouse($event, $a, $vp);
+                return;
+            }
             $exit = ($event instanceof FunctionKeyEvent && $event->number === 2)
                 || ($event instanceof CodedKeyEvent && $event->code === KeyCode::Esc);
             if ($exit) {
@@ -1988,11 +2028,68 @@ class App
                 $this->terminal->exitCapture();
                 return;
             }
+            // 捕获态下 Shift+回滚键：在 shell 里打字时也能回看历史，不必先 F2 退出捕获
+            // （滚轮在捕获态本就走 handleMouse→terminal.wheel→scrollPty，无需此处理）
+            if ($event instanceof CodedKeyEvent
+                && ($event->modifiers & KeyModifiers::SHIFT) !== 0) {
+                $page = max(1, ($a['terminal']->height ?? 4) - 3);
+                $d = match ($event->code) {
+                    KeyCode::PageUp => -$page,
+                    KeyCode::PageDown => $page,
+                    KeyCode::Up => -1,
+                    KeyCode::Down => 1,
+                    KeyCode::Home => -$this->terminal->scrollbackSize(),
+                    KeyCode::End => $this->terminal->scrollbackSize(),
+                    default => null,
+                };
+                if ($d !== null) {
+                    $this->terminal->scrollPty($d);
+                    return;
+                }
+            }
             $bytes = KeyToPty::encode($event);
             if ($bytes !== null) {
                 $this->terminal->sendToPty($bytes);
             }
             return;
+        }
+
+        // 多终端标签快捷键（M8）。位置在交互捕获分支**之后**：捕获 = 原始透传，
+        // 捕获态下 Ctrl+W（bash 删词）、Alt+数字（meta 前缀）都必须原样喂给 shell，
+        // 不被应用偷走；想切标签先 F2/Esc 退出捕获。
+        // 真实 pty 下 Shift 修饰不可区分（见 F1 注释），故 Ctrl+Shift+` 与 Ctrl+` 同码、
+        // Ctrl+Shift+W 与 Ctrl+W 同码，统一按 Ctrl+X 处理。
+        // Ctrl+W 仅终端聚焦时拦（编辑器焦点下 Ctrl+W 是「关闭文件」，语义不冲突）。
+        if (!$this->terminal->isCaptured()) {
+            if ($event instanceof CharKeyEvent
+                && ($event->modifiers & KeyModifiers::CONTROL) !== 0
+                && $event->char === '`') {
+                $this->terminal->newInstance();          // Ctrl+`：新建终端
+                return;
+            }
+            if ($event instanceof CharKeyEvent
+                && ($event->modifiers & KeyModifiers::ALT) !== 0
+                && $event->char >= '1' && $event->char <= '9') {
+                $this->terminal->selectInstance((int) $event->char - 1);   // Alt+N：切第 N 个
+                return;
+            }
+            if ($event instanceof CodedKeyEvent
+                && ($event->modifiers & KeyModifiers::CONTROL) !== 0
+                && ($event->code === KeyCode::PageUp || $event->code === KeyCode::PageDown)) {
+                if ($event->code === KeyCode::PageUp) {
+                    $this->terminal->prev();
+                } else {
+                    $this->terminal->next();
+                }
+                return;                                   // Ctrl+PgUp/PgDn：上/下一个
+            }
+            if ($event instanceof CharKeyEvent
+                && ($event->modifiers & KeyModifiers::CONTROL) !== 0
+                && strtolower($event->char) === 'w'
+                && $this->focusPanel() === 'terminal') {
+                $this->terminal->closeActive();          // Ctrl+W：关闭当前终端
+                return;
+            }
         }
 
         // V1.1 插件快捷键钩子。位置是刻意选的：
@@ -2180,6 +2277,16 @@ class App
             return;
         }
         if ($e->kind === MouseEventKind::Down) {
+            // 右键**仅在终端内** = 粘贴（贴到 pty / runner 输入行）。其他面板的右键语义
+            // 预留给将来的上下文菜单，这里不消费（不清选区、不聚焦、不触发粘贴）。
+            if ($e->button === MouseButton::Right) {
+                $tpos = new Position($e->column, $e->row);
+                if (isset($a['terminal']) && $a['terminal']->containsPosition($tpos)) {
+                    $this->focus('terminal');
+                    $this->requestPaste();
+                }
+                return;
+            }
             // 任何新点击先清掉上一次文本选择高亮（选区在 Up 后保留显示，直到下次点击）。
             $this->select = null;
             // 状态栏可点段的选项列表开着时：点列表项 = 应用、点别处 = 关闭。
@@ -2218,7 +2325,38 @@ class App
             if ($this->tryStartDrag($e, $a)) {
                 return;
             }
+            // 终端区顶/底行标签命中（M8 多终端）。⚠️ 坐标口径：$a['terminal'] 是 Block
+            // **外框**区域，而面板内容渲染在去边框后的内区（见 BlockRenderer::render，
+            // 子部件拿 inner）——故顶行 = y+1（实例标签条）、底行 = y+h-2（面板切换条）。
+            // 命中即消费：不进入文本选区、不改变聚焦。tabRects 记录的是绝对列，直接比。
+            if (isset($a['terminal'])) {
+                $t = $a['terminal'];
+                $botRow = $t->position->y + $t->height - 2;
+                if ($e->row === $botRow && ($view = BottomTabs::hit($t, $e->column)) !== null) {
+                    $this->bottomView = $view;
+                    return;
+                }
+                $topRow = $t->position->y + 1;
+                if ($e->row === $topRow && ($tab = $this->terminal->hitInstanceTab($t, $e->column, $topRow)) !== null) {
+                    if ($tab['action'] === 'new') {
+                        $this->terminal->newInstance();
+                    } elseif ($tab['action'] === 'switch') {
+                        $this->terminal->selectInstance($tab['index']);
+                    } elseif ($tab['action'] === 'close') {
+                        $this->terminal->closeInstance($tab['index']);
+                    }
+                    return;
+                }
+            }
             $pos = new Position($e->column, $e->row);
+            // 双击判定：350ms 内同位置两次左键 = 双击。先算再更新 lastClick（否则会把
+            // 本帧当「上次」）。双击只在终端区有语义（选词），在锚点记录**之前**拦截。
+            $isDoubleClick = $e->button === MouseButton::Left
+                && $this->lastClick !== null
+                && (microtime(true) - $this->lastClick['t']) < 0.35
+                && $this->lastClick['row'] === $e->row
+                && $this->lastClick['col'] === $e->column;
+            $this->lastClick = ['t' => microtime(true), 'row' => $e->row, 'col' => $e->column];
             // Alt+点击（编辑器内容区）= 加一个编辑光标（多行同时编辑）。
             // ⚠️ 必须在下面「记选区锚点」**之前** return：否则松手时会被当成拖选去复制到剪贴板，
             // 加光标的同时还多出一个选区（两种语义撞在一起）。
@@ -2232,6 +2370,11 @@ class App
                 }
                 return;
             }
+            // 终端区双击 = 选词并复制（VSCode 语义）。放在锚点记录之前：双击不拉拖选。
+            if ($isDoubleClick && isset($a['terminal']) && $a['terminal']->containsPosition($pos)) {
+                $this->doubleClickSelectWord($e, $a);
+                return;
+            }
             // 文本选择锚点：在编辑器内容区 / 终端区内按下左键即记锚点；随后若发生 Drag
             // 则拉出选区，Up 时复制。纯点击（无 Drag）在 finishSelect 里清掉，不影响聚焦。
             if (isset($a['editor']) && $this->editor->isSelectableAt($pos, $a['editor'])) {
@@ -2241,6 +2384,51 @@ class App
             }
             $this->handleClick($e, $a);
         }
+    }
+
+    /**
+     * 终端区双击选词：以点击列为种子向两侧扩到空白边界，选中并复制（高亮随 sel 保留）。
+     * 行文本走 getTextRect（与复制/高亮同一套几何），词边界按**显示列**判定（CJK 安全）。
+     */
+    private function doubleClickSelectWord(MouseEvent $e, array $a): void
+    {
+        $t = $a['terminal'];
+        $x0 = $t->position->x + 1;                          // 内区首列（左侧一列是边框）
+        $x1 = $t->position->x + $t->width - 2;              // 内区末列
+        if ($e->column < $x0 || $e->column > $x1) {
+            return;
+        }
+        $row = $e->row;
+        $line = $this->terminal->getTextRect($t, $row, $x0, $row, $x1);
+        $n = DisplayWidth::dispWidth($line);
+        if ($line === '' || $n === 0) {
+            return;
+        }
+        $d = $e->column - $x0;                               // 点击处（行内显示列）
+        // 显示列 → 字符：双击在宽字符右半列时也要落到该字符上
+        $wordAt = static function (int $c) use ($line): bool {
+            $i = DisplayWidth::mbDispToCharIndex($line, $c);
+            $ch = mb_substr($line, $i, 1);
+            return $ch !== '' && !ctype_space($ch);
+        };
+        if (!$wordAt($d)) {
+            return;   // 点在空白上：不选（保持「双击词才有感」的手感）
+        }
+        $start = $d;
+        while ($start > 0 && $wordAt($start - 1)) {
+            $start--;
+        }
+        $end = $d;
+        while ($end + 1 < $n && $wordAt($end + 1)) {
+            $end++;
+        }
+        if ($end <= $start) {
+            return;
+        }
+        $this->select = ['panel' => 'terminal', 'aRow' => $row, 'aCol' => $x0 + $start, 'bRow' => $row, 'bCol' => $x0 + $end];
+        $text = $this->terminal->getTextRect($t, $row, $x0 + $start, $row, $x0 + $end);
+        $this->clip->copy($text);
+        $this->message = $this->t('status.copied', ['n' => (string) mb_strlen($text)]);
     }
 
     /**
@@ -2605,20 +2793,68 @@ class App
             return;
         }
 
-        // tty：发 OSC 52 查询，响应异步经 stdin 回传 → onClipboardRead
+        // 本会话已证实终端不响应 OSC 52 读取：跳过查询与 1.5s 等待，直接贴应用内剪贴板。
+        if ($this->osc52ReadOk === false) {
+            $text = $this->clip->peek();
+            if ($text !== '') {
+                $this->applyPaste($target, $text);
+                $this->message = $this->t('status.paste_fallback', ['n' => (string) mb_strlen($text)]);
+            } else {
+                $this->setMessage($this->t('status.paste_unsupported'));
+            }
+            return;
+        }
+
+        // tty：发 OSC 52 查询，响应异步经 stdin 回传 → onClipboardRead。
+        // ⚠️ 部分终端（Windows Terminal 默认关闭等）不支持 OSC 52 **读取**、永远不回复
+        // —— 调用方须周期性跑 pasteTick() 做超时降级（贴应用内剪贴板），否则"粘贴中"挂死。
+        // 首次超时后 osc52ReadOk 置 false，后续粘贴不再走这条慢路。
         $this->pasteTarget = $target;
+        $this->pasteSentAt = microtime(true);
         $this->clip->requestRead();
         $this->setMessage($this->t('status.paste_pending'));
+    }
+
+    /** OSC 52 读响应超时阈值（秒）：超过即认定终端不支持读取，降级贴应用内剪贴板 */
+    private const PASTE_TIMEOUT = 1.5;
+
+    /**
+     * 粘贴请求超时检查：主循环每轮调用。OSC 52 读请求超过 PASTE_TIMEOUT 无响应时，
+     * 降级为粘贴**应用内**剪贴板（本次会话内拖选/双击复制过的内容）——这覆盖了
+     * 「终端内拖选复制 → 右键粘贴」的主流用法；两者皆空则提示终端不支持。
+     */
+    public function pasteTick(): void
+    {
+        if ($this->pasteTarget === null || $this->pasteSentAt === null) {
+            return;
+        }
+        if (microtime(true) - $this->pasteSentAt < self::PASTE_TIMEOUT) {
+            return;
+        }
+        $target = $this->pasteTarget;
+        $this->pasteTarget = null;
+        $this->pasteSentAt = null;
+        $this->osc52ReadOk = false;   // 超时 = 终端不支持 OSC 52 读取，本会话后续粘贴直接走内存
+        $text = $this->clip->peek();
+        $this->needsRedraw = true;   // 无事件轮也要把降级提示/粘贴结果画出来
+        if ($text !== '') {
+            $this->applyPaste($target, $text);
+            $this->message = $this->t('status.paste_fallback', ['n' => (string) mb_strlen($text)]);
+        } else {
+            $this->setMessage($this->t('status.paste_unsupported'));
+        }
     }
 
     /** OSC 52 剪贴板响应回调：把内容插入到请求时记录的面板。 */
     public function onClipboardRead(string $text): void
     {
+        $this->osc52ReadOk = true;   // 收到过响应 = 终端支持读取，后续粘贴继续走 OSC 52
         if ($this->pasteTarget === null) {
             return;
         }
         $target = $this->pasteTarget;
         $this->pasteTarget = null;
+        $this->pasteSentAt = null;   // 与请求成对清除，避免超时降级重复粘贴
         $this->applyPaste($target, $text);
     }
 

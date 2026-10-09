@@ -49,6 +49,8 @@ final class KeyBindings
                 ['keys.wheel', 'help.g_wheel'],
                 ['keys.hwheel', 'help.g_wheel_h'],
                 ['keys.click', 'help.g_click'],
+                ['keys.right_click', 'help.g_right_paste'],
+                ['keys.dblclick', 'help.t_dblclick_word'],
             ]),
             self::group('help.group_editor', [
                 ['↑ ↓ ← →', 'help.e_move'],
@@ -79,6 +81,11 @@ final class KeyBindings
                 ['Ctrl+V', 'help.e_paste'],
                 ['Shift+Ins', 'help.e_paste'],
                 ['F2', 'help.t_interactive'],
+                ['F5', 'help.t_takeover'],
+                ['Ctrl+`', 'help.t_new_tab'],
+                ['Alt+1..9', 'help.t_switch_n'],
+                ['Ctrl+PgUp / Ctrl+PgDn', 'help.t_tab_cycle'],
+                ['Ctrl+W', 'help.t_close_tab'],
             ]),
             self::group('help.group_explorer', [
                 ['↑ / ↓', 'help.x_move'],

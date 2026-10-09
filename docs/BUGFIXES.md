@@ -1,6 +1,6 @@
 # ViceCode BUG 修复清单
 
-> 覆盖范围：v0.0.1 定版前后（2026-08 ~ 2026-09）全部已修复缺陷，共 **28 个真实产品 BUG + 9 类测试伪失败 + 1 个测试自身缺陷 + 1 处 vendor 补丁**。
+> 覆盖范围：v0.0.1 定版前后（2026-08 ~ 2026-09）全部已修复缺陷，共 **31 个真实产品 BUG + 9 类测试伪失败 + 1 个测试自身缺陷 + 1 处 vendor 补丁**。
 >
 > 写这份清单有两个目的：
 > 1. **防止同类再犯** —— 每条都记「现象 → 根因 → 修复」，根因比现象值钱。
@@ -226,6 +226,23 @@
   「用户设置过没有」的判据 —— 两者需求相反，硬用会让界面替用户表态。展示层要的是「已知」，
   就该单独暴露一个「已知性」查询，而不是拿解析结果的非空去近似。
   同类坑还有：`hasKey()` 也不能当判据（它答的是「能不能用」，不是「选没选」）。
+
+#### B15. Markdown 加粗/强调样式整体失效（Emphasis/Strong 的 use 指向 v2 已删除的旧命名空间） `[本轮]`
+- **报障描述**：渲染含 `**x**` / `*x*` 的 AI 消息时 class not found。**先证伪**：实测并非抛错 ——
+  `instanceof` 对未定义类**静默 false 不抛**，真实现象是**加粗/斜体样式全丢但文本照常展开**
+  （AST 节点掉进 `AbstractInline` 透传兜底分支，两端用户完全感知不到「解析失败」，只是样式没了）。
+- **根因**：commonmark **v2** 把内联节点 `Emphasis`/`Strong` 从 `League\CommonMark\Node\Inline\`
+  迁到了 `League\CommonMark\Extension\CommonMark\Node\Inline\`（实测 2.10.1：旧 `Node/Inline/` 下
+  只剩 Text/Newline/AbstractInline/DelimitedInterface 等核心类）。本文件其余节点 import 全是新路径
+  （文件顶部注释甚至写着「都在 `Extension\CommonMark\Node\*` 下」），**唯独这两项漏改**。
+  `use` 指向 PSR-4 解析不到的死路径 → `instanceof Strong`/`instanceof Emphasis` 永远不中 →
+  `$base->bold()`/`$base->italic()` 永远不执行。同类漂移本文件注释自己都提醒过（B11 相关「实际踩过」）。
+- **修复**：两行 use 改为 `Extension\CommonMark\Node\Inline\{Emphasis, Strong}`。
+- **防回归**：`tests/ai_md_unit.php` 补**样式位**断言（粗体 span 带 `Modifier::BOLD` 位、
+  斜体带 `Modifier::ITALIC` 位）。⚠️ 原有的纯文本断言（「粗体 与 斜体 全部展开」）在坏版本下**依然绿**
+  —— 文本走兜底分支照样展开，只有查 Modifier 位才抓得住。阴性验证：坏版本下两条新断言实测 FAIL。
+- **教训**：**「文本对」不等于「渲染对」** —— 带样式的渲染器，样式丢失类 bug 只有断言样式位才抓得住。
+  另外依赖升级（v1→v2）后的节点 import 检查应该**全量 grep**，只凭注释记忆逐个改必漏。
 
 ---
 
@@ -462,6 +479,28 @@
   还原三连 + 日志记到信号名 + `signaled=true, termsig=对应信号` + 存活标记残留；
   另加**非 Swoole 底座**（`TUI_USE_SWOOLE=0`）的 SIGTERM 一例（两种底座退出路径不同，
   历史上各自出过不一样的问题）；再加「残留标记 → 下次启动写 WARN」。
+
+#### D12. F5 退出终端接管（Takeover）后屏幕花、四窗不可见 `[本轮]`
+- **现象**（用户实测）：聚焦终端面板 → F5 进 Takeover 全屏（直连真实终端，vim/htop 可用）正常；
+  **再按 F5 退出接管后，屏幕花掉、Sidebar/Editor/AI 等窗口全不见**（只剩空白或接管残留）。复现稳。
+- **先证伪**（不是这些）：① 不是 `resizeToPanel` 尺寸错配（列宽 `$cw`/`$W-1` 已是另一轮修好的、与接管无关）；
+  ② 不是 `enterTakeover`/`exitTakeover` 配对漏调用（三条退出路径——Swoole 分支、回退分支、
+  pty 在接管中死亡自动退出——都走同一个 `restoreTuiScreen`）；③ 不是 `alternateScreenEnable`
+  没发（字节层面确实发了 `?1049h`）。
+- **根因**：`restoreTuiScreen()` 在 `alternateScreenEnable()` 后**直接 `$display->draw()`，没有先
+  `$display->clear()`**。两件事叠加：
+  1. **标准 VT 行为**：离开备用屏（`?1049l`）时其缓冲区被**丢弃**，重新进入（`?1049h`）是**一块全新空白屏**，
+     并非接管前保存的那一帧；
+  2. **php-tui 的 diff 渲染**：`Display::flush()` 发的是 `previous->diff(current)`，而接管期间主循环
+     `continue` 不画帧，php-tui 内部 diff buffer 仍记着接管前的那一帧。退出接管时布局没变，新帧与旧帧
+     **完全相同 → diff 为空 → 不发任何绘制字节**。终端已切回空白备用屏，于是屏幕停在空白 = 四窗不可见。
+- **修复**：`restoreTuiScreen()` 在 `alternateScreenEnable()` + `enableMouseCapture()` + `cursorHide()`
+  并 `flush` 之后、**`draw()` 之前**补一句 `$display->clear()`。它把 back buffer 重置为空（见
+  `vendor/php-tui/php-tui/src/Display/Display.php::clear()`，注释明写 *"Reset the back buffer to make
+  sure the next update will redraw everything"*），迫使下一次 `draw()` 全量重绘当前 TUI 帧。一处修复覆盖三条退出路径。
+- **防回归**：该现象依赖真实终端的 alternate-screen 丢弃语义，**headless 单测无法复现**（验收纪律 C1/A2 类）；
+  修复由「VT 标准行为 + php-tui diff 机制」推理确认，需用户在真实 pty 下 F5 进/出接管复验。
+  `tests/takeover_drive.php` / `tests/takeover_mouse_drive.php` 仅断言接管**进入**与字节对齐，不覆盖退出重画。
   **反面对照**必须有：正常退出（Ctrl+Q）断言退出码 0、存活标记**被清掉**、不产生日志 ——
   少了它，「标记残留」那几条断言可能只是恒真。
   四条**反向注入**都实测可 FAIL：① 不装 handler → 三个信号的还原断言全红；
@@ -476,6 +515,13 @@
   ③ `?1049h` 一出现就发按键：此后应用还要建 Display / 起读键协程，期间的 termios 变更
      会把 pty 待读输入冲掉 → **丢键**（表现为 Ctrl+Q 无反应、只能 SIGKILL，看起来像产品 bug）。
   共同点：**先把观测手段验证一遍，再拿它下结论。**
+
+#### D13. M8 重构遗漏 `use App\Core\KeyInput` → runner 模式打字即 Fatal `[本轮]`
+- **现象**：全量跑批 `term_default_unit.php` 炸 `Class "App\Terminal\KeyInput" not found`（`TerminalInstance::onChar` 的可打印判定处）。凡是「shell 退出回落 runner 后打字」的路径全部 Fatal。
+- **根因**：M8 多终端重构把 TerminalPanel 的每实例状态整体搬进 `TerminalInstance`，搬运的 `onChar` 代码引用 `KeyInput::isPrintable()`，但 **use 语句没跟着走**。PHP 对缺失类**编译期不报错**（`php -l` 全绿），只有执行到那一行才 Fatal —— 而该路径此前只有 pty 态单测覆盖，runner 态打字首次在跑批里走到。
+- **修复**：`TerminalInstance` 头部补 `use App\Core\KeyInput;`。
+- **防回归**：`tests/term_default_unit.php` 的「runner 回落态打字」「shell 退出后按键落输入行」两段（本次跑批正是它们抓住的）。
+- **教训**：**大段搬代码时 use 必须与代码同搬同查**；`php -l` 只查语法，不查类引用——只有真实执行路径能暴露。跨类搬运后应跑一次覆盖各模式分支的单测，而不是只测默认路径。
 
 ---
 
@@ -510,6 +556,22 @@
 - **修复**：把按钮文案提成常量 `GIT_COMMIT_LABEL = ' Commit '`，**渲染与命中判定共用**它算列（`commitArrowX = innerX + dispWidth(GIT_COMMIT_LABEL)`，并按 `innerW` 夹紧）。同类漂移在同一个方法里已经有一处正确示范（标题行 `+ -` 的列就是从 `innerW` 反推、与渲染一致），这次只是把按钮这处也对齐。
 - **防回归**：`tests/git_unit.php` —— 断言改成**从渲染帧逐格量出 `▾` 的列**再点。这一步是关键：原先测试是**照抄产品代码那条错公式**（`innerX + innerW - 1`）算列的，于是「代码以为 ▾ 在最右」与「测试也在最右点」两边一致地错、测试一直绿。**测试与实现共用同一个假设时，测试就没有独立价值了。**
 - **教训**：凡是「画在一处、点判定在另一处」的坐标，必须**共用同一份几何**（本项目里 `gitRects()` / `PickerOverlay::geometry()` 就是为此存在）；测试则要**从渲染结果反推**坐标，而不是复述公式。
+
+#### E5. M8 多终端合入后终端拖选复制错位（渲染与取字几何不同构） `[本轮]`
+- **现象**：`hscroll_unit.php` / `selection_unit.php` / `term_default_unit.php` 的终端取字断言红——拖选 `ABCDE` 复制出别处的错位串；`selection_unit` 更是「期望 third line 实际 line two」（差整行）。
+- **根因**：**渲染与取字走了两套不同构的几何**，M8（实例标签条 + 底部切换条）把偏差放大到必然暴露：
+  1. **面板切段层**：渲染链里 BlockRenderer 把外框 inner 后传给 `content()`；而 `getTextRect` 从 App 拿到的是外框，内部却只做一次 `inner(Margin(1,1))` —— 少了 topH/botH 切段。
+  2. **实例基准层（核心）**：`runnerContent`/`ptyContent` 里 `inner(Margin(1,1))` **只用来推导 W/outH 尺寸**，内容经 ParagraphWidget **画满 midArea 全域（无 margin 位移）**；`getTextRect`/选区高亮却拿 margin 后的 y/x 做行列基准 —— 渲染与取字整体差 1 行 1 列。此前 `hscroll_unit` 的拖选锚点也是照抄取字公式算的（两边同源地错），测试一直绿 —— E4 教训的翻版；`selection_unit` 改为从完整渲染帧反推锚点后才暴露。
+- **修复**：① 面板切段抽成唯一权威 `splitInner()`，`content()` 渲染与 `midAreaOf()`（外框 → 模拟 Block inner → 切段）共用；② `getTextRect`/`ptyTextRect`/选区高亮的行列基准全部改为 **midArea 原点**（margin 只用于尺寸）；③ 两个测试的拖选锚点改为从渲染帧反推或对齐 midArea 原点。
+- **防回归**：`tests/selection_unit.php`（渲染帧反推锚点）、`tests/hscroll_unit.php`（横滚拖选）、`tests/terminal_instance_unit.php`、`tests/term_default_unit.php`（runner 态取字）。
+- **教训**：**「锚点怎么来的」决定测试有没有独立价值** —— 测试锚点若复述实现的（错误）公式，两边一致地错、永远绿；从渲染结果反推才暴露真偏差。布局每加一层，所有「屏幕绝对行列 ↔ 内容行列」的换算入口必须同步；凡 margin 只用于尺寸的场景，基准绝不能再拿 margin 后坐标。
+- **后续（真机报障「点上一行，选的是下一行」）**：取字链修好后**选区高亮**又错一行 —— 根因更深一层：
+  `content()` 在 **build 期**就被求值（`BlockWidget::widget($this->terminal->content($a['terminal']))`
+  是立即调用，拿到的是**外框**），splitInner 按外框切段；而**渲染期** Block/Grid 把内容重排进内区，
+  实际落笔原点 = 构造期 `viewport()` 的 `inner`（margin 后）原点，与构造期 midArea 原点差 1 行 1 列。
+  即「构造期假设的布局」≠「渲染期实际布局」，**选区高亮比对必须用渲染实际原点**（ptyContent/runnerContent
+  里 viewport() 返回的 `$inner->position`）。取字链（midAreaOf→getTextRect）恰好与渲染一致所以是对的。
+  防回归：headless pty 拖选探针（真 shell 输出标记行 → 全帧反推锚点 → 拖选断言剪贴板与 sel 矩形）。
 
 ---
 

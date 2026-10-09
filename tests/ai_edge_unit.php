@@ -201,7 +201,19 @@ $wantLines = array_slice($wantLines, -3);
 while (count($wantLines) < 3) {
     array_unshift($wantLines, '');
 }
-check($gotI === $wantLines, '输入框显示同样净化（实际：' . json_encode($gotI, JSON_UNESCAPED_UNICODE) . '）');
+// 末行右侧新增淡灰「send ↵」提示装饰：净化主体（不含提示）应与预期一致
+$ok = count($gotI) === count($wantLines);
+for ($i = 0; $i < count($wantLines) && $ok; $i++) {
+    $g = $gotI[$i] ?? '';
+    if ($i === count($wantLines) - 1) {
+        // 末行：应以净化文本开头，且含 send ↵ 提示
+        $ok = str_starts_with($g, $wantLines[$i]) && str_contains($g, 'send ↵');
+    } else {
+        $ok = $g === $wantLines[$i];
+    }
+}
+check($ok, '输入框显示同样净化（末行带 send ↵ 提示；实际：' . json_encode($gotI, JSON_UNESCAPED_UNICODE) . '）');
+check(str_contains(implode('', $gotI), 'send ↵'), '输入框右侧出现「send ↵」提示装饰');
 check(!str_contains(implode('', $gotI), "\x1b"), '输入框渲染缓冲里没有 ESC');
 check(str_contains(implode('', $gotI), '内容'), '净化不吞输入框正文');
 
