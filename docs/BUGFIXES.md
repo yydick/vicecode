@@ -565,6 +565,13 @@
 - **修复**：① 面板切段抽成唯一权威 `splitInner()`，`content()` 渲染与 `midAreaOf()`（外框 → 模拟 Block inner → 切段）共用；② `getTextRect`/`ptyTextRect`/选区高亮的行列基准全部改为 **midArea 原点**（margin 只用于尺寸）；③ 两个测试的拖选锚点改为从渲染帧反推或对齐 midArea 原点。
 - **防回归**：`tests/selection_unit.php`（渲染帧反推锚点）、`tests/hscroll_unit.php`（横滚拖选）、`tests/terminal_instance_unit.php`、`tests/term_default_unit.php`（runner 态取字）。
 - **教训**：**「锚点怎么来的」决定测试有没有独立价值** —— 测试锚点若复述实现的（错误）公式，两边一致地错、永远绿；从渲染结果反推才暴露真偏差。布局每加一层，所有「屏幕绝对行列 ↔ 内容行列」的换算入口必须同步；凡 margin 只用于尺寸的场景，基准绝不能再拿 margin 后坐标。
+- **后续（真机报障「点上一行，选的是下一行」）**：取字链修好后**选区高亮**又错一行 —— 根因更深一层：
+  `content()` 在 **build 期**就被求值（`BlockWidget::widget($this->terminal->content($a['terminal']))`
+  是立即调用，拿到的是**外框**），splitInner 按外框切段；而**渲染期** Block/Grid 把内容重排进内区，
+  实际落笔原点 = 构造期 `viewport()` 的 `inner`（margin 后）原点，与构造期 midArea 原点差 1 行 1 列。
+  即「构造期假设的布局」≠「渲染期实际布局」，**选区高亮比对必须用渲染实际原点**（ptyContent/runnerContent
+  里 viewport() 返回的 `$inner->position`）。取字链（midAreaOf→getTextRect）恰好与渲染一致所以是对的。
+  防回归：headless pty 拖选探针（真 shell 输出标记行 → 全帧反推锚点 → 拖选断言剪贴板与 sel 矩形）。
 
 ---
 

@@ -73,7 +73,7 @@ function makeCrashingEntry(string $root): string
 function makeCrashyAfterPtyEntry(string $root): string
 {
     $src = (string) file_get_contents($root . '/bin/vicecode.php');
-    $anchor = '$app->handle($ev, $display->viewportArea());';
+    $anchor = '$app->handle($ev, $vp);';   // Swoole 主循环唯一的 handle 调用（vp 已提取为变量）
     if (!str_contains($src, $anchor)) {
         throw new RuntimeException('找不到注入点，bin/vicecode.php 主循环结构变了');
     }

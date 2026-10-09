@@ -29,6 +29,7 @@ use App\Panel\PluginsPanel;
 use App\Panel\CommandPalettePanel;
 use App\Panel\PluginPanelHost;
 use App\Panel\SidebarPanel;
+use App\Panel\BottomTabs;
 use App\Panel\StatusBarPanel;
 use App\Panel\TerminalPanel;
 use App\Plugin\PluginCommand;
@@ -84,6 +85,9 @@ class App
 
     /** 终端独占（Takeover）模式：占满整帧、PTY 直连真实终端、跳过 php-tui 合成（bin/vicecode.php 主循环驱动） */
     public bool $terminalTakeover = false;
+
+    /** 底部面板当前视图（M8 多终端）：terminal=终端区，其余为占位面板（Problems/Output/Debug/Ports） */
+    public string $bottomView = 'terminal';
 
     /** 可聚焦面板顺序（Tab 循环用） */
     public const PANELS = ['sidebar', 'editor', 'terminal', 'ai_stream', 'ai_input'];
@@ -171,6 +175,9 @@ class App
      * 并保留高亮直到下次 Down 清掉。与 $drag（分隔条拖拽）互斥：tryStartDrag 先 return。
      */
     private ?array $select = null;
+
+    /** 上次鼠标左键按下（时间/行/列）：双击选词判定用 */
+    private ?array $lastClick = null;
 
     /** 剪贴板写入服务（复制：OSC 52 或降级内存） */
     private Clipboard $clip;
@@ -1309,13 +1316,17 @@ class App
         // ── Terminal（默认交互式 PTY / shell 退出后回落命令运行器）──
         // 标题**不**随默认模式变化：pty 下只有「捕获中」才值得写出来（那是用户唯一看不出
         // 来的状态，其余靠面板底部的提示行说明）。默认态标题保持「终端」，与改动前一致。
+        // M8 多终端：底部切到 Problems/Output/... 占位视图时，标题跟随当前视图名。
         $terminalWidget = null;
         if ($hasTerminal) {
-            $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
-            if ($this->terminal->mode === 'pty' && $this->terminal->isCaptured()) {
+            if ($this->bottomView !== 'terminal') {
+                $termTitle = ' ' . $this->i18n->t('panel.' . $this->bottomView) . ' ';
+            } elseif ($this->terminal->mode === 'pty' && $this->terminal->isCaptured()) {
                 $termTitle = ' ' . $this->i18n->t('term.interactive') . ' · ' . $this->i18n->t('term.captured') . ' ';
             } elseif ($this->terminal->mode === 'runner' && $this->terminal->isRunning()) {
                 $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' · ' . $this->i18n->t('term.running') . ' ';
+            } else {
+                $termTitle = ' ' . $this->i18n->t('panel.terminal') . ' ';
             }
             $terminalWidget = BlockWidget::default()
                 ->borders(Borders::ALL)
@@ -2025,6 +2036,44 @@ class App
             return;
         }
 
+        // 多终端标签快捷键（M8）。位置在交互捕获分支**之后**：捕获 = 原始透传，
+        // 捕获态下 Ctrl+W（bash 删词）、Alt+数字（meta 前缀）都必须原样喂给 shell，
+        // 不被应用偷走；想切标签先 F2/Esc 退出捕获。
+        // 真实 pty 下 Shift 修饰不可区分（见 F1 注释），故 Ctrl+Shift+` 与 Ctrl+` 同码、
+        // Ctrl+Shift+W 与 Ctrl+W 同码，统一按 Ctrl+X 处理。
+        // Ctrl+W 仅终端聚焦时拦（编辑器焦点下 Ctrl+W 是「关闭文件」，语义不冲突）。
+        if (!$this->terminal->isCaptured()) {
+            if ($event instanceof CharKeyEvent
+                && ($event->modifiers & KeyModifiers::CONTROL) !== 0
+                && $event->char === '`') {
+                $this->terminal->newInstance();          // Ctrl+`：新建终端
+                return;
+            }
+            if ($event instanceof CharKeyEvent
+                && ($event->modifiers & KeyModifiers::ALT) !== 0
+                && $event->char >= '1' && $event->char <= '9') {
+                $this->terminal->selectInstance((int) $event->char - 1);   // Alt+N：切第 N 个
+                return;
+            }
+            if ($event instanceof CodedKeyEvent
+                && ($event->modifiers & KeyModifiers::CONTROL) !== 0
+                && ($event->code === KeyCode::PageUp || $event->code === KeyCode::PageDown)) {
+                if ($event->code === KeyCode::PageUp) {
+                    $this->terminal->prev();
+                } else {
+                    $this->terminal->next();
+                }
+                return;                                   // Ctrl+PgUp/PgDn：上/下一个
+            }
+            if ($event instanceof CharKeyEvent
+                && ($event->modifiers & KeyModifiers::CONTROL) !== 0
+                && strtolower($event->char) === 'w'
+                && $this->focusPanel() === 'terminal') {
+                $this->terminal->closeActive();          // Ctrl+W：关闭当前终端
+                return;
+            }
+        }
+
         // V1.1 插件快捷键钩子。位置是刻意选的：
         //  - 在菜单/插件浮层/帮助页独占之后 → 模态打开时不抢键；
         //  - 在交互式 PTY 捕获之后 → 捕获态按键仍原样喂给子进程；
@@ -2210,6 +2259,12 @@ class App
             return;
         }
         if ($e->kind === MouseEventKind::Down) {
+            // 右键 = 粘贴到当前焦点面板（VSCode 语义；终端聚焦时经 pasteText 进 pty）。
+            // 放在最前：右键不该清选区、不该触发聚焦/拖拽/双击计时。
+            if ($e->button === MouseButton::Right) {
+                $this->requestPaste();
+                return;
+            }
             // 任何新点击先清掉上一次文本选择高亮（选区在 Up 后保留显示，直到下次点击）。
             $this->select = null;
             // 状态栏可点段的选项列表开着时：点列表项 = 应用、点别处 = 关闭。
@@ -2248,7 +2303,38 @@ class App
             if ($this->tryStartDrag($e, $a)) {
                 return;
             }
+            // 终端区顶/底行标签命中（M8 多终端）。⚠️ 坐标口径：$a['terminal'] 是 Block
+            // **外框**区域，而面板内容渲染在去边框后的内区（见 BlockRenderer::render，
+            // 子部件拿 inner）——故顶行 = y+1（实例标签条）、底行 = y+h-2（面板切换条）。
+            // 命中即消费：不进入文本选区、不改变聚焦。tabRects 记录的是绝对列，直接比。
+            if (isset($a['terminal'])) {
+                $t = $a['terminal'];
+                $botRow = $t->position->y + $t->height - 2;
+                if ($e->row === $botRow && ($view = BottomTabs::hit($t, $e->column)) !== null) {
+                    $this->bottomView = $view;
+                    return;
+                }
+                $topRow = $t->position->y + 1;
+                if ($e->row === $topRow && ($tab = $this->terminal->hitInstanceTab($t, $e->column, $topRow)) !== null) {
+                    if ($tab['action'] === 'new') {
+                        $this->terminal->newInstance();
+                    } elseif ($tab['action'] === 'switch') {
+                        $this->terminal->selectInstance($tab['index']);
+                    } elseif ($tab['action'] === 'close') {
+                        $this->terminal->closeInstance($tab['index']);
+                    }
+                    return;
+                }
+            }
             $pos = new Position($e->column, $e->row);
+            // 双击判定：350ms 内同位置两次左键 = 双击。先算再更新 lastClick（否则会把
+            // 本帧当「上次」）。双击只在终端区有语义（选词），在锚点记录**之前**拦截。
+            $isDoubleClick = $e->button === MouseButton::Left
+                && $this->lastClick !== null
+                && (microtime(true) - $this->lastClick['t']) < 0.35
+                && $this->lastClick['row'] === $e->row
+                && $this->lastClick['col'] === $e->column;
+            $this->lastClick = ['t' => microtime(true), 'row' => $e->row, 'col' => $e->column];
             // Alt+点击（编辑器内容区）= 加一个编辑光标（多行同时编辑）。
             // ⚠️ 必须在下面「记选区锚点」**之前** return：否则松手时会被当成拖选去复制到剪贴板，
             // 加光标的同时还多出一个选区（两种语义撞在一起）。
@@ -2262,6 +2348,11 @@ class App
                 }
                 return;
             }
+            // 终端区双击 = 选词并复制（VSCode 语义）。放在锚点记录之前：双击不拉拖选。
+            if ($isDoubleClick && isset($a['terminal']) && $a['terminal']->containsPosition($pos)) {
+                $this->doubleClickSelectWord($e, $a);
+                return;
+            }
             // 文本选择锚点：在编辑器内容区 / 终端区内按下左键即记锚点；随后若发生 Drag
             // 则拉出选区，Up 时复制。纯点击（无 Drag）在 finishSelect 里清掉，不影响聚焦。
             if (isset($a['editor']) && $this->editor->isSelectableAt($pos, $a['editor'])) {
@@ -2271,6 +2362,51 @@ class App
             }
             $this->handleClick($e, $a);
         }
+    }
+
+    /**
+     * 终端区双击选词：以点击列为种子向两侧扩到空白边界，选中并复制（高亮随 sel 保留）。
+     * 行文本走 getTextRect（与复制/高亮同一套几何），词边界按**显示列**判定（CJK 安全）。
+     */
+    private function doubleClickSelectWord(MouseEvent $e, array $a): void
+    {
+        $t = $a['terminal'];
+        $x0 = $t->position->x + 1;                          // 内区首列（左侧一列是边框）
+        $x1 = $t->position->x + $t->width - 2;              // 内区末列
+        if ($e->column < $x0 || $e->column > $x1) {
+            return;
+        }
+        $row = $e->row;
+        $line = $this->terminal->getTextRect($t, $row, $x0, $row, $x1);
+        $n = DisplayWidth::dispWidth($line);
+        if ($line === '' || $n === 0) {
+            return;
+        }
+        $d = $e->column - $x0;                               // 点击处（行内显示列）
+        // 显示列 → 字符：双击在宽字符右半列时也要落到该字符上
+        $wordAt = static function (int $c) use ($line): bool {
+            $i = DisplayWidth::mbDispToCharIndex($line, $c);
+            $ch = mb_substr($line, $i, 1);
+            return $ch !== '' && !ctype_space($ch);
+        };
+        if (!$wordAt($d)) {
+            return;   // 点在空白上：不选（保持「双击词才有感」的手感）
+        }
+        $start = $d;
+        while ($start > 0 && $wordAt($start - 1)) {
+            $start--;
+        }
+        $end = $d;
+        while ($end + 1 < $n && $wordAt($end + 1)) {
+            $end++;
+        }
+        if ($end <= $start) {
+            return;
+        }
+        $this->select = ['panel' => 'terminal', 'aRow' => $row, 'aCol' => $x0 + $start, 'bRow' => $row, 'bCol' => $x0 + $end];
+        $text = $this->terminal->getTextRect($t, $row, $x0 + $start, $row, $x0 + $end);
+        $this->clip->copy($text);
+        $this->message = $this->t('status.copied', ['n' => (string) mb_strlen($text)]);
     }
 
     /**

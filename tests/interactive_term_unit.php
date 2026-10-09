@@ -185,8 +185,8 @@ check(KeyToPty::encode(CharKeyEvent::new('a')) === 'a', '普通字符 a → "a"'
 check(KeyToPty::encode(CodedKeyEvent::new(KeyCode::Enter)) === "\r", 'Enter → CR');
 check(KeyToPty::encode(CodedKeyEvent::new(KeyCode::Backspace)) === "\x7f", 'Backspace → DEL(0x7f)');
 check(KeyToPty::encode(CodedKeyEvent::new(KeyCode::Delete)) === "\x1b[3~", 'Delete → CSI 3~');
-check(KeyToPty::encode(CodedKeyEvent::new(KeyCode::Up)) === "\x1b[A", 'Up → CSI A');
-check(KeyToPty::encode(CodedKeyEvent::new(KeyCode::Down)) === "\x1b[B", 'Down → CSI B');
+check(KeyToPty::encode(CodedKeyEvent::new(KeyCode::Up)) === "\x1bOA", 'Up → SS3 A (smkx 应用光标键模式)');
+check(KeyToPty::encode(CodedKeyEvent::new(KeyCode::Down)) === "\x1bOB", 'Down → SS3 B');
 check(KeyToPty::encode(CodedKeyEvent::new(KeyCode::Tab)) === "\t", 'Tab → TAB');
 check(KeyToPty::encode(FunctionKeyEvent::new(1)) === "\x1bOP", 'F1 → SS3 P');
 $ctrlC = KeyToPty::encode(CharKeyEvent::new('c', KeyModifiers::CONTROL));

@@ -27,7 +27,10 @@ $readPty = static function ($stream, int $len) {
 };
 
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
-$proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes);
+// ⚠️ headless pty 无 TERM 尺寸，bin 靠 COLUMNS/LINES 定视口；不设则 0x0 → php-tui
+// 每帧 diff 为空、首帧永不渲染（只发初始化序列），独占透传断言必然全空。与 pty_ai 同因。
+$env = array_merge(getenv(), ['COLUMNS' => '200', 'LINES' => '50']);
+$proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes, null, $env);
 if ($proc === false) {
     echo "[FAIL] 无法启动 bin/vicecode.php\n";
     exit(1);
@@ -46,6 +49,7 @@ $ta = $probe->areas(PhpTui\Tui\Display\Area::fromDimensions($cols, $lines))['ter
 $tc = $ta->position->x + intdiv($ta->width, 2) + 1;
 $tr = $ta->position->y + intdiv($ta->height, 2) + 1;
 usleep(300000);
+$out = '';
 // 点击终端面板：down + up（xterm SGR，1-based）
 fwrite($pipes[0], "\x1b[<0;{$tc};{$tr}M");
 fwrite($pipes[0], "\x1b[<0;{$tc};{$tr}m");
@@ -73,7 +77,6 @@ $seq = [
     ["\x11", 500000],       // Ctrl+Q 退出应用
 ];
 
-$out = '';
 foreach ($seq as [$bytes, $us]) {
     fwrite($pipes[0], $bytes);
     usleep($us);

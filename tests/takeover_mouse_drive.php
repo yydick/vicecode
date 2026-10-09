@@ -9,7 +9,10 @@ declare(strict_types=1);
  */
 
 $descs = [0 => ['pty'], 1 => ['pty'], 2 => ['pty']];
-$proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes);
+// ⚠️ headless pty 无 TERM 尺寸，bin 靠 COLUMNS/LINES 定视口；不设则 0x0 → php-tui
+// 每帧 diff 为空、首帧永不渲染。与 pty_ai / takeover_drive 同因同修。
+$env = array_merge(getenv(), ['COLUMNS' => '200', 'LINES' => '50']);
+$proc = proc_open([PHP_BINARY, 'bin/vicecode.php'], $descs, $pipes, null, $env);
 if ($proc === false) {
     echo "[FAIL] 无法启动 bin/vicecode.php\n";
     exit(1);
@@ -29,8 +32,8 @@ $readPty = static function ($stream, int $len) {
 };
 
 $seq = [
-    ["\t", 60000],            // sidebar -> editor
-    ["\t", 60000],            // editor -> terminal
+    ["\t", 700000],            // sidebar -> editor
+    ["\t", 700000],            // editor -> terminal
     ["\x1bOQ", 1200000],      // F2 进入交互式 PTY
     ["\x1b[15~", 800000],     // F5 进入独占
     ["cat\n", 500000],        // 启动 cat（行回显，作鼠标字节回声壁）

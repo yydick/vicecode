@@ -26,7 +26,15 @@ function check(string $name, bool $cond): void
 /** 读私有属性（单测观察面，避免为测试加 public 访问器） */
 function readPrivate(object $obj, string $prop)
 {
-    $r = new ReflectionProperty($obj, $prop);
+    try {
+        $r = new ReflectionProperty($obj, $prop);
+    } catch (ReflectionException) {
+        // M8 容器化：面板上没有的属性都在 TerminalInstance（活动实例）上，穿透容器取
+        $insts = (new ReflectionProperty($obj, 'instances'))->getValue($obj);
+        $act = (new ReflectionProperty($obj, 'active'))->getValue($obj);
+        $obj = $insts[$act];
+        $r = new ReflectionProperty($obj, $prop);
+    }
     $r->setAccessible(true);
     return $r->getValue($obj);
 }

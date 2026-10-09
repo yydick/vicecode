@@ -118,9 +118,15 @@ echo "\n== 状态栏：长值截断 + 外部值净化 ==\n";
 $appCwd = new App();
 $appCwd->focus('terminal');
 $setCwd = static function (App $a, string $cwd): void {
-    $p = new ReflectionProperty($a->terminal, 'cwd');
+    // M8 多终端容器化：cwd 移到 TerminalInstance（面板是容器）。反射穿透容器取活动实例。
+    $insts = new ReflectionProperty($a->terminal, 'instances');
+    $insts->setAccessible(true);
+    $act = new ReflectionProperty($a->terminal, 'active');
+    $act->setAccessible(true);
+    $inst = $insts->getValue($a->terminal)[$act->getValue($a->terminal)];
+    $p = new ReflectionProperty($inst, 'cwd');
     $p->setAccessible(true);
-    $p->setValue($a->terminal, $cwd);
+    $p->setValue($inst, $cwd);
 };
 /** 取状态栏里「目录=」那一整段文本（段间以 ' · ' 分隔） */
 $cwdSeg = static function (string $text): ?string {

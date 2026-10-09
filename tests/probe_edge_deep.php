@@ -23,9 +23,15 @@ use PhpTui\Tui\Widget\WidgetRenderer\AggregateWidgetRenderer;
 
 function setCwd(App $app, string $cwd): void
 {
-    $p = new ReflectionProperty($app->terminal, 'cwd');
+    // M8 多终端容器化：cwd 移到 TerminalInstance（面板是容器）。反射穿透容器取活动实例。
+    $insts = new ReflectionProperty($app->terminal, 'instances');
+    $insts->setAccessible(true);
+    $act = new ReflectionProperty($app->terminal, 'active');
+    $act->setAccessible(true);
+    $inst = $insts->getValue($app->terminal)[$act->getValue($app->terminal)];
+    $p = new ReflectionProperty($inst, 'cwd');
     $p->setAccessible(true);
-    $p->setValue($app->terminal, $cwd);
+    $p->setValue($inst, $cwd);
 }
 
 // ── A. 极长 cwd ────────────────────────────────────────
