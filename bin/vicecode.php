@@ -561,7 +561,10 @@ function startMain(App $app, Terminal $term, bool $sw): void
 
         // 读键协程：用 Coroutine::waitEvent 等 STDIN 可读（对 TTY/pty 生效、协程让出调度器），
         // 确认可读后再整块 fread（避免单字节误判 ESC 序列）。解析后推 Channel。
-        go(static function () use ($ch, $parser, $app): void {
+        $osc52 = new \App\Core\Osc52StreamScanner(static function (string $text): void {
+            $app->onClipboardRead($text);
+        });
+        go(static function () use ($ch, $parser, $app, $osc52): void {
             while (!$app->quit) {
                 // 空闲超时设短（150ms）：既让出调度器，也定期冲刷解析器里「还在等后续字节」
                 // 的残局（典型如孤立的 ESC）。若不主动 flush，孤立 Esc 要等下个键才发得出去，
@@ -582,6 +585,14 @@ function startMain(App $app, Terminal $term, bool $sw): void
                 $bytes = fread(STDIN, 4096);
                 if ($bytes === '' || $bytes === false) {
                     break; // EOF（终端关闭）
+                }
+                // OSC 52 剪贴板响应旁路（真机粘贴的命脉）：终端把系统剪贴板内容以
+                // \e]52;c;<base64>\a 回传，php-tui 的 EventParser 不认识会整段丢弃，
+                // 必须**先**旁路截获再喂 parser。剪贴板可达几十 KB、必跨 fread 块，
+                // 故用流式扫描器（跨块缓冲），详见 Osc52StreamScanner 类注释。
+                $bytes = $osc52->feed($bytes);
+                if ($bytes === '') {
+                    continue;   // 本块全是剪贴板响应（或响应中段），无键可喂
                 }
                 // more=true：pty 下 fread 常把转义序列（如 \e[5~、\e[A）拆成多段返回，
                 // 必须让 parser 在内部 buffer 里暂存不完整的序列，等后续字节拼齐再解析；
@@ -630,6 +641,7 @@ function startMain(App $app, Terminal $term, bool $sw): void
             $vp = $display->viewportArea();
             $busy = $app->termRunning() || $app->searchRunning() || $app->aiStreaming();
             $ev = $ch->pop($busy ? 0.01 : $idleTimeout);
+            $app->pasteTick();   // OSC 52 粘贴请求超时降级（终端不支持读取时贴应用内剪贴板）
 
             // 终端独占（Takeover）切换：F5（主用）且焦点在终端面板。
             // F5 不被 Windows Terminal 等模拟器的全屏热键抢占；同时保留 F11 给未抢占该键的平台。
@@ -671,7 +683,8 @@ function startMain(App $app, Terminal $term, bool $sw): void
             if ($ev === false) {
                 // 非阻塞查 R3 后台重绘信号：绝不能用 pop(0)（0 超时在 Swoole 中是永久阻塞！），
                 // 先 isEmpty() 判空再 pop 一个极小超时。
-                if ($gotOutput || $gotSearch || $gotAi || !$redraw->isEmpty()) {
+                if ($gotOutput || $gotSearch || $gotAi || $app->needsRedraw || !$redraw->isEmpty()) {
+                    $app->needsRedraw = false;
                     if (!$redraw->isEmpty()) {
                         $redraw->pop(0.001);
                     }

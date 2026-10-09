@@ -59,6 +59,8 @@ return [
     'status.copied_msg' => '已复制消息',
     'status.pasted'      => '已粘贴 {n} 字符',
     'status.paste_pending' => '正在读取剪贴板…',
+    'status.paste_fallback' => '终端未响应剪贴板读取，已粘贴应用内剪贴板（{n} 字符）',
+    'status.paste_unsupported' => '终端不支持读取系统剪贴板，且应用内剪贴板为空',
 
     'ai.input_hint'    => 'send ↵',
 

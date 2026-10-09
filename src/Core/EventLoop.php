@@ -123,6 +123,7 @@ final class EventLoop
         // 渲染循环：约 30fps；单帧异常时安全退出，避免卡在损坏的终端状态
         $this->timer = \Swoole\Timer::tick(33, function (): void {
             try {
+                $this->app->pasteTick();   // OSC 52 粘贴请求超时降级（终端不支持读取时贴应用内剪贴板）
                 $area = $this->display->viewportArea();
                 if ($area->width < 2 || $area->height < 2) {
                     return;

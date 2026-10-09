@@ -183,6 +183,24 @@ class App
     private Clipboard $clip;
 
     /** 粘贴目标面板（tty 异步读取时暂存，响应回来即插入该面板）；null=无进行中的粘贴 */
+    /** OSC 52 粘贴请求发出时刻（null=无待响应请求）。超时降级判定用，见 pasteTick() */
+    private ?float $pasteSentAt = null;
+
+    /**
+     * 本会话内终端对 OSC 52 读取的支持状态：null=未知（首次发查询探测）、
+     * true=收到过响应（支持）、false=已超时（不支持，后续粘贴直接走应用内剪贴板，零等待）。
+     * 会话级记忆——每次右键都白等 1.5s 超时的体验不可接受。
+     */
+    private ?bool $osc52ReadOk = null;
+
+    /**
+     * pasteTick 在**无事件轮**里改了状态栏消息（超时降级）——bin 主循环空闲时不满足
+     * draw 条件（只看 gotOutput/gotSearch/gotAi/redraw），消息会永远不上屏。
+     * pasteTick 置位此标记，主循环 draw 一次后清除。
+     */
+    public bool $needsRedraw = false;
+
+    /** 粘贴目标（'editor'/'terminal'/'ai_input'），与 pasteSentAt 成对 */
     private ?string $pasteTarget = null;
 
     /**
@@ -2259,10 +2277,14 @@ class App
             return;
         }
         if ($e->kind === MouseEventKind::Down) {
-            // 右键 = 粘贴到当前焦点面板（VSCode 语义；终端聚焦时经 pasteText 进 pty）。
-            // 放在最前：右键不该清选区、不该触发聚焦/拖拽/双击计时。
+            // 右键**仅在终端内** = 粘贴（贴到 pty / runner 输入行）。其他面板的右键语义
+            // 预留给将来的上下文菜单，这里不消费（不清选区、不聚焦、不触发粘贴）。
             if ($e->button === MouseButton::Right) {
-                $this->requestPaste();
+                $tpos = new Position($e->column, $e->row);
+                if (isset($a['terminal']) && $a['terminal']->containsPosition($tpos)) {
+                    $this->focus('terminal');
+                    $this->requestPaste();
+                }
                 return;
             }
             // 任何新点击先清掉上一次文本选择高亮（选区在 Up 后保留显示，直到下次点击）。
@@ -2771,20 +2793,68 @@ class App
             return;
         }
 
-        // tty：发 OSC 52 查询，响应异步经 stdin 回传 → onClipboardRead
+        // 本会话已证实终端不响应 OSC 52 读取：跳过查询与 1.5s 等待，直接贴应用内剪贴板。
+        if ($this->osc52ReadOk === false) {
+            $text = $this->clip->peek();
+            if ($text !== '') {
+                $this->applyPaste($target, $text);
+                $this->message = $this->t('status.paste_fallback', ['n' => (string) mb_strlen($text)]);
+            } else {
+                $this->setMessage($this->t('status.paste_unsupported'));
+            }
+            return;
+        }
+
+        // tty：发 OSC 52 查询，响应异步经 stdin 回传 → onClipboardRead。
+        // ⚠️ 部分终端（Windows Terminal 默认关闭等）不支持 OSC 52 **读取**、永远不回复
+        // —— 调用方须周期性跑 pasteTick() 做超时降级（贴应用内剪贴板），否则"粘贴中"挂死。
+        // 首次超时后 osc52ReadOk 置 false，后续粘贴不再走这条慢路。
         $this->pasteTarget = $target;
+        $this->pasteSentAt = microtime(true);
         $this->clip->requestRead();
         $this->setMessage($this->t('status.paste_pending'));
+    }
+
+    /** OSC 52 读响应超时阈值（秒）：超过即认定终端不支持读取，降级贴应用内剪贴板 */
+    private const PASTE_TIMEOUT = 1.5;
+
+    /**
+     * 粘贴请求超时检查：主循环每轮调用。OSC 52 读请求超过 PASTE_TIMEOUT 无响应时，
+     * 降级为粘贴**应用内**剪贴板（本次会话内拖选/双击复制过的内容）——这覆盖了
+     * 「终端内拖选复制 → 右键粘贴」的主流用法；两者皆空则提示终端不支持。
+     */
+    public function pasteTick(): void
+    {
+        if ($this->pasteTarget === null || $this->pasteSentAt === null) {
+            return;
+        }
+        if (microtime(true) - $this->pasteSentAt < self::PASTE_TIMEOUT) {
+            return;
+        }
+        $target = $this->pasteTarget;
+        $this->pasteTarget = null;
+        $this->pasteSentAt = null;
+        $this->osc52ReadOk = false;   // 超时 = 终端不支持 OSC 52 读取，本会话后续粘贴直接走内存
+        $text = $this->clip->peek();
+        $this->needsRedraw = true;   // 无事件轮也要把降级提示/粘贴结果画出来
+        if ($text !== '') {
+            $this->applyPaste($target, $text);
+            $this->message = $this->t('status.paste_fallback', ['n' => (string) mb_strlen($text)]);
+        } else {
+            $this->setMessage($this->t('status.paste_unsupported'));
+        }
     }
 
     /** OSC 52 剪贴板响应回调：把内容插入到请求时记录的面板。 */
     public function onClipboardRead(string $text): void
     {
+        $this->osc52ReadOk = true;   // 收到过响应 = 终端支持读取，后续粘贴继续走 OSC 52
         if ($this->pasteTarget === null) {
             return;
         }
         $target = $this->pasteTarget;
         $this->pasteTarget = null;
+        $this->pasteSentAt = null;   // 与请求成对清除，避免超时降级重复粘贴
         $this->applyPaste($target, $text);
     }
 

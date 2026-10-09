@@ -63,6 +63,8 @@ return [
     'status.copied_msg' => 'Copied message',
     'status.pasted'      => 'Pasted {n} chars',
     'status.paste_pending' => 'Reading clipboard…',
+    'status.paste_fallback' => 'Terminal did not answer clipboard read; pasted in-app clipboard ({n} chars)',
+    'status.paste_unsupported' => 'Terminal does not support clipboard read, and in-app clipboard is empty',
 
     // AI 输入框提示
     'ai.input_hint'    => 'send ↵',
