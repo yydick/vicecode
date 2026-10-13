@@ -1178,6 +1178,13 @@ class App
      * 注意：返回的是缓存的那批 Area，调用方只读不写（php-tui 的 Area 属性并非 readonly，
      * 改了会污染后续帧）。
      */
+    /** CLI 目录参数：把侧栏资源管理器根目录切到指定路径（工作区）。
+     *  由入口 main() 在 `new App()` 之后、渲染之前调用；路径合法性由调用方保证。 */
+    public function setWorkspaceRoot(string $path): void
+    {
+        $this->sidebar->setRoot($path);
+    }
+
     public function areas(Area $vp): array
     {
         $this->lastVp = $vp; // attach 动作（按键/菜单路径）没有 vp 参数，记下最近视口
@@ -1982,6 +1989,21 @@ class App
             return; // 其余键一律吞掉：浮层是模态的
         }
 
+        // 右键粘贴：按点击位置选目标面板（终端/编辑器/AI 输入），与 Ctrl+V 同链路
+        // （OSC 52 异步读剪贴板 → applyPaste）。必须放在交互式 PTY 捕获分支之前：
+        // 捕获态下鼠标事件被吞掉（KeyToPty 不编码鼠标 → return），右键永远到不了
+        // handleMouse——而捕获态恰恰最需要右键粘贴（pasteText 即写入 shell 的 pty，
+        // 语义与 Ctrl+V 一致）。未命中可粘贴面板则继续走原鼠标分发（不吞右键）。
+        if ($event instanceof MouseEvent
+            && $event->kind === MouseEventKind::Down
+            && $event->button === MouseButton::Right) {
+            $pasteTarget = $this->pasteTargetAt($event->column, $event->row, $a);
+            if ($pasteTarget !== null) {
+                $this->requestPaste($pasteTarget);
+                return;
+            }
+        }
+
         // 终端默认就是交互式 pty：聚焦时敲第一个**可打印字符/回车**即自动进入捕获并把该键
         // 转发给 shell，用户不必先按 F2。
         //
@@ -2762,6 +2784,23 @@ class App
         $this->clip->copy($text);
     }
 
+    /** 右键粘贴的目标面板命中测试：按**点击位置**（而非当前焦点）选目标。
+     *  终端/编辑器/AI 区命中返回对应 target；侧栏/状态栏/菜单栏等不可粘贴区返回 null。 */
+    private function pasteTargetAt(int $col, int $row, array $a): ?string
+    {
+        foreach (['terminal' => 'terminal', 'editor' => 'editor', 'ai' => 'ai_input'] as $key => $target) {
+            $area = $a[$key] ?? null;
+            if (!$area instanceof Area) {
+                continue;
+            }
+            if ($col >= $area->position->x && $col < $area->position->x + $area->width
+                && $row >= $area->position->y && $row < $area->position->y + $area->height) {
+                return $target;
+            }
+        }
+        return null;
+    }
+
     /**
      * 请求粘贴（读剪贴板）：按当前焦点定插入目标，再读剪贴板内容插入。
      * - editor  → 编辑器缓冲区光标处
@@ -2770,11 +2809,13 @@ class App
      * - 其余（sidebar 等）→ 无目标，忽略
      * tty 环境走 OSC 52 异步读取（暂存 pasteTarget，响应回来再插入）；
      * 非 tty 降级为粘贴内存剪贴板（即时插入）。
+     *
+     * @param string|null $forceTarget 右键粘贴按点击位置强制指定目标（绕过当前焦点）
      */
-    public function requestPaste(): void
+    public function requestPaste(?string $forceTarget = null): void
     {
         $f = $this->focusPanel();
-        $target = match ($f) {
+        $target = $forceTarget ?? match ($f) {
             'editor' => 'editor',
             'terminal' => 'terminal',
             'ai_input', 'ai_stream' => 'ai_input',

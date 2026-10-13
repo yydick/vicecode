@@ -75,6 +75,12 @@ final class FileTree
         $this->roots = TreeNode::scan(rtrim($rootPath, DIRECTORY_SEPARATOR), 0);
     }
 
+    /** 切换根目录（CLI 目录参数指定工作区时用）：重扫该目录作为根节点列表。 */
+    public function setRoot(string $rootPath): void
+    {
+        $this->roots = TreeNode::scan(rtrim($rootPath, DIRECTORY_SEPARATOR), 0);
+    }
+
     /** 深度优先遍历，得到当前应展示的扁平节点（已展开目录才展开子级）。 @return TreeNode[] */
     public function visible(): array
     {

@@ -114,6 +114,15 @@ final class SidebarPanel
         return $this->tree;
     }
 
+    /** 切换工作区根目录（CLI 目录参数）：重建文件树并复位资源管理器浏览状态。
+     *  仅复位 explorer tab 的状态；git/search/plugins tab 与工作区无关，保持原样。 */
+    public function setRoot(string $path): void
+    {
+        $this->tree = new FileTree($path);
+        $this->offset = 0;
+        $this->hScroll = 0;
+    }
+
     public function tabLabel(): string
     {
         return $this->shell->t('sidebar.' . self::TABS[$this->tabIndex]);
