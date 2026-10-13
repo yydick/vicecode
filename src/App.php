@@ -112,6 +112,9 @@ class App
      */
     private const DOUBLE_CLICK_MS = 400;
 
+    /** 双击选词已直接复制过：紧跟的 Up 不再重复写剪贴板（本次选区 Down 时复位） */
+    private bool $selectCopied = false;
+
     /**
      * 分隔条命中容差（列/行）。
      * 0 = 仅精确命中分隔条所在的那一列/行才进入拖拽；面板内部（距边界 1 格内的
@@ -2400,8 +2403,10 @@ class App
             // 文本选择锚点：在编辑器内容区 / 终端区内按下左键即记锚点；随后若发生 Drag
             // 则拉出选区，Up 时复制。纯点击（无 Drag）在 finishSelect 里清掉，不影响聚焦。
             if (isset($a['editor']) && $this->editor->isSelectableAt($pos, $a['editor'])) {
+                $this->selectCopied = false;
                 $this->select = ['panel' => 'editor', 'aRow' => $e->row, 'aCol' => $e->column, 'bRow' => $e->row, 'bCol' => $e->column];
             } elseif (isset($a['terminal']) && $a['terminal']->containsPosition($pos)) {
+                $this->selectCopied = false;
                 $this->select = ['panel' => 'terminal', 'aRow' => $e->row, 'aCol' => $e->column, 'bRow' => $e->row, 'bCol' => $e->column];
             }
             $this->handleClick($e, $a);
@@ -2450,6 +2455,7 @@ class App
         $this->select = ['panel' => 'terminal', 'aRow' => $row, 'aCol' => $x0 + $start, 'bRow' => $row, 'bCol' => $x0 + $end];
         $text = $this->terminal->getTextRect($t, $row, $x0 + $start, $row, $x0 + $end);
         $this->clip->copy($text);
+        $this->selectCopied = true;   // 紧跟的 Up 会被 finishSelect 跳过（不重复写剪贴板）
         $this->message = $this->t('status.copied', ['n' => (string) mb_strlen($text)]);
     }
 
@@ -2623,6 +2629,12 @@ class App
     private function finishSelect(array $a): void
     {
         $s = $this->select;
+        if ($this->selectCopied) {
+            // 双击选词已直接复制过（见 doubleClickSelectWord）：本次 Up 不重复写剪贴板，
+            // 选区高亮保留到下次 Down 复位。
+            $this->selectCopied = false;
+            return;
+        }
         if ($s['aRow'] === $s['bRow'] && $s['aCol'] === $s['bCol']) {
             $this->select = null;
             return;
