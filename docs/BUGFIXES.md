@@ -523,6 +523,13 @@
 - **防回归**：`tests/term_default_unit.php` 的「runner 回落态打字」「shell 退出后按键落输入行」两段（本次跑批正是它们抓住的）。
 - **教训**：**大段搬代码时 use 必须与代码同搬同查**；`php -l` 只查语法，不查类引用——只有真实执行路径能暴露。跨类搬运后应跑一次覆盖各模式分支的单测，而不是只测默认路径。
 
+#### D14. 新数组键访问缺 `??` 兜底 → bin 严格 error handler 下 App 构造即崩，13 个 pty 测试连环挂 `[本轮]`
+- **现象**：给 `ProviderSpec` 加 `key_optional`（本地 Ollama 免密钥）后，全量跑批 **13 个 pty 端到端全挂**（menu/offpeak/plugin/provider_caps……横跨与 AI 无关的功能面），但对应 headless 单测**全绿**。
+- **根因**：`ProviderRegistry::spec()` 里新键写成 `$c['key_optional'] === true` —— **老配置（含全部内置 provider 与隔离空配置）都没有这个键** → `Undefined array key` warning → bin 的**严格 error handler 把 warning 转成 ErrorException** → `App` 构造（注册解析）阶段即崩，主循环根本没起来。headless 单测不炸是因为**它没有装严格 handler**（warning 静默）——同一份代码，两个执行环境的报错行为不同。
+- **修复**：`($c['key_optional'] ?? null) === true`。
+- **防回归**：13 个 pty 端到端本身就是防回归（本次正是跑批抓住的）；另以「严格 handler 下 spec('openai') 不炸」做了一致性校验。
+- **教训**：**「配置数组里读新键」必须 `??` 兜底**——本项目 bin 装了把 warning 转 ErrorException 的严格 handler，任何未兜底的键访问都是**生产级 Fatal**；而 headless 单测不装 handler，同一行代码在单测里静默通过 —— **单测全绿 ≠ bin 能起来**。新增 provider/配置字段时逐个检查键访问写法，与 D13（use 缺失）同属「单测与真实执行环境行为不一致」的盲区。
+
 ---
 
 ### E. 交互回归

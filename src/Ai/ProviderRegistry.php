@@ -388,6 +388,8 @@ final class ProviderRegistry
             capabilities: $capsOf[$chosen] ?? $defaultCaps,
             protocol: self::parseProtocol($c[self::PROTOCOL_KEY] ?? null),
             maxTokens: self::parseMaxTokens($c[self::MAX_TOKENS_KEY] ?? null),
+            keyOptional: ($c['key_optional'] ?? null) === true,   // ?? 兜底：老配置无此键，bin 的严格
+                                                                  // error handler 会把 warning 转异常
         );
     }
 

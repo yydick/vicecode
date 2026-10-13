@@ -52,6 +52,8 @@ final class ProviderSpec
      * @param string $protocol 协议标识（`PROTOCOL_*`）。未知串由 ProviderRegistry 归一为 `openai`，
      *                         所以这里只会是已知值。
      * @param int $maxTokens 输出上限（Anthropic 必填；OpenAI 兼容侧不使用）
+     * @param bool $keyOptional 本地端点（Ollama / LM Studio / vLLM）无需密钥：置 true 后
+     *                          hasKey() 恒真、缺 env 不再阻断发送（配置里写 `key_optional => true`）
      */
     public function __construct(
         public readonly string $id,
@@ -64,11 +66,15 @@ final class ProviderSpec
         public readonly array $capabilities = [],
         public readonly string $protocol = self::PROTOCOL_OPENAI,
         public readonly int $maxTokens = self::DEFAULT_MAX_TOKENS,
+        public readonly bool $keyOptional = false,
     ) {
     }
 
     public function hasKey(): bool
     {
+        if ($this->keyOptional) {
+            return true;   // 本地端点无需密钥：缺 env 不阻断
+        }
         return $this->apiKey !== null && trim($this->apiKey) !== '';
     }
 

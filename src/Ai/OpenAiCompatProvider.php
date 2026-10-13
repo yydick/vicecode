@@ -42,8 +42,11 @@ final class OpenAiCompatProvider implements ProviderInterface
             $body = '{"model":"","messages":[],"stream":true}';
         }
 
-        // key 只进这个临时文件，绝不进 argv（`ps` 对同机其他用户可见，见 trait 注释）
-        $headers = "Authorization: Bearer " . ($spec->apiKey ?? '') . "\n"
+        // key 只进这个临时文件，绝不进 argv（`ps` 对同机其他用户可见，见 trait 注释）。
+        // 本地端点（keyOptional，如 Ollama）无 key：不发空的 Authorization 头。
+        $headers = ($spec->apiKey !== null && trim($spec->apiKey) !== ''
+                ? "Authorization: Bearer " . $spec->apiKey . "\n"
+                : '')
             . "Content-Type: application/json\n"
             . "Accept: text/event-stream\n";
 

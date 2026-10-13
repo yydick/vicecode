@@ -33,6 +33,24 @@ final class ChatModel
      * 因此是自动选档的两个来源之一（另一个是输入框里的 `/前缀`）。
      */
     public const QUICK_ACTION_KINDS = ['explain', 'comment', 'refactor', 'unittest'];
+
+    /**
+     * Agent 模式（带 tools）请求的**发送时前插**系统提示。
+     *
+     * 为什么必须存在：tools 协议只声明「能调什么」，不承诺模型「会去调」——小模型
+     * （gemma3-tools:4b 级）在中文含糊指令下实测零触发。要点：英文写指令（中小模型对
+     * 英文 system 遵循显著更好）、只约束与工具有关的行为（其余人设不越俎代庖）、
+     * 要求跟随用户语言（工具结果与指令是英文，不约束的话回复会被带成英文）。
+     * 只读工具（list_files/read_file）没有副作用，无需写操作纪律——扩写操作工具时
+     * 这里要同步加安全条款（先说明再动手/危险操作确认）。
+     */
+    private const AGENT_SYSTEM_PROMPT =
+        "You are a coding assistant inside the user's project workspace.\n"
+        . "You have read-only tools: list_files (list a directory), read_file (read a text file).\n"
+        . "Rules:\n"
+        . "1. If the user's request needs file or directory information, call the tools FIRST; never guess file names or contents.\n"
+        . "2. After a tool returns, answer based ONLY on its result.\n"
+        . "3. Reply in the same language the user writes in.\n";
     /** @var array<int,array{role:string,content:string}> 完整对话历史（多轮上下文就是这个） */
     private array $messages = [];
 
@@ -762,8 +780,15 @@ final class ChatModel
         // 又给了模型"回一个 tool_use 当摘要"的机会（那会污染摘要区）。`compacting` 在
         // beginCompact() 里已置位，此处据此关掉。
         $tools = (!$this->compacting && $spec->supportsTools()) ? AiTools::toolDefs() : null;
+        // Agent 模式注入系统提示：tools 协议只定义了「能调什么」，**没告诉模型「该调」**——
+        // 小模型（4b 级）拿到 tools 不会主动用（实测中文含糊指令零触发），必须靠 system
+        // 明确行为纪律。⚠️ 只在**发送时临时前插**，不写进 $this->messages 持久历史：
+        // 每轮请求重复携带（服务端无状态、幂等），历史里重复的 system 反而干扰压缩/展示。
+        $messages = $tools !== null
+            ? [['role' => 'system', 'content' => self::AGENT_SYSTEM_PROMPT], ...$this->messages]
+            : $this->messages;
         $provider = $this->providerFor($spec);
-        $cmd = $provider->buildCommand($spec, $this->messages, ProviderInterface::DEFAULT_TIMEOUT, $tools);
+        $cmd = $provider->buildCommand($spec, $messages, ProviderInterface::DEFAULT_TIMEOUT, $tools);
         if (!$this->runner->start($cmd, null)) {
             $this->streaming = false;
             $this->error = $this->shell->t('ai.error', ['msg' => 'spawn failed']);
