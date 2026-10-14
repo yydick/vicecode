@@ -27,6 +27,9 @@ final class InputParser
     /** @var ?\Closure(string):void */
     private ?\Closure $clipboardHandler = null;
 
+    /** 本批 feed 的原始字节以 \x1b 结尾（孤立 ESC 挂在 parser 里待续） */
+    private bool $trailingEsc = false;
+
     public function __construct()
     {
         $this->parser = EventParser::new();
@@ -47,12 +50,16 @@ final class InputParser
         // 必须让 EventParser 在内部 buffer 里暂存不完整的序列，等后续字节拼齐再解析；
         // 否则孤 \e 会被立刻当成 Esc 冲掉、后面的 [5~ 退化成若干字符键 —— 方向键 / PageUp/Down 全失灵。
         // 已完整结束的序列（~/$/字母等终结符）无论 more 如何都会立即吐出，仅孤 \e 会等下一字节。
+        $len0 = strlen($bytes);
         $this->oscBuf .= $bytes;
 
         // 畸形序列保护：超出 1MiB 还拼不出完整 OSC 52，直接丢弃（避免无限累积撑爆内存）
         if (strlen($this->oscBuf) > (1 << 20)) {
             $this->oscBuf = '';
         }
+
+        // 追踪「本批以孤立 \x1b 结尾」：flush() 补发 Esc 的依据（见 flush 注释）。
+        $this->trailingEsc = $len0 > 0 && $bytes[strlen($bytes) - 1] === "\x1b";
 
         $pos = 0;
         $len = strlen($this->oscBuf);
@@ -122,19 +129,69 @@ final class InputParser
             $this->oscBuf = '';
         }
 
-        return $this->parser->drain();
+        return $this->filterMouseFragment($this->parser->drain());
+    }
+
+    /**
+     * 过滤 SGR 鼠标序列残段被 EventParser 拆成的垃圾字符事件。
+     * 序列字节丢失（`\x1b[` 缺 `[` 等）时 EventParser 把 `\x1b` 丢弃、余下
+     * `<35;80;5M` 逐字符 Emit 成 CharKeyEvent → 打进编辑器或转发 shell 回显，
+     * 即「空白区域出现字符」（2026-10-13 用户实测 + pty 复现）。
+     * 特征：Char('<') 开头、后跟 ≥2 个 [0-9;] 字符、以 'M'/'m' 收尾——正常编辑
+     * 输入几乎不可能连续命中，而鼠标残段恰恰如此，整段丢弃。
+     */
+    private function filterMouseFragment(array $events): array
+    {
+        $n = count($events);
+        for ($i = 0; $i < $n - 2; $i++) {
+            $e = $events[$i];
+            if (!$e instanceof \PhpTui\Term\Event\CharKeyEvent || $e->char !== '<') {
+                continue;
+            }
+            $j = $i + 1;
+            $digitSemicolon = 0;
+            while ($j < $n
+                && $events[$j] instanceof \PhpTui\Term\Event\CharKeyEvent
+                && preg_match('/^[0-9;]$/', $events[$j]->char) === 1) {
+                $digitSemicolon++;
+                $j++;
+            }
+            if ($digitSemicolon >= 2
+                && $j < $n
+                && $events[$j] instanceof \PhpTui\Term\Event\CharKeyEvent
+                && ($events[$j]->char === 'M' || $events[$j]->char === 'm')) {
+                // 残段 [i..j] 整段丢弃
+                array_splice($events, $i, $j - $i + 1);
+                $n = count($events);
+                $i--;
+            }
+        }
+
+        return $events;
     }
 
     /**
      * 空闲超时冲刷：把已缓冲的孤立 ESC（`\x1b`）等「等待更多字节」的不完整序列按结束求值，
      * 使其被 Emit 成真正的 Esc 键。读键协程在 waitEvent 空闲超时（无新输入）时调用——
      * 否则真实 pty 下「单独按 Esc」会一直挂起，浮层/菜单无法靠 Esc 关闭。
+     *
+     * ⚠️ php-tui EventParser::advance('') 是空操作（str_split('') 为空数组，
+     * parseEsc 的 !$inputAvailable 分支只在「下一字节到来」时才被走到），故这里的
+     * Esc 事件必须自己补：仅当本批 feed 以孤立 \x1b 结尾（parser 内挂着一个待续
+     * ESC）时补发 Esc。误报（parser 因 ParseError 已清空 buffer）只会多一个无害
+     * 的 Esc（关浮层）。
      * @return Event[]
      */
     public function flush(): array
     {
         $this->parser->advance('', false);
-        return $this->parser->drain();
+        $out = $this->parser->drain();
+        if ($this->trailingEsc) {
+            $this->trailingEsc = false;
+            $out[] = \PhpTui\Term\CodedKeyEvent::new(\PhpTui\Term\KeyCode::Esc);
+        }
+
+        return $out;
     }
 
     /** 解析一段完整 OSC 52 序列（含终结符），base64 解码后回调；`?` 查询回显忽略。 */
